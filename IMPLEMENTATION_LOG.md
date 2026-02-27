@@ -3679,3 +3679,31 @@ Verified against CMS unified source (`WmAgentScripts`):
 
 - `python scripts/fetch-workflow-info.py --from-file /mnt/shared/work/wms2_real_test/request.json` — output matches NPS request.json fields
 - All 4 original workflows + BPH fetched live from ReqMgr2, data cross-checked against IMPLEMENTATION_LOG and `tests/matrix/catalog.py`
+
+---
+
+## `--test-fraction` Flag for Fast CMSSW Testing
+
+**Date**: 2026-02-27
+
+### Motivation
+
+Running full production-scale CMSSW jobs during development takes hours. We want to test the complete DAG structure (correct number of jobs, merge groups, work units) with real CMSSW execution but at a fraction of the event count. A `--test-fraction 0.01` flag means each job processes 1% of its nominal events.
+
+### Design
+
+The fraction is applied at the lowest level — inside the proc wrapper script, right after argument parsing — so it affects all sandbox modes (cmssw, synthetic, simulator, pilot, parallel, pipeline) uniformly. The DAG structure stays identical to production; only `EVENTS_PER_JOB` is reduced. Since step 0 uses `EVENTS_PER_JOB` and all downstream steps use `-1` (all input from previous step), reducing step 0's count automatically cascades.
+
+Flow: `CLI --test-fraction` → `config_data["test_fraction"]` → `resource_params["test_fraction"]` → proc submit file `--test-fraction N` → `wms2_proc.sh` reduces `EVENTS_PER_JOB` to `max(1, int(EVENTS_PER_JOB * TEST_FRACTION))`.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/wms2/cli.py` | Added `--test-fraction` argument, warning banner, pass via `config_data` |
+| `src/wms2/core/dag_planner.py` | Read `test_fraction` into `resource_params`; append `--test-fraction` to proc submit args; add parsing + application in embedded `wms2_proc.sh` |
+
+### Verification
+
+- All 440 unit tests pass
+- Argument flows through: CLI → config_data → resource_params → proc_args → proc wrapper
