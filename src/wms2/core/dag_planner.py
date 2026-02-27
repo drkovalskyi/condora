@@ -1118,70 +1118,28 @@ lfn_to_xrootd() {
     fi
 }
 
-# ── Host OS detection ─────────────────────────────────────────
-detect_host_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        case "$VERSION_ID" in
-            8*) echo "el8" ;;
-            9*) echo "el9" ;;
-            *)  echo "unknown" ;;
-        esac
-    else
-        echo "unknown"
-    fi
-}
+# ── cmssw-env delegation ──────────────────────────────────────
+# CMS production wrapper: handles container resolution, bind mounts,
+# OS normalization, locale, architecture detection, and runtime selection.
+# See https://github.com/cms-sw/cmssw/blob/master/Utilities/ReleaseScripts/scripts/cmssw-env
+CMSSW_ENV="/cvmfs/cms.cern.ch/common/cmssw-env"
 
-# ── Container resolution ──────────────────────────────────────
-resolve_container() {
+cmssw_env_exec() {
+    # Usage: cmssw_env_exec <scram_arch> [extra apptainer flags...] -- <command> [args...]
     local scram_arch="$1"
+    shift
     local arch_os="${scram_arch%%_*}"   # "el8" from "el8_amd64_gcc10"
-    local HOST_OS
-    HOST_OS=$(detect_host_os)
-
-    if [[ "$arch_os" == "$HOST_OS" ]]; then
-        echo ""  # native execution
-        return
+    if [[ -x "$CMSSW_ENV" ]]; then
+        "$CMSSW_ENV" --cmsos "$arch_os" -- "$@"
+    else
+        echo "ERROR: cmssw-env not found at $CMSSW_ENV (is CVMFS mounted?)" >&2
+        return 1
     fi
-
-    # Find container image on CVMFS
-    for variant in "x86_64" "amd64"; do
-        local img="/cvmfs/unpacked.cern.ch/registry.hub.docker.com/cmssw/${arch_os}:${variant}"
-        if [[ -d "$img" ]]; then
-            echo "$img"
-            return
-        fi
-    done
-    echo "ERROR: No container for $scram_arch (need $arch_os, host is $HOST_OS)" >&2
-    return 1
 }
 
-# ── CMSSW step execution: native ──────────────────────────────
-CURRENT_CMSSW=""
-CURRENT_ARCH=""
-
-run_step_native() {
+# ── CMSSW step execution via cmssw-env ─────────────────────────
+run_step() {
     local cmssw="$1" arch="$2" cmsrun_args="$3"
-    if [[ "$cmssw" != "$CURRENT_CMSSW" || "$arch" != "$CURRENT_ARCH" ]]; then
-        export SCRAM_ARCH="$arch"
-        source /cvmfs/cms.cern.ch/cmsset_default.sh
-        if [[ ! -d "$cmssw/src" ]]; then
-            scramv1 project CMSSW "$cmssw"
-        fi
-        cd "$cmssw/src" && eval $(scramv1 runtime -sh) && cd "$WORK_DIR"
-        # CMSSW >=14.x reads SITECONFIG_PATH; <14.x reads CMS_PATH
-        local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
-        export SITECONFIG_PATH="$SITE_CFG"
-        export CMS_PATH="$SITE_CFG"
-        CURRENT_CMSSW="$cmssw"
-        CURRENT_ARCH="$arch"
-    fi
-    cmsRun $cmsrun_args
-}
-
-# ── CMSSW step execution: apptainer ───────────────────────────
-run_step_apptainer() {
-    local container="$1" cmssw="$2" arch="$3" cmsrun_args="$4"
 
     # Resolve siteconfig path: default to /opt/cms/siteconf if SITECONFIG_PATH unset
     local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
@@ -1222,13 +1180,7 @@ cmsRun $cmsrun_args
 STEPEOF
     chmod +x _step_runner.sh
 
-    # Bind paths: CVMFS, working dir, temp, and optional site config / credentials
-    local BIND="/cvmfs,/tmp,/dev/shm,$(pwd)"
-    [[ -d /mnt/creds ]]        && BIND="$BIND,/mnt/creds"
-    [[ -d /mnt/shared ]]       && BIND="$BIND,/mnt/shared"
-    [[ -d "$SITE_CFG" ]]       && BIND="$BIND,$SITE_CFG"
-    export APPTAINER_BINDPATH="$BIND"
-    apptainer exec --no-home "$container" bash "$(pwd)/_step_runner.sh"
+    cmssw_env_exec "$arch" bash "$(pwd)/_step_runner.sh"
 }
 
 # ── Stage-out to unmerged site storage ─────────────────────────
@@ -1382,33 +1334,18 @@ run_step0_parallel() {
 
     echo "  Parallel execution: $n_par instances, $events_per_inst events each"
 
-    # Resolve container once
-    local CONTAINER
-    CONTAINER=$(resolve_container "$arch")
+    # Prepare siteconf for container access
+    local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
+    mkdir -p "$WORK_DIR/_siteconf/JobConfig"
+    cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/JobConfig/" 2>/dev/null || true
+    [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/"
+    [[ -f "$SITE_CFG/storage.json" ]] && cp "$SITE_CFG/storage.json" "$WORK_DIR/_siteconf/"
+    mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
+    cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
+    [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
 
-    # Setup CMSSW project once (before forking instances)
-    if [[ -z "$CONTAINER" ]]; then
-        # Native: setup env in current shell
-        export SCRAM_ARCH="$arch"
-        source /cvmfs/cms.cern.ch/cmsset_default.sh
-        if [[ ! -d "$WORK_DIR/$cmssw/src" ]]; then
-            cd "$WORK_DIR" && scramv1 project CMSSW "$cmssw"
-        fi
-        cd "$WORK_DIR/$cmssw/src" && eval $(scramv1 runtime -sh) && cd "$WORK_DIR"
-        export SITECONFIG_PATH="${SITECONFIG_PATH:-/opt/cms/siteconf}"
-        export CMS_PATH="$SITECONFIG_PATH"
-    else
-        # Apptainer: prepare siteconf and create CMSSW project via container
-        local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
-        mkdir -p "$WORK_DIR/_siteconf/JobConfig"
-        cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/JobConfig/" 2>/dev/null || true
-        [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/"
-        [[ -f "$SITE_CFG/storage.json" ]] && cp "$SITE_CFG/storage.json" "$WORK_DIR/_siteconf/"
-        mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
-        cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
-        [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
-
-        cat > "$WORK_DIR/_setup_cmssw.sh" <<SETUPEOF
+    # Setup CMSSW project once (before forking instances) via cmssw-env
+    cat > "$WORK_DIR/_setup_cmssw.sh" <<SETUPEOF
 #!/bin/bash
 set -e
 export SITECONFIG_PATH=$WORK_DIR/_siteconf
@@ -1420,15 +1357,9 @@ if [[ ! -d $cmssw/src ]]; then
     scramv1 project CMSSW $cmssw
 fi
 SETUPEOF
-        chmod +x "$WORK_DIR/_setup_cmssw.sh"
-        local BIND="/cvmfs,/tmp,/dev/shm,$WORK_DIR"
-        [[ -d /mnt/creds ]] && BIND="$BIND,/mnt/creds"
-        [[ -d /mnt/shared ]] && BIND="$BIND,/mnt/shared"
-        [[ -d "$SITE_CFG" ]] && BIND="$BIND,$SITE_CFG"
-        export APPTAINER_BINDPATH="$BIND"
-        echo "  Setting up CMSSW project via apptainer..."
-        apptainer exec --no-home "$CONTAINER" bash "$WORK_DIR/_setup_cmssw.sh"
-    fi
+    chmod +x "$WORK_DIR/_setup_cmssw.sh"
+    echo "  Setting up CMSSW project via cmssw-env..."
+    cmssw_env_exec "$arch" bash "$WORK_DIR/_setup_cmssw.sh"
 
     # Instance base directory: tmpfs (/dev/shm) avoids virtiofs/FUSE
     # file descriptor limits during gridpack extraction (29K+ files each).
@@ -1467,11 +1398,8 @@ SETUPEOF
         # Inject per-instance params into copied PSet
         inject_pset_parallel "$idir/$pset_base" "$inst_first" "$inst_events" "$nthreads"
 
-        # Launch instance
-        if [[ -z "$CONTAINER" ]]; then
-            ( cd "$idir" && cmsRun -j report_step1.xml "$pset_base" ) &
-        else
-            cat > "$idir/_step_runner.sh" <<INSTEOF
+        # Launch instance via cmssw-env
+        cat > "$idir/_step_runner.sh" <<INSTEOF
 #!/bin/bash
 set -e
 export SITECONFIG_PATH=$WORK_DIR/_siteconf
@@ -1488,9 +1416,8 @@ source /cvmfs/cms.cern.ch/cmsset_default.sh
 cd $idir/$cmssw/src && eval \$(scramv1 runtime -sh) && cd $idir
 cmsRun -j report_step1.xml $pset_base
 INSTEOF
-            chmod +x "$idir/_step_runner.sh"
-            ( apptainer exec --no-home "$CONTAINER" bash "$idir/_step_runner.sh" ) &
-        fi
+        chmod +x "$idir/_step_runner.sh"
+        ( cmssw_env_exec "$arch" bash "$idir/_step_runner.sh" ) &
         pids+=($!)
         echo "  Instance $inst: pid=${pids[-1]} firstEvent=$inst_first maxEvents=$inst_events"
     done
@@ -1559,42 +1486,28 @@ run_all_steps_pipeline() {
         step_nthreads+=("$(echo "$sj" | python3 -c "import sys,json; print(json.load(sys.stdin).get('multicore',1))")")
     done
 
-    # Setup CMSSW project once (first step's version — all steps may share or re-setup)
-    local first_cmssw="${step_cmssw[0]}"
-    local first_arch="${step_arch[0]}"
-    local CONTAINER
-    CONTAINER=$(resolve_container "$first_arch")
+    # Prepare siteconf for container access
+    local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
+    mkdir -p "$WORK_DIR/_siteconf/JobConfig"
+    cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/JobConfig/" 2>/dev/null || true
+    [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/"
+    [[ -f "$SITE_CFG/storage.json" ]] && cp "$SITE_CFG/storage.json" "$WORK_DIR/_siteconf/"
+    mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
+    cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
+    [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
 
-    if [[ -z "$CONTAINER" ]]; then
-        export SCRAM_ARCH="$first_arch"
-        source /cvmfs/cms.cern.ch/cmsset_default.sh
-        if [[ ! -d "$WORK_DIR/$first_cmssw/src" ]]; then
-            cd "$WORK_DIR" && scramv1 project CMSSW "$first_cmssw"
-        fi
-        export SITECONFIG_PATH="${SITECONFIG_PATH:-/opt/cms/siteconf}"
-        export CMS_PATH="$SITECONFIG_PATH"
-    else
-        local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
-        mkdir -p "$WORK_DIR/_siteconf/JobConfig"
-        cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/JobConfig/" 2>/dev/null || true
-        [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/"
-        [[ -f "$SITE_CFG/storage.json" ]] && cp "$SITE_CFG/storage.json" "$WORK_DIR/_siteconf/"
-        mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
-        cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
-        [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
-
-        # Setup all unique CMSSW versions
-        local setup_versions=()
-        for si in $(seq 0 $((NUM_STEPS - 1))); do
-            local ver="${step_cmssw[$si]}"
-            local arch="${step_arch[$si]}"
-            local already=0
-            for sv in "${setup_versions[@]}"; do
-                [[ "$sv" == "$ver" ]] && already=1
-            done
-            if [[ $already -eq 0 ]]; then
-                setup_versions+=("$ver")
-                cat > "$WORK_DIR/_setup_cmssw_${ver}.sh" <<SETUPEOF
+    # Setup all unique CMSSW versions via cmssw-env
+    local setup_versions=()
+    for si in $(seq 0 $((NUM_STEPS - 1))); do
+        local ver="${step_cmssw[$si]}"
+        local arch="${step_arch[$si]}"
+        local already=0
+        for sv in "${setup_versions[@]}"; do
+            [[ "$sv" == "$ver" ]] && already=1
+        done
+        if [[ $already -eq 0 ]]; then
+            setup_versions+=("$ver")
+            cat > "$WORK_DIR/_setup_cmssw_${ver}.sh" <<SETUPEOF
 #!/bin/bash
 set -e
 export SITECONFIG_PATH=$WORK_DIR/_siteconf
@@ -1606,17 +1519,11 @@ if [[ ! -d $ver/src ]]; then
     scramv1 project CMSSW $ver
 fi
 SETUPEOF
-                chmod +x "$WORK_DIR/_setup_cmssw_${ver}.sh"
-                local BIND="/cvmfs,/tmp,$WORK_DIR"
-                [[ -d /mnt/creds ]] && BIND="$BIND,/mnt/creds"
-                [[ -d /mnt/shared ]] && BIND="$BIND,/mnt/shared"
-                [[ -d "$SITE_CFG" ]] && BIND="$BIND,$SITE_CFG"
-                export APPTAINER_BINDPATH="$BIND"
-                echo "  Setting up CMSSW $ver via apptainer..."
-                apptainer exec --no-home "$CONTAINER" bash "$WORK_DIR/_setup_cmssw_${ver}.sh"
-            fi
-        done
-    fi
+            chmod +x "$WORK_DIR/_setup_cmssw_${ver}.sh"
+            echo "  Setting up CMSSW $ver via cmssw-env..."
+            cmssw_env_exec "$arch" bash "$WORK_DIR/_setup_cmssw_${ver}.sh"
+        fi
+    done
 
     # Fork N pipelines
     local pids=()
@@ -1711,16 +1618,11 @@ with open(pset, 'a') as f:
 
                 # Execute cmsRun
                 local CMSRUN_ARGS="-j report_step${step_num}.xml $pset_file"
-                local step_container
-                step_container=$(resolve_container "$arch")
                 local STEP_START
                 STEP_START=$(date +%s)
 
-                if [[ -z "$step_container" ]]; then
-                    cd "$pdir/$cmssw/src" && eval $(scramv1 runtime -sh) && cd "$pdir"
-                    cmsRun $CMSRUN_ARGS
-                else
-                    cat > "$pdir/_pipe${pipe}_step${step_num}.sh" <<PIPEEOF
+                # Execute via cmssw-env
+                cat > "$pdir/_pipe${pipe}_step${step_num}.sh" <<PIPEEOF
 #!/bin/bash
 set -e
 export SITECONFIG_PATH=$WORK_DIR/_siteconf
@@ -1737,9 +1639,8 @@ source /cvmfs/cms.cern.ch/cmsset_default.sh
 cd $pdir/$cmssw/src && eval \$(scramv1 runtime -sh) && cd $pdir
 cmsRun $CMSRUN_ARGS
 PIPEEOF
-                    chmod +x "$pdir/_pipe${pipe}_step${step_num}.sh"
-                    apptainer exec --no-home "$step_container" bash "$pdir/_pipe${pipe}_step${step_num}.sh"
-                fi
+                chmod +x "$pdir/_pipe${pipe}_step${step_num}.sh"
+                cmssw_env_exec "$arch" bash "$pdir/_pipe${pipe}_step${step_num}.sh"
 
                 local STEP_RC=$?
                 local STEP_END
@@ -2054,25 +1955,19 @@ except Exception:
             CMSRUN_ARGS="-j report_step${step_num}.xml $STEP0_TMPFS/$(basename $PSET_PATH)"
         fi
 
-        # Execute: determine if we need apptainer
-        CONTAINER=$(resolve_container "$STEP_ARCH")
+        # Execute via cmssw-env (handles container resolution + bind mounts)
         if [[ -n "$STEP0_TMPFS" ]]; then
             # Run from tmpfs directory — gridpack extracts to CWD
             ORIG_DIR="$PWD"
             cd "$STEP0_TMPFS"
             # Update FJR path to be absolute
             CMSRUN_ARGS="-j ${ORIG_DIR}/report_step${step_num}.xml $(basename $PSET_PATH)"
-            # Override WORK_DIR so run_step_* functions cd back to tmpfs
-            # after CMSSW setup (they do `cd $WORK_DIR` internally)
+            # Override WORK_DIR so run_step cd's back to tmpfs
+            # after CMSSW setup (it does `cd $WORK_DIR` internally)
             SAVED_WORK_DIR="$WORK_DIR"
             WORK_DIR="$STEP0_TMPFS"
-            if [[ -z "$CONTAINER" ]]; then
-                echo "  execution: native (tmpfs CWD)"
-                run_step_native "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS"
-            else
-                echo "  execution: apptainer (tmpfs CWD, $CONTAINER)"
-                run_step_apptainer "$CONTAINER" "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS"
-            fi
+            echo "  execution: cmssw-env (tmpfs CWD)"
+            run_step "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS"
             STEP_RC=$?
             WORK_DIR="$SAVED_WORK_DIR"
             # Measure tmpfs usage before cleanup
@@ -2086,13 +1981,8 @@ except Exception:
             rm -rf "$STEP0_TMPFS"
             echo "  Cleaned tmpfs: $STEP0_TMPFS"
         else
-            if [[ -z "$CONTAINER" ]]; then
-                echo "  execution: native (host OS matches $STEP_ARCH)"
-                run_step_native "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS"
-            else
-                echo "  execution: apptainer ($CONTAINER)"
-                run_step_apptainer "$CONTAINER" "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS"
-            fi
+            echo "  execution: cmssw-env ($STEP_ARCH)"
+            run_step "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS"
             STEP_RC=$?
         fi
 
@@ -2709,33 +2599,20 @@ def lfn_to_pfn(pfn_prefix, lfn):
     return os.path.join(pfn_prefix, lfn.lstrip("/"))
 
 
-def detect_host_os():
-    """Detect host OS major version (el8, el9, etc.)."""
-    try:
-        with open("/etc/os-release") as f:
-            for line in f:
-                if line.startswith("VERSION_ID="):
-                    ver = line.strip().split("=")[1].strip('"').strip("'")
-                    major = ver.split(".")[0]
-                    return f"el{major}"
-    except Exception:
-        pass
-    return "unknown"
+CMSSW_ENV_PATH = "/cvmfs/cms.cern.ch/common/cmssw-env"
 
 
-def resolve_container(scram_arch):
-    """Find apptainer container for cross-OS execution. Returns path or empty string."""
+def cmssw_env_cmd(scram_arch, inner_cmd):
+    """Build command list to run inner_cmd via cmssw-env.
+
+    Returns a list suitable for subprocess.run().
+    scram_arch may be a string or list (first element used).
+    inner_cmd is a list of strings (the command to run inside the container).
+    """
     if isinstance(scram_arch, list):
         scram_arch = scram_arch[0] if scram_arch else ""
     arch_os = scram_arch.split("_")[0]
-    host_os = detect_host_os()
-    if arch_os == host_os:
-        return ""
-    for variant in ("x86_64", "amd64"):
-        img = f"/cvmfs/unpacked.cern.ch/registry.hub.docker.com/cmssw/{arch_os}:{variant}"
-        if os.path.isdir(img):
-            return img
-    return ""
+    return [CMSSW_ENV_PATH, "--cmsos", arch_os, "--"] + list(inner_cmd)
 
 
 def batch_by_size(files, max_size):
@@ -2778,50 +2655,54 @@ def write_merge_pset(pset_path, input_files, output_file, is_nano=False, is_dqmi
         fh.write("\\n".join(lines) + "\\n")
 
 
+def _prepare_siteconf(work_dir):
+    """Copy site-local-config into work_dir/_siteconf for container access."""
+    site_cfg = os.environ.get("SITECONFIG_PATH", "/opt/cms/siteconf")
+    # Layout for SITECONFIG_PATH (CMSSW >=14.x)
+    local_siteconf = os.path.join(work_dir, "_siteconf", "JobConfig")
+    os.makedirs(local_siteconf, exist_ok=True)
+    try:
+        shutil.copy2(
+            os.path.join(site_cfg, "JobConfig", "site-local-config.xml"),
+            local_siteconf,
+        )
+    except Exception:
+        pass
+    phedex_src = os.path.join(site_cfg, "PhEDEx")
+    if os.path.isdir(phedex_src):
+        shutil.copytree(phedex_src, os.path.join(work_dir, "_siteconf", "PhEDEx"),
+                        dirs_exist_ok=True)
+    storage_json = os.path.join(site_cfg, "storage.json")
+    if os.path.isfile(storage_json):
+        shutil.copy2(storage_json, os.path.join(work_dir, "_siteconf"))
+    # Layout for CMS_PATH (CMSSW <14.x): SITECONF/local/
+    local_cms_jobconfig = os.path.join(
+        work_dir, "_siteconf", "SITECONF", "local", "JobConfig"
+    )
+    os.makedirs(local_cms_jobconfig, exist_ok=True)
+    src_slc = os.path.join(site_cfg, "JobConfig", "site-local-config.xml")
+    if os.path.isfile(src_slc):
+        shutil.copy2(src_slc, local_cms_jobconfig)
+    local_cms_phedex = os.path.join(
+        work_dir, "_siteconf", "SITECONF", "local", "PhEDEx"
+    )
+    if os.path.isdir(phedex_src):
+        shutil.copytree(phedex_src, local_cms_phedex, dirs_exist_ok=True)
+
+
 def run_cmsrun(pset_path, cmssw_version, scram_arch, work_dir):
-    """Run cmsRun with a merge PSet in the appropriate CMSSW environment.
+    """Run cmsRun with a merge PSet via cmssw-env.
 
     Returns True on success, False on failure.
     """
-    container = resolve_container(scram_arch)
+    if isinstance(scram_arch, list):
+        scram_arch = scram_arch[0] if scram_arch else ""
 
-    if container:
-        # Apptainer execution for cross-OS (e.g. el8 CMSSW on el9 host)
-        site_cfg = os.environ.get("SITECONFIG_PATH", "/opt/cms/siteconf")
-        local_siteconf = os.path.join(work_dir, "_siteconf", "JobConfig")
-        os.makedirs(local_siteconf, exist_ok=True)
-        try:
-            shutil.copy2(
-                os.path.join(site_cfg, "JobConfig", "site-local-config.xml"),
-                local_siteconf,
-            )
-        except Exception:
-            pass
-        phedex_src = os.path.join(site_cfg, "PhEDEx")
-        if os.path.isdir(phedex_src):
-            shutil.copytree(phedex_src, os.path.join(work_dir, "_siteconf", "PhEDEx"),
-                            dirs_exist_ok=True)
-        storage_json = os.path.join(site_cfg, "storage.json")
-        if os.path.isfile(storage_json):
-            shutil.copy2(storage_json, os.path.join(work_dir, "_siteconf"))
+    _prepare_siteconf(work_dir)
 
-        # Create SITECONF/local/ layout for CMS_PATH compatibility (CMSSW <14.x)
-        local_cms_jobconfig = os.path.join(
-            work_dir, "_siteconf", "SITECONF", "local", "JobConfig"
-        )
-        os.makedirs(local_cms_jobconfig, exist_ok=True)
-        src_slc = os.path.join(site_cfg, "JobConfig", "site-local-config.xml")
-        if os.path.isfile(src_slc):
-            shutil.copy2(src_slc, local_cms_jobconfig)
-        local_cms_phedex = os.path.join(
-            work_dir, "_siteconf", "SITECONF", "local", "PhEDEx"
-        )
-        if os.path.isdir(phedex_src):
-            shutil.copytree(phedex_src, local_cms_phedex, dirs_exist_ok=True)
-
-        runner_path = os.path.join(work_dir, "_merge_runner.sh")
-        with open(runner_path, "w") as f:
-            f.write(f"""#!/bin/bash
+    runner_path = os.path.join(work_dir, "_merge_runner.sh")
+    with open(runner_path, "w") as f:
+        f.write(f"""#!/bin/bash
 set -e
 export SITECONFIG_PATH={work_dir}/_siteconf
 export CMS_PATH={work_dir}/_siteconf
@@ -2835,34 +2716,12 @@ fi
 cd {cmssw_version}/src && eval $(scramv1 runtime -sh) && cd {work_dir}
 cmsRun {pset_path}
 """)
-        os.chmod(runner_path, 0o755)
+    os.chmod(runner_path, 0o755)
 
-        bind_paths = "/cvmfs,/tmp," + work_dir
-        if os.path.isdir("/mnt/creds"):
-            bind_paths += ",/mnt/creds"
-        if os.path.isdir("/mnt/shared"):
-            bind_paths += ",/mnt/shared"
-        if os.path.isdir(site_cfg):
-            bind_paths += "," + site_cfg
-        env = dict(os.environ, APPTAINER_BINDPATH=bind_paths)
-        cmd = ["apptainer", "exec", "--no-home", container, "bash", runner_path]
-    else:
-        # Native execution
-        setup_script = (
-            f"source /cvmfs/cms.cern.ch/cmsset_default.sh && "
-            f"export SCRAM_ARCH={scram_arch} && "
-            f"if [[ ! -d {cmssw_version}/src ]]; then "
-            f"scramv1 project CMSSW {cmssw_version}; fi && "
-            f"cd {cmssw_version}/src && eval $(scramv1 runtime -sh) && "
-            f"cd {work_dir} && "
-            f"export SITECONFIG_PATH=${{SITECONFIG_PATH:-/opt/cms/siteconf}} && "
-            f"cmsRun {pset_path}"
-        )
-        cmd = ["bash", "-c", setup_script]
-        env = None
+    cmd = cmssw_env_cmd(scram_arch, ["bash", runner_path])
 
     print(f"  Running: cmsRun {os.path.basename(pset_path)} (CMSSW {cmssw_version}, {scram_arch})")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
 
     if result.stdout:
         for line in result.stdout.strip().split("\\n")[-10:]:
@@ -2880,10 +2739,11 @@ cmsRun {pset_path}
 def merge_root_with_hadd(root_files, out_file, cmssw_version, scram_arch):
     """Fallback: merge ROOT files using hadd from CMSSW environment.
 
-    Runs hadd inside the full CMSSW runtime environment (with apptainer
-    when cross-OS) so that all shared libraries (libtbb, ROOT, etc.) are
-    available.
+    Runs hadd inside the full CMSSW runtime environment via cmssw-env
+    so that all shared libraries (libtbb, ROOT, etc.) are available.
     """
+    if isinstance(scram_arch, list):
+        scram_arch = scram_arch[0] if scram_arch else ""
     file_args = " ".join(shlex.quote(f) for f in root_files)
     hadd_script = (
         f"source /cvmfs/cms.cern.ch/cmsset_default.sh && "
@@ -2894,19 +2754,10 @@ def merge_root_with_hadd(root_files, out_file, cmssw_version, scram_arch):
         f"hadd -f {shlex.quote(out_file)} {file_args}"
     )
 
-    container = resolve_container(scram_arch)
-    if container:
-        bind_paths = "/cvmfs,/tmp," + os.getcwd()
-        if os.path.isdir("/mnt/shared"):
-            bind_paths += ",/mnt/shared"
-        env = dict(os.environ, APPTAINER_BINDPATH=bind_paths)
-        cmd = ["apptainer", "exec", "--no-home", container, "bash", "-c", hadd_script]
-    else:
-        cmd = ["bash", "-c", hadd_script]
-        env = None
+    cmd = cmssw_env_cmd(scram_arch, ["bash", "-c", hadd_script])
 
     print(f"  Fallback: hadd -f {out_file} ({len(root_files)} inputs)")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
     if result.stdout:
         for line in result.stdout.strip().split("\\n")[-5:]:
