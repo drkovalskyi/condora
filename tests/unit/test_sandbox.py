@@ -148,20 +148,20 @@ class TestCreateSandbox:
             assert len(manifest["steps"]) == 2
             assert manifest["steps"][0]["cmssw_version"] == "CMSSW_14_0_0"
 
-    def test_auto_mode_detects_cmssw(self, tmp_path):
+    def test_explicit_cmssw_mode(self, tmp_path):
         reqdata = {"CMSSWVersion": "CMSSW_14_0_0", "RequestType": "MonteCarlo"}
         output = str(tmp_path / "sandbox.tar.gz")
-        create_sandbox(output, reqdata, mode="auto")
+        create_sandbox(output, reqdata, mode="cmssw")
 
         with tarfile.open(output, "r:gz") as tar:
             f = tar.extractfile("manifest.json")
             manifest = json.loads(f.read())
             assert manifest["mode"] == "cmssw"
 
-    def test_auto_mode_falls_back_to_synthetic(self, tmp_path):
+    def test_explicit_synthetic_mode(self, tmp_path):
         reqdata = {"SizePerEvent": 25.0}
         output = str(tmp_path / "sandbox.tar.gz")
-        create_sandbox(output, reqdata, mode="auto")
+        create_sandbox(output, reqdata, mode="synthetic")
 
         with tarfile.open(output, "r:gz") as tar:
             f = tar.extractfile("manifest.json")

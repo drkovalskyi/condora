@@ -13,17 +13,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def create_sandbox(output_path: str, request_data: dict[str, Any], mode: str = "auto") -> str:
+def create_sandbox(output_path: str, request_data: dict[str, Any], mode: str = "synthetic") -> str:
     """Create a WMS2 sandbox tar.gz with manifest.json + PSet configs.
 
-    mode = "auto": CMSSW if CMSSWVersion present, else synthetic
-    mode = "synthetic": always synthetic
-    mode = "cmssw": requires CMSSWVersion + PSet configs
+    mode = "synthetic": always synthetic (sized output, no CMSSW)
+    mode = "cmssw": requires CMSSWVersion + PSet configs (real cmsRun)
+    mode = "simulator": realistic artifacts without real physics
 
     Returns path to created tar.gz.
     """
-    if mode == "auto":
-        mode = "cmssw" if request_data.get("CMSSWVersion") else "synthetic"
 
     manifest = _build_manifest(request_data, mode)
 

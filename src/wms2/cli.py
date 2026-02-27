@@ -45,8 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--max-files", type=int, default=0, help="Limit DBS file query (0=all)")
     imp.add_argument("--files-per-job", type=int, default=None, help="Override splitting param")
     imp.add_argument("--dry-run", action="store_true", help="Plan DAG but don't submit")
-    imp.add_argument("--sandbox-mode", default="auto", choices=["auto", "synthetic", "cmssw"],
-                     help="Sandbox mode: auto (detect), synthetic (sized output), cmssw (real cmsRun)")
+    imp.add_argument("--sandbox-mode", required=True, choices=["synthetic", "cmssw", "simulator"],
+                     help="Sandbox mode: synthetic (sized output), cmssw (real cmsRun), simulator (realistic artifacts)")
     imp.add_argument("--ca-bundle", default=None, help="CA bundle file for CERN Grid verification")
     imp.add_argument("--db-url", default=None, help="Override database URL")
     imp.add_argument("--poll-interval", type=int, default=10, help="Monitoring poll interval (seconds)")
