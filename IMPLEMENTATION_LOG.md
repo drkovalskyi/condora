@@ -3358,3 +3358,60 @@ Bumped spec version 2.9.0 → 2.10.0 and date to 2026-02-27.
 
 - Reviewed all existing HELD references in spec (enum, dispatch table, timeouts, error handler, recovery model, DD-14) — all consistent with new API section
 - No code changes, no tests to run
+
+---
+
+## End-to-End DAG Submission and Tracking (2026-02-27)
+
+### What Was Done
+
+Executed the full production pipeline integration test end-to-end, verifying the complete
+DAG submission and tracking path: `SUBMITTED → QUEUED → ACTIVE → COMPLETED`.
+
+### Steps Taken
+
+1. **Condor smoke test** — `pytest tests/integration/test_condor_submit.py -v -s`
+   - `test_submit_and_query_trivial_dag`: PASSED (submits `/bin/true` DAG, queries, removes)
+   - `test_dag_planner_generates_and_submits`: FAILED (pre-existing mock issue — MagicMock `config_data` doesn't support comparison operators; not related to the pipeline)
+
+2. **Production pipeline test (standalone)** — `python -m tests.integration.test_production_pipeline`
+   - Passed on first run, all 13/13 verification checks passed in ~116 seconds
+   - Flow: Created 5-step StepChain request (GEN-SIM→DIGI→RECO→MINIAODSIM→NANOAODSIM) with simulator sandbox mode, 2 proc jobs × 10 events each
+   - Lifecycle: SUBMITTED → QUEUED (WorkflowManager import) → ACTIVE (DAGPlanner creates 1 merge group with 2 proc + 1 merge + 1 cleanup nodes) → DAGMonitor polls .status file → work unit completes → OutputManager registers to mock DBS/Rucio → COMPLETED
+
+3. **pytest wrapper** — Added `TestProductionPipeline.test_production_pipeline_e2e` with `@pytest.mark.level2`
+   - First attempt failed: DAGMan's `DAGMAN_USE_STRICT` rejects node log files in `/tmp` (pytest's `tmp_path` fixture uses `/tmp/pytest-of-agent/...`). The error is: *"Warning: default node log file ... is in /tmp"* → *"Warning is fatal error because of DAGMAN_USE_STRICT setting"* → DAGMan exits immediately.
+   - Fix: Changed the `pipeline_work_dir` fixture to use `/mnt/shared/work/wms2_matrix/pytest_<uuid>/` instead of `tmp_path`, with cleanup on teardown.
+   - Second attempt: PASSED, 13/13 checks in ~122 seconds.
+
+4. **Unit tests** — All 399 pass (no regressions).
+
+### Verification Results
+
+All 13 checks passed:
+
+| Check | Result |
+|-------|--------|
+| request_completed | PASS (status=completed) |
+| workflow_exists | PASS |
+| workflow_has_dag | PASS |
+| dag_completed | PASS (status=completed) |
+| processing_blocks_count | PASS (5/5) |
+| all_blocks_archived | PASS (5/5) |
+| dbs_open_block | PASS (5/5) |
+| dbs_register_files | PASS (≥5, got 5) |
+| dbs_close_block | PASS (5/5) |
+| rucio_create_rule | PASS (≥10, got 10) |
+| rucio_tape_rules | PASS (5/5) |
+| rucio_source_rules | PASS (≥5, got 5) |
+| merged_outputs | PASS (5/5 tiers) |
+
+### Key Finding: DAGMAN_USE_STRICT and /tmp
+
+DAGMan's `DAGMAN_USE_STRICT=1` (default) treats the warning *"node log file is in /tmp"* as a fatal error. This is a safety check because `/tmp` is typically local to each machine and not shared across a distributed pool. For integration tests, the work directory MUST be outside `/tmp`. The fixture uses `/mnt/shared/` which is the shared filesystem on this dev VM.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `tests/integration/test_production_pipeline.py` | Added `pytest` import, `@pytest.mark.level2` marker, `pipeline_work_dir` fixture (uses `/mnt/shared/` not `tmp_path`), `TestProductionPipeline.test_production_pipeline_e2e` async test |

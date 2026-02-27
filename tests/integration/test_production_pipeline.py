@@ -17,6 +17,9 @@ Drives the lifecycle from SUBMITTED → COMPLETED and verifies:
 Can run standalone:
     python -m tests.integration.test_production_pipeline
 
+Via pytest (level2 marker):
+    pytest tests/integration/test_production_pipeline.py -v -m level2
+
 Or via the matrix runner:
     python -m tests.matrix.run --wf 160.0
 """
@@ -30,6 +33,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -548,6 +553,52 @@ async def main():
         sys.exit(1)
     finally:
         await test.cleanup()
+
+
+## ── pytest wrapper ──────────────────────────────────────────────
+
+pytestmark = [pytest.mark.level2]
+
+
+@pytest.fixture
+def pipeline_work_dir():
+    """Provide a unique work directory per test run.
+
+    Uses /mnt/shared/ instead of tmp_path because DAGMan's DAGMAN_USE_STRICT
+    rejects node log files in /tmp (it assumes /tmp is local-only and not
+    shared across machines).
+    """
+    import uuid
+    work_dir = Path(f"/mnt/shared/work/wms2_matrix/pytest_{uuid.uuid4().hex[:8]}")
+    yield work_dir
+    # Cleanup after test
+    import shutil
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+class TestProductionPipeline:
+    """Pytest wrapper for the production pipeline integration test."""
+
+    async def test_production_pipeline_e2e(self, pipeline_work_dir):
+        """End-to-end: SUBMITTED → COMPLETED with real PostgreSQL + HTCondor."""
+        test = ProductionPipelineTest(work_dir=pipeline_work_dir)
+        try:
+            await test.setup()
+            final_status = await test.run()
+            assert final_status == "completed", f"Expected 'completed', got '{final_status}'"
+
+            verification = await test.verify()
+            assert verification["all_passed"], (
+                f"Verification failed: {verification['summary']}\n"
+                + "\n".join(
+                    f"  [{c['name']}] {'PASS' if c['passed'] else 'FAIL'}: {c.get('detail','')}"
+                    for c in verification["checks"]
+                    if not c["passed"]
+                )
+            )
+        finally:
+            await test.cleanup()
 
 
 if __name__ == "__main__":
