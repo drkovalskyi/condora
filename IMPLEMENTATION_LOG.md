@@ -3627,3 +3627,55 @@ Delegate to `/cvmfs/cms.cern.ch/common/cmssw-env`, the CMS production wrapper th
 - `pytest tests/unit/test_dag_planner.py -v` — 7 tests pass
 - `pytest tests/unit/ -v` — 440 tests pass, no regressions
 - No remaining references to `resolve_container`, `detect_host_os`, `run_step_native`, `run_step_apptainer`, or `APPTAINER_BINDPATH` in `dag_planner.py`
+
+---
+
+## 2026-02-27 — Test Workflows Reference Document and Fetch Script
+
+### Problem
+
+We've tested with several real CMS workflows (NPS, B2G, GEN-QCD, DY2L, BPH) but their names, properties, and resource profiles were not documented. When starting a new test, there was no quick way to pick the right workflow or look up its parameters.
+
+### What Was Built
+
+**`scripts/fetch-workflow-info.py`** — Standalone Python script (stdlib only, no pip dependencies) that fetches workflow details from ReqMgr2 and outputs formatted markdown. Supports:
+- Positional args for ReqMgr2 request names (fetches via HTTPS with X.509 proxy)
+- `--from-file` for local `request.json` files
+- `--proxy`, `--ca-bundle` for authentication
+- `--table-only` for quick-reference table rows only
+- Extracts per-workflow: RequestType, StepChain count, Multicore, Memory, per-step CMSSW/arch/keep/GlobalTag, OutputDatasets with tiers, and CPU-days estimate
+
+**`docs/test-workflows.md`** — Reference document listing 5 known test workflows:
+
+| Name | Type | Steps | Cores | Memory | CPU-days | Key Property |
+|------|------|-------|-------|--------|----------|--------------|
+| NPS | StepChain | 5 | 8 | 16 GB | 363.5 | Two CMSSW versions, high TpE |
+| B2G | StepChain | 5 | 8 | 16 GB | 17.7 | Small, fast smoke test |
+| GEN-QCD | StepChain | 5 | 8 | 16 GB | 307.5 | 30M events, latest CMSSW 14/15 |
+| DY2L | StepChain | 5 | 4 | 8 GB | 1,838.6 | ~10% filter, adaptive testing |
+| BPH | StepChain | 7 | 16 | 32 GB | 58.0 | Run 2 UL, slc7, 7-step with HLT |
+
+Includes quick reference table, per-workflow detail cards (step tables, output datasets, resource profiles, what it exercises, tested modes), and workflow selection guidance.
+
+### CPU-days Formula
+
+```
+CPU-days = TimePerEvent × Multicore × RequestNumEvents / 86400
+```
+
+Verified against CMS unified source (`WmAgentScripts`):
+- `TimePerEvent` is **wall-clock seconds per event** (not CPU time) — confirmed by `setMulticore()` which divides TpE when increasing cores
+- Multicore factor is required to convert wall-clock to CPU time
+- During TaskChain→StepChain conversion, unified aggregates TpE across steps weighted by cumulative FilterEfficiency, but deliberately suppresses the multicore factor to avoid underestimation
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `scripts/fetch-workflow-info.py` | **New** — ReqMgr2 workflow info fetcher |
+| `docs/test-workflows.md` | **New** — Test workflows reference document |
+
+### Verification
+
+- `python scripts/fetch-workflow-info.py --from-file /mnt/shared/work/wms2_real_test/request.json` — output matches NPS request.json fields
+- All 4 original workflows + BPH fetched live from ReqMgr2, data cross-checked against IMPLEMENTATION_LOG and `tests/matrix/catalog.py`
