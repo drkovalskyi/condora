@@ -74,6 +74,34 @@ class TestClassifyInfrastructure:
         assert result["memory_exceeded"] is True
 
 
+class TestClassify8001MessageOverride:
+    """Exit code 8001 with infrastructure-related error messages."""
+
+    def test_8001_site_local_config_is_infrastructure(self):
+        result = classify_error(8001, 1, "site-local-config not found")
+        assert result["category"] == "infrastructure"
+        assert result["retryable"] is True
+        assert result["action"] == "retry_with_cooloff"
+
+    def test_8001_site_local_config_case_insensitive(self):
+        result = classify_error(8001, 1, "Site-Local-Config.xml missing")
+        assert result["category"] == "infrastructure"
+
+    def test_8001_unrelated_message_stays_permanent(self):
+        result = classify_error(8001, 1, "some other CMS exception")
+        assert result["category"] == "permanent"
+        assert result["retryable"] is False
+
+    def test_8001_empty_message_stays_permanent(self):
+        result = classify_error(8001, 1, "")
+        assert result["category"] == "permanent"
+        assert result["retryable"] is False
+
+    def test_8001_no_message_stays_permanent(self):
+        result = classify_error(8001, 1)
+        assert result["category"] == "permanent"
+
+
 class TestClassifyTransient:
     @pytest.mark.parametrize("code", [1, 11, 139, 195, 99999])
     def test_unknown_codes_are_transient(self, code):
@@ -261,3 +289,63 @@ class TestCollectorWritesPostJson:
         assert result.returncode == 0
         data = json.loads((tmp_path / "proc_000001.post.json").read_text())
         assert data["final"] is True
+
+    def test_collector_8001_site_local_config_is_infrastructure(self, tmp_path):
+        """Exit 8001 with site-local-config message → infrastructure in collector."""
+        script = generate_collector_script()
+        script_path = tmp_path / "wms2_post_collect.py"
+        script_path.write_text(script)
+
+        # FJR with exit 8001 and site-local-config error message
+        fjr = tmp_path / "report_step1.xml"
+        fjr.write_text(textwrap.dedent("""\
+            <?xml version="1.0" ?>
+            <FrameworkJobReport>
+              <FrameworkError ExitStatus="8001" Type="CMSException">
+                site-local-config not found at /cvmfs/cms.cern.ch/SITECONF
+              </FrameworkError>
+            </FrameworkJobReport>
+        """))
+
+        import subprocess
+        result = subprocess.run(
+            ["python3", str(script_path), "proc_000001", "8001", "0", "3"],
+            cwd=str(tmp_path),
+            capture_output=True, text=True, timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "infrastructure"
+
+        data = json.loads((tmp_path / "proc_000001.post.json").read_text())
+        assert data["classification"]["category"] == "infrastructure"
+        assert data["classification"]["retryable"] is True
+
+    def test_collector_8001_generic_stays_permanent(self, tmp_path):
+        """Exit 8001 with generic message → permanent in collector."""
+        script = generate_collector_script()
+        script_path = tmp_path / "wms2_post_collect.py"
+        script_path.write_text(script)
+
+        fjr = tmp_path / "report_step1.xml"
+        fjr.write_text(textwrap.dedent("""\
+            <?xml version="1.0" ?>
+            <FrameworkJobReport>
+              <FrameworkError ExitStatus="8001" Type="CMSException">
+                Unknown CMS exception during processing
+              </FrameworkError>
+            </FrameworkJobReport>
+        """))
+
+        import subprocess
+        result = subprocess.run(
+            ["python3", str(script_path), "proc_000001", "8001", "0", "3"],
+            cwd=str(tmp_path),
+            capture_output=True, text=True, timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "permanent"
+
+        data = json.loads((tmp_path / "proc_000001.post.json").read_text())
+        assert data["classification"]["category"] == "permanent"

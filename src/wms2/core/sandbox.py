@@ -5,20 +5,32 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import tarfile
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def create_sandbox(output_path: str, request_data: dict[str, Any], mode: str = "synthetic") -> str:
+def create_sandbox(
+    output_path: str,
+    request_data: dict[str, Any],
+    mode: str = "synthetic",
+    ssl_context: ssl.SSLContext | None = None,
+    configcache_url: str | None = None,
+) -> str:
     """Create a WMS2 sandbox tar.gz with manifest.json + PSet configs.
 
     mode = "synthetic": always synthetic (sized output, no CMSSW)
     mode = "cmssw": requires CMSSWVersion + PSet configs (real cmsRun)
     mode = "simulator": realistic artifacts without real physics
+
+    If ssl_context and configcache_url are provided, CMSSW-mode steps with a
+    config_cache_id will fetch real PSets from ConfigCache instead of generating
+    test stubs.
 
     Returns path to created tar.gz.
     """
@@ -41,7 +53,7 @@ def create_sandbox(output_path: str, request_data: dict[str, Any], mode: str = "
             else:
                 logger.warning("simulator.py not found at %s", sim_src)
 
-        # For CMSSW mode, generate test PSets per step
+        # For CMSSW mode, fetch real PSets from ConfigCache or generate test stubs
         if mode == "cmssw":
             # For StepChain manifests (new format), get global_tag from first step
             if "steps" in manifest and manifest["steps"]:
@@ -53,8 +65,22 @@ def create_sandbox(output_path: str, request_data: dict[str, Any], mode: str = "
                 pset_rel = step["pset"]
                 pset_path = tmp / pset_rel
                 pset_path.parent.mkdir(parents=True, exist_ok=True)
-                step_gt = step.get("global_tag", global_tag)
-                pset_path.write_text(_create_test_pset(step["name"], step_gt))
+
+                cc_id = step.get("config_cache_id", "")
+                pset_content = None
+
+                # Try fetching from ConfigCache if credentials are available
+                if cc_id and ssl_context and configcache_url:
+                    pset_content = _fetch_configcache_pset(
+                        configcache_url, cc_id, ssl_context, step["name"]
+                    )
+
+                if pset_content is not None:
+                    pset_path.write_text(pset_content)
+                else:
+                    step_gt = step.get("global_tag", global_tag)
+                    has_input = bool(step.get("input_step"))
+                    pset_path.write_text(_create_test_pset(step["name"], step_gt, has_input=has_input))
 
         # Create tar.gz
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -300,10 +326,36 @@ def _build_simulator_steps(request_data: dict[str, Any]) -> list[dict[str, Any]]
     return steps
 
 
-def _create_test_pset(step_name: str, global_tag: str) -> str:
+def _fetch_configcache_pset(
+    configcache_url: str,
+    config_cache_id: str,
+    ssl_context: ssl.SSLContext,
+    step_name: str,
+) -> str | None:
+    """Fetch a PSet from CMS ConfigCache (CouchDB).
+
+    Returns the PSet source text, or None on failure (caller falls back to stub).
+    """
+    url = f"{configcache_url}/{config_cache_id}/configFile"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, context=ssl_context, timeout=30) as resp:
+            content = resp.read().decode("utf-8")
+        logger.info("Fetched PSet from ConfigCache for step %s (%s)", step_name, config_cache_id)
+        return content
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch PSet from ConfigCache for step %s (%s): %s — falling back to stub",
+            step_name, config_cache_id, exc,
+        )
+        return None
+
+
+def _create_test_pset(step_name: str, global_tag: str, has_input: bool = True) -> str:
     """Generate a minimal working PSet.py for testing.
 
-    Reads input, applies global tag, writes output.
+    For GEN steps (has_input=False): uses EmptySource so cmsRun generates events.
+    For later steps (has_input=True): uses PoolSource; fileNames injected at runtime.
     For real production, PSets come from ConfigCache (future).
     """
     import re
@@ -311,6 +363,23 @@ def _create_test_pset(step_name: str, global_tag: str) -> str:
     proc_name = re.sub(r"[^A-Za-z0-9]", "", step_name.upper())
     if not proc_name:
         proc_name = "PROCESS"
+
+    if has_input:
+        source_block = '''\
+process.source = cms.Source("PoolSource",
+    fileNames=cms.untracked.vstring()
+)'''
+    else:
+        # GEN step: EmptySource generates events from nothing.
+        # firstEvent, firstLuminosityBlock, and maxEvents are injected at runtime.
+        source_block = '''\
+process.source = cms.Source("EmptySource",
+    firstRun=cms.untracked.uint32(1),
+    firstLuminosityBlock=cms.untracked.uint32(1),
+    firstEvent=cms.untracked.uint32(1),
+    numberEventsInLuminosityBlock=cms.untracked.uint32(100)
+)'''
+
     return f'''\
 # Auto-generated test PSet for step: {step_name}
 # Global tag: {global_tag}
@@ -318,9 +387,7 @@ import FWCore.ParameterSet.Config as cms
 
 process = cms.Process("{proc_name}")
 
-process.source = cms.Source("PoolSource",
-    fileNames=cms.untracked.vstring()
-)
+{source_block}
 
 process.maxEvents = cms.untracked.PSet(
     input=cms.untracked.int32(-1)

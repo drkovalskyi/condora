@@ -258,13 +258,18 @@ class RequestLifecycleManager:
                 return
             elif result.status in (DAGStatus.PARTIAL, DAGStatus.FAILED):
                 if self.error_handler:
-                    action = await self.error_handler.handle_dag_completion(
+                    completion = await self.error_handler.handle_dag_completion(
                         dag, request, workflow
                     )
-                    if action == "rescue":
+                    if completion.action == "rescue":
+                        if completion.problem_sites:
+                            from wms2.core.error_handler import ErrorHandler
+                            ErrorHandler.apply_site_exclusions(
+                                dag.submit_dir, completion.problem_sites
+                            )
                         await self.transition(request, RequestStatus.RESUBMITTING)
                         return
-                # No error_handler or action == "hold"
+                # No error_handler or completion.action == "hold"
                 await self.transition(request, RequestStatus.HELD)
                 return
             # RUNNING — no transition, will poll again next cycle
@@ -280,13 +285,18 @@ class RequestLifecycleManager:
             await self.transition(request, RequestStatus.COMPLETED)
         elif dag.status in (DAGStatus.PARTIAL.value, DAGStatus.FAILED.value):
             if self.error_handler:
-                action = await self.error_handler.handle_dag_completion(
+                result = await self.error_handler.handle_dag_completion(
                     dag, request, workflow
                 )
-                if action == "rescue":
+                if result.action == "rescue":
+                    if result.problem_sites:
+                        from wms2.core.error_handler import ErrorHandler
+                        ErrorHandler.apply_site_exclusions(
+                            dag.submit_dir, result.problem_sites
+                        )
                     await self.transition(request, RequestStatus.RESUBMITTING)
                     return
-            # No error_handler or action == "hold"
+            # No error_handler or result.action == "hold"
             await self.transition(request, RequestStatus.HELD)
 
     async def _handle_stopping(self, request):

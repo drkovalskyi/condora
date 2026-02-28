@@ -1,5 +1,7 @@
-"""Unit tests for DAG Planner offset consumption and adaptive capping."""
+"""Unit tests for DAG Planner offset consumption, adaptive capping, and pileup resolution."""
 
+import json
+import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -176,3 +178,220 @@ class TestAdaptiveEmptyReturnsNone:
 
         with pytest.raises(ValueError, match="No processing nodes"):
             await planner.plan_production_dag(wf, adaptive=False)
+
+
+# ── Pileup file resolution tests ─────────────────────────────────
+
+
+class TestPileupResolution:
+    async def test_pileup_query_called_for_manifest_steps(self, tmp_path):
+        """manifest_steps with mc_pileup → Rucio get_available_pileup_files called."""
+        rucio = MockRucioAdapter()
+        rucio._pileup_files = ["/store/mc/premix/file1.root", "/store/mc/premix/file2.root"]
+
+        repo = MagicMock()
+        dag_row = MagicMock()
+        dag_row.id = uuid.uuid4()
+        repo.create_dag = AsyncMock(return_value=dag_row)
+        repo.update_dag = AsyncMock()
+        repo.update_workflow = AsyncMock()
+        repo.create_processing_block = AsyncMock()
+
+        settings = _make_settings(tmp_path)
+        planner = DAGPlanner(
+            repository=repo,
+            dbs_adapter=MockDBSAdapter(),
+            rucio_adapter=rucio,
+            condor_adapter=MockCondorAdapter(),
+            settings=settings,
+        )
+
+        premix_ds = "/Neutrino/RunIISummer20UL/PREMIX"
+        wf = _make_workflow(
+            config_data={
+                "_is_gen": True,
+                "request_num_events": 100_000,
+                "manifest_steps": [
+                    {"name": "GEN-SIM", "mc_pileup": "", "data_pileup": ""},
+                    {"name": "DIGI", "mc_pileup": premix_ds, "data_pileup": ""},
+                ],
+            },
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+        )
+
+        await planner.plan_production_dag(wf)
+
+        # Verify Rucio was called for the pileup dataset
+        pileup_calls = [c for c in rucio.calls if c[0] == "get_available_pileup_files"]
+        assert len(pileup_calls) == 1
+        assert pileup_calls[0][1] == (premix_ds,)
+
+    async def test_pileup_files_json_written_to_group_dirs(self, tmp_path):
+        """pileup_files.json is written to each merge group directory."""
+        rucio = MockRucioAdapter()
+        rucio._pileup_files = ["/store/mc/premix/file1.root"]
+
+        repo = MagicMock()
+        dag_row = MagicMock()
+        dag_row.id = uuid.uuid4()
+        repo.create_dag = AsyncMock(return_value=dag_row)
+        repo.update_dag = AsyncMock()
+        repo.update_workflow = AsyncMock()
+        repo.create_processing_block = AsyncMock()
+
+        settings = _make_settings(tmp_path, jobs_per_work_unit=2)
+        planner = DAGPlanner(
+            repository=repo,
+            dbs_adapter=MockDBSAdapter(),
+            rucio_adapter=rucio,
+            condor_adapter=MockCondorAdapter(),
+            settings=settings,
+        )
+
+        premix_ds = "/Neutrino/RunIISummer20UL/PREMIX"
+        wf = _make_workflow(
+            config_data={
+                "_is_gen": True,
+                "request_num_events": 100_000,
+                "manifest_steps": [
+                    {"name": "GEN-SIM", "mc_pileup": "", "data_pileup": ""},
+                    {"name": "DIGI", "mc_pileup": premix_ds, "data_pileup": ""},
+                ],
+            },
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+        )
+
+        await planner.plan_production_dag(wf)
+
+        # Check pileup_files.json was written to the merge group directory
+        wf_dir = tmp_path / str(wf.id)
+        mg_dir = wf_dir / "mg_000000"
+        pileup_path = mg_dir / "pileup_files.json"
+        assert pileup_path.exists(), f"Expected {pileup_path} to exist"
+
+        data = json.loads(pileup_path.read_text())
+        assert premix_ds in data
+        assert data[premix_ds] == ["/store/mc/premix/file1.root"]
+
+    async def test_no_pileup_query_without_manifest_steps(self, tmp_path):
+        """No manifest_steps in config → no Rucio pileup query."""
+        rucio = MockRucioAdapter()
+
+        repo = MagicMock()
+        dag_row = MagicMock()
+        dag_row.id = uuid.uuid4()
+        repo.create_dag = AsyncMock(return_value=dag_row)
+        repo.update_dag = AsyncMock()
+        repo.update_workflow = AsyncMock()
+        repo.create_processing_block = AsyncMock()
+
+        settings = _make_settings(tmp_path)
+        planner = DAGPlanner(
+            repository=repo,
+            dbs_adapter=MockDBSAdapter(),
+            rucio_adapter=rucio,
+            condor_adapter=MockCondorAdapter(),
+            settings=settings,
+        )
+
+        wf = _make_workflow(
+            config_data={"_is_gen": True, "request_num_events": 100_000},
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+        )
+
+        await planner.plan_production_dag(wf)
+
+        # No pileup calls should have been made
+        pileup_calls = [c for c in rucio.calls if c[0] == "get_available_pileup_files"]
+        assert len(pileup_calls) == 0
+
+    async def test_pileup_files_in_transfer_input(self, tmp_path):
+        """pileup_files.json appears in processing node submit file transfer_input_files."""
+        rucio = MockRucioAdapter()
+        rucio._pileup_files = ["/store/mc/premix/file1.root"]
+
+        repo = MagicMock()
+        dag_row = MagicMock()
+        dag_row.id = uuid.uuid4()
+        repo.create_dag = AsyncMock(return_value=dag_row)
+        repo.update_dag = AsyncMock()
+        repo.update_workflow = AsyncMock()
+        repo.create_processing_block = AsyncMock()
+
+        settings = _make_settings(tmp_path, jobs_per_work_unit=2)
+        planner = DAGPlanner(
+            repository=repo,
+            dbs_adapter=MockDBSAdapter(),
+            rucio_adapter=rucio,
+            condor_adapter=MockCondorAdapter(),
+            settings=settings,
+        )
+
+        premix_ds = "/Neutrino/RunIISummer20UL/PREMIX"
+        wf = _make_workflow(
+            config_data={
+                "_is_gen": True,
+                "request_num_events": 100_000,
+                "manifest_steps": [
+                    {"name": "DIGI", "mc_pileup": premix_ds, "data_pileup": ""},
+                ],
+            },
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+        )
+
+        await planner.plan_production_dag(wf)
+
+        # Read a processing node submit file and check transfer_input_files
+        wf_dir = tmp_path / str(wf.id)
+        mg_dir = wf_dir / "mg_000000"
+        proc_sub = mg_dir / "proc_000000.sub"
+        assert proc_sub.exists()
+        content = proc_sub.read_text()
+        assert "pileup_files.json" in content, (
+            "pileup_files.json not in transfer_input_files"
+        )
+
+    async def test_duplicate_pileup_dataset_queried_once(self, tmp_path):
+        """Same pileup dataset in multiple steps → only one Rucio query."""
+        rucio = MockRucioAdapter()
+        rucio._pileup_files = ["/store/mc/premix/file1.root"]
+
+        repo = MagicMock()
+        dag_row = MagicMock()
+        dag_row.id = uuid.uuid4()
+        repo.create_dag = AsyncMock(return_value=dag_row)
+        repo.update_dag = AsyncMock()
+        repo.update_workflow = AsyncMock()
+        repo.create_processing_block = AsyncMock()
+
+        settings = _make_settings(tmp_path)
+        planner = DAGPlanner(
+            repository=repo,
+            dbs_adapter=MockDBSAdapter(),
+            rucio_adapter=rucio,
+            condor_adapter=MockCondorAdapter(),
+            settings=settings,
+        )
+
+        premix_ds = "/Neutrino/RunIISummer20UL/PREMIX"
+        wf = _make_workflow(
+            config_data={
+                "_is_gen": True,
+                "request_num_events": 100_000,
+                "manifest_steps": [
+                    {"name": "DIGI1", "mc_pileup": premix_ds, "data_pileup": ""},
+                    {"name": "DIGI2", "mc_pileup": premix_ds, "data_pileup": ""},
+                ],
+            },
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+        )
+
+        await planner.plan_production_dag(wf)
+
+        pileup_calls = [c for c in rucio.calls if c[0] == "get_available_pileup_files"]
+        assert len(pileup_calls) == 1, "Same dataset should only be queried once"

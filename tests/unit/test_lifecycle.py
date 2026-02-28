@@ -372,8 +372,12 @@ async def test_active_partial_with_rescue(mock_repository, mock_condor, settings
     """PARTIAL + error_handler returns 'rescue' → request RESUBMITTING."""
     from wms2.core.dag_monitor import DAGPollResult
 
+    from wms2.core.error_handler import CompletionResult
+
     mock_error_handler = AsyncMock()
-    mock_error_handler.handle_dag_completion.return_value = "rescue"
+    mock_error_handler.handle_dag_completion.return_value = CompletionResult(
+        action="rescue", problem_sites=[]
+    )
 
     dag = _make_dag(status="submitted", nodes_done=19, nodes_failed=1)
     workflow = _make_workflow(dag_id=dag.id)
@@ -436,8 +440,12 @@ async def test_active_failed_with_error_handler(mock_repository, mock_condor, se
     """FAILED + error_handler returns 'hold' → request HELD (held for operator)."""
     from wms2.core.dag_monitor import DAGPollResult
 
+    from wms2.core.error_handler import CompletionResult
+
     mock_error_handler = AsyncMock()
-    mock_error_handler.handle_dag_completion.return_value = "hold"
+    mock_error_handler.handle_dag_completion.return_value = CompletionResult(
+        action="hold", problem_sites=[]
+    )
 
     dag = _make_dag(status="submitted", nodes_done=0, nodes_failed=20)
     workflow = _make_workflow(dag_id=dag.id)

@@ -31,6 +31,7 @@ class StepSpec:
     data_pileup: str  # "" if none
     event_streams: int
     request_num_events: int  # for GEN steps, 0 otherwise
+    config_cache_id: str  # ConfigCacheID for PSet retrieval; "" if none
 
 
 @dataclass
@@ -71,6 +72,7 @@ def parse_stepchain(data: dict) -> StepChainSpec:
                 request_num_events=int(
                     step.get("RequestNumEvents") or data.get("RequestNumEvents", 0)
                 ),
+                config_cache_id=step.get("ConfigCacheID", ""),
             )
         )
     return StepChainSpec(

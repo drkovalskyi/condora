@@ -16,8 +16,8 @@ class MockCondorAdapter(CondorAdapter):
         self._next_cluster_id += 1
         return (cluster_id, "schedd.example.com")
 
-    async def submit_dag(self, dag_file: str) -> tuple[str, str]:
-        self.calls.append(("submit_dag", (dag_file,), {}))
+    async def submit_dag(self, dag_file: str, force: bool = False) -> tuple[str, str]:
+        self.calls.append(("submit_dag", (dag_file,), {"force": force}))
         cluster_id = str(self._next_cluster_id)
         self._next_cluster_id += 1
         return (cluster_id, "schedd.example.com")
@@ -140,6 +140,10 @@ class MockRucioAdapter(RucioAdapter):
 
     async def delete_rule(self, rule_id: str) -> None:
         self.calls.append(("delete_rule", (rule_id,), {}))
+
+    async def get_available_pileup_files(self, dataset: str) -> list[str]:
+        self.calls.append(("get_available_pileup_files", (dataset,), {}))
+        return getattr(self, "_pileup_files", [])
 
 
 class MockCRICAdapter(CRICAdapter):

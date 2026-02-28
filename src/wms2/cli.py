@@ -8,19 +8,22 @@ import logging
 import os
 import ssl
 import sys
+from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 from wms2.adapters.mock import MockDBSAdapter as _MockDBS, MockRucioAdapter as _MockRucio
 from wms2.config import Settings
 from wms2.core.dag_monitor import DAGMonitor
 from wms2.core.dag_planner import DAGPlanner
+from wms2.core.error_handler import ErrorHandler
 from wms2.core.output_lfn import derive_merged_lfn_bases
 from wms2.core.output_manager import OutputManager
 from wms2.core.sandbox import create_sandbox
 from wms2.core.workflow_manager import WorkflowManager
 from wms2.db.engine import create_engine, create_session_factory
 from wms2.db.repository import Repository
-from wms2.models.enums import DAGStatus
+from wms2.models.enums import DAGStatus, RequestStatus
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +216,60 @@ def _print_output_files(output_base_dir: str) -> None:
         print(f"  {rel}  ({size} bytes)")
 
 
+async def _transition_request(
+    repo: Repository, request_name: str, old_status: str, new_status: RequestStatus
+) -> None:
+    """Record a state transition on a request (same pattern as LifecycleManager.transition)."""
+    now = datetime.now(timezone.utc)
+    request = await repo.get_request(request_name)
+    old_transitions = (request.status_transitions or []) if request else []
+    new_transition = {
+        "from": old_status,
+        "to": new_status.value,
+        "timestamp": now.isoformat(),
+    }
+    await repo.update_request(
+        request_name,
+        status=new_status.value,
+        status_transitions=old_transitions + [new_transition],
+    )
+    logger.info("Request %s: %s -> %s", request_name, old_status, new_status.value)
+
+
+def _print_error_summary(post_data: list[dict]) -> None:
+    """Print failure categories, problem sites, and sample error messages."""
+    if not post_data:
+        print("  No POST data found (DAGMan may have died before jobs ran)")
+        return
+
+    # Aggregate by category
+    categories: dict[str, int] = defaultdict(int)
+    sites: dict[str, int] = defaultdict(int)
+    sample_messages: list[str] = []
+    for entry in post_data:
+        cat = entry.get("classification", {}).get("category", "unknown")
+        if cat != "success":
+            categories[cat] += 1
+        site = entry.get("job", {}).get("site", "unknown")
+        if cat != "success":
+            sites[site] += 1
+        msg = entry.get("cmssw", {}).get("error_message", "")
+        if msg and len(sample_messages) < 3:
+            sample_messages.append(msg[:200])
+
+    print("  Failure categories:")
+    for cat, count in sorted(categories.items()):
+        print(f"    {cat} = {count}")
+    if sites:
+        print("  Problem sites:")
+        for site, count in sorted(sites.items(), key=lambda x: -x[1]):
+            print(f"    {site} = {count}")
+    if sample_messages:
+        print("  Sample error messages:")
+        for msg in sample_messages:
+            print(f"    {msg}")
+
+
 async def run_import(args: argparse.Namespace) -> None:
     cert_file, key_file = _resolve_cert(args)
     settings = build_settings(args, cert_file, key_file)
@@ -245,6 +302,9 @@ async def run_import(args: argparse.Namespace) -> None:
     # Database
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
+
+    # Set RUCIO_HOME for native rucio-clients (pileup file queries)
+    os.environ.setdefault("RUCIO_HOME", settings.rucio_home)
 
     # Adapters
     reqmgr, dbs, rucio, condor = _build_adapters(settings, ssl_ctx)
@@ -306,8 +366,16 @@ async def run_import(args: argparse.Namespace) -> None:
             submit_dir = os.path.join(settings.submit_base_dir, request_name)
             os.makedirs(submit_dir, exist_ok=True)
             sandbox_path = os.path.join(submit_dir, "sandbox.tar.gz")
-            create_sandbox(sandbox_path, reqdata, mode=sandbox_mode)
+            create_sandbox(sandbox_path, reqdata, mode=sandbox_mode,
+                          ssl_context=ssl_ctx, configcache_url=settings.configcache_url)
             config_data["sandbox_path"] = sandbox_path
+
+            # Extract manifest steps (mc_pileup/data_pileup) for pileup resolution
+            if reqdata.get("RequestType") == "StepChain" and reqdata.get("StepChain"):
+                from dataclasses import asdict as _asdict
+                from wms2.core.stepchain import parse_stepchain
+                _spec = parse_stepchain(reqdata)
+                config_data["manifest_steps"] = [_asdict(s) for s in _spec.steps]
 
             # Print CMSSW info if available
             cmssw_ver = reqdata.get("CMSSWVersion")
@@ -380,11 +448,16 @@ async def run_import(args: argparse.Namespace) -> None:
             print(f"      work_units:  {dag.total_work_units}")
             print()
 
-            # 3. Monitor
+            # Transition request to ACTIVE — a DAG is now running
+            await _transition_request(repo, request_name, "submitted", RequestStatus.ACTIVE)
+            await session.commit()
+
+            # 3. Monitor (with rescue loop)
             print(f"[3/5] Monitoring DAG (poll every {args.poll_interval}s)...")
             dm = DAGMonitor(repo, condor)
             # OutputManager with mock DBS/Rucio for output lifecycle
             om = OutputManager(repo, _MockDBS(), _MockRucio())
+            eh = ErrorHandler(repo, condor, settings)
             terminal = {DAGStatus.COMPLETED, DAGStatus.FAILED, DAGStatus.PARTIAL}
 
             while True:
@@ -420,12 +493,71 @@ async def run_import(args: argparse.Namespace) -> None:
                     f"held={result.nodes_held}"
                 )
 
-                if result.status in terminal:
-                    # Process any final outputs
-                    if result.newly_completed_work_units:
-                        await om.process_blocks_for_workflow(workflow.id)
-                        await session.commit()
+                if result.status not in terminal:
+                    continue
+
+                # Process any final outputs
+                if result.newly_completed_work_units:
+                    await om.process_blocks_for_workflow(workflow.id)
+                    await session.commit()
+
+                # ── Terminal status handling (mirrors lifecycle_manager._handle_active) ──
+
+                if result.status == DAGStatus.COMPLETED:
+                    await _transition_request(repo, request_name, "active", RequestStatus.COMPLETED)
+                    await repo.update_workflow(workflow.id, status="completed")
+                    await session.commit()
                     break
+
+                # PARTIAL or FAILED — invoke error handler
+                dag = await repo.get_dag(dag.id)
+                request = await repo.get_request(request_name)
+                workflow = await repo.get_workflow(workflow.id)
+
+                from wms2.core.error_handler import CompletionResult
+                result = await eh.handle_dag_completion(dag, request, workflow)
+                await session.commit()
+
+                if result.action == "rescue":
+                    # ErrorHandler._prepare_rescue() already created the rescue DAG
+                    # record and pointed the workflow at it. Submit it.
+                    workflow = await repo.get_workflow(workflow.id)
+                    rescue_dag = await repo.get_dag(workflow.dag_id)
+
+                    if result.problem_sites:
+                        from wms2.core.error_handler import ErrorHandler as EH
+                        EH.apply_site_exclusions(dag.submit_dir, result.problem_sites)
+                        print(f"  Excluded sites from rescue: {', '.join(result.problem_sites)}")
+
+                    print(f"\n  Submitting rescue DAG (attempt from {rescue_dag.rescue_dag_path})...")
+                    cluster_id, schedd = await condor.submit_dag(
+                        rescue_dag.rescue_dag_path or rescue_dag.dag_file_path,
+                        force=True,
+                    )
+                    await repo.update_dag(
+                        rescue_dag.id,
+                        dagman_cluster_id=cluster_id,
+                        schedd_name=schedd,
+                        status=DAGStatus.SUBMITTED.value,
+                    )
+                    await _transition_request(repo, request_name, "active", RequestStatus.RESUBMITTING)
+                    await _transition_request(repo, request_name, "resubmitting", RequestStatus.ACTIVE)
+                    await session.commit()
+
+                    # Update dag reference for the monitoring loop
+                    dag = rescue_dag
+                    print(f"  Rescue DAG submitted: cluster_id={cluster_id}")
+                    print(f"  Continuing monitoring...\n")
+                    continue  # re-enter monitoring loop
+
+                # result.action == "hold"
+                await _transition_request(repo, request_name, "active", RequestStatus.HELD)
+                await session.commit()
+
+                print(f"\n=== Request HELD — operator intervention required ===")
+                post_data = eh.read_post_data(dag.submit_dir)
+                _print_error_summary(post_data)
+                break
 
             # Print output summary
             print()
@@ -443,8 +575,11 @@ async def run_import(args: argparse.Namespace) -> None:
             print()
             _print_output_files(settings.local_pfn_prefix)
 
+            # Final status line
+            request = await repo.get_request(request_name)
+            final_status = request.status if request else result.status.value
             print()
-            print(f"=== DAG finished: {result.status.value} ===")
+            print(f"=== DAG finished: {result.status.value} | request: {final_status} ===")
             print(f"  done={result.nodes_done} failed={result.nodes_failed}")
 
     finally:

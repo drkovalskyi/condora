@@ -1,5 +1,15 @@
 # CLAUDE.md — WMS2 Project Guide
 
+## Current Plan of Work
+
+@CURRENT_OBJECTIVES.md
+
+## Compact Instructions
+
+When compacting, preserve the active goal, the current plan and the next 3 concrete steps.
+Include the current contents of CURRENT_OBJECTIVES.md (or at least its top level bullet list).
+After compaction, re-open CURRENT_OBJECTIVES.md before making changes.
+
 ## What is this project?
 
 WMS2 is the next-generation CMS Workload Management System, replacing WMCore/WMAgent. It is a thin orchestration layer that delegates job-level execution to HTCondor DAGMan. Currently in the specification/design phase — no application code yet, only the spec document.
@@ -72,6 +82,7 @@ This is the main deliverable. It is a comprehensive design spec (~3100 lines) co
 ## When committing changes
 
 - **Update `IMPLEMENTATION_LOG.md`** with every significant commit. Add a new section or append to the current phase with: what was built/changed, design decisions, verification steps, and known issues.
+- Do not push any changes
 
 ## When editing the spec
 
@@ -108,3 +119,4 @@ This is the main deliverable. It is a comprehensive design spec (~3100 lines) co
 - **Rucio**: Data management system for replica placement and transfer rules
 - **ReqMgr2**: CMS Request Manager — source of workflow requests
 - **CRIC**: CMS Resource Information Catalog — site configuration database
+

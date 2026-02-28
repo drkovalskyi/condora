@@ -1390,6 +1390,9 @@ class DAGPlanner:
 
         total_nodes = sum(g.total_nodes for g in merge_groups)
 
+        # 4b. Resolve pileup file availability
+        pileup_files = await self._resolve_pileup(workflow)
+
         # 5. Generate DAG files (outer DAG + per-group sub-DAGs)
         submit_dir = self._create_submit_dir(workflow)
 
@@ -1470,6 +1473,31 @@ class MergeGroup(BaseModel):
     @property
     def total_nodes(self) -> int:
         return len(self.processing_nodes) + 3  # + landing + merge + cleanup
+
+    # ── Pileup File Resolution ────────────────────────────────────
+
+    async def _resolve_pileup(self, workflow) -> dict[str, list[str]]:
+        """Query Rucio for on-disk pileup files.
+
+        Steps with MCPileup or DataPileup reference pileup datasets whose
+        files may be only partially available on disk (many replicas are
+        tape-only). Before each DAG submission round, the DAG Planner queries
+        Rucio for files with on-disk replicas and writes the available list
+        to pileup_files.json in each merge group directory. At runtime the
+        processing wrapper injects this list into the CMSSW PSet
+        (process.mixData.input.fileNames or process.mix.input.fileNames),
+        replacing the ConfigCache defaults. This ensures jobs only attempt
+        to read accessible files. The query repeats each round to reflect
+        changes in replica availability.
+        """
+        pileup_files: dict[str, list[str]] = {}
+        for step in workflow.manifest_steps:
+            for field in ("mc_pileup", "data_pileup"):
+                ds = getattr(step, field, "") or ""
+                if ds and ds not in pileup_files:
+                    files = await self.rucio_adapter.get_available_pileup_files(ds)
+                    pileup_files[ds] = files
+        return pileup_files
 
     # ── DAG File Generation ──────────────────────────────────────
 
@@ -3290,6 +3318,18 @@ measured data for the bulk of its processing.
 **Rejected alternatives**:
 - *Three-tier thresholds (5%/30%)*: Two operator-attention states with no meaningful difference in available actions. Added complexity for no benefit.
 - *Automatic FAILED on high failure ratio*: Dangerous — transient infrastructure issues could trigger automatic failure and output invalidation on requests that would succeed after the issue resolves.
+
+### DD-15: ConfigCache for PSet retrieval (short-term), McM-based generation (long-term)
+
+**Decision**: Fetch pre-generated PSets from CMS ConfigCache (CouchDB) using the `ConfigCacheID` present in each step of a StepChain request. One HTTP GET per step (`{configcache_url}/{ConfigCacheID}/configFile`), no CMSSW environment needed. Falls back to generated test stubs if ConfigCache is unreachable or no `ConfigCacheID` is present.
+
+**Why**: Real CMSSW PSets contain physics modules, filters, and output module definitions that test stubs lack. Fetching from ConfigCache is the simplest path to production-quality sandboxes — it requires only an authenticated HTTP GET, no CMSSW setup or `cmsDriver.py` execution.
+
+**Long-term direction**: Generate PSets from `cmsDriver.py` commands via McM's public API (`/mcm/public/restapi/requests/get_setup/{PrepID}`). Each step's PrepID is already in the request spec. This removes the dependency on WMCore's CouchDB-based ConfigCache infrastructure.
+
+**Rejected alternatives**:
+- *Run cmsDriver.py at sandbox creation time*: Requires a full CMSSW environment on the WMS2 host. Heavyweight and slow for a step that only needs to produce a Python config file.
+- *Embed PSets in the request spec*: PSets can be hundreds of KB. ReqMgr2 request documents are not designed for large binary payloads.
 
 ---
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from wms2.config import Settings
-from wms2.core.error_handler import ErrorHandler
+from wms2.core.error_handler import CompletionResult, ErrorHandler
 from wms2.models.enums import DAGStatus, WorkflowStatus
 
 from .conftest import make_request_row
@@ -88,17 +88,18 @@ def handler(repo, condor, settings):
 
 
 async def test_low_failure_ratio_triggers_rescue(handler, repo):
-    """1/100 failed (1%) → 'rescue', rescue DAG created."""
-    dag = _make_dag(nodes_done=99, nodes_failed=1, total_nodes=100)
+    """1/10 work units failed (10%) → 'rescue', rescue DAG created."""
+    dag = _make_dag(nodes_done=99, nodes_failed=1, total_nodes=100, total_work_units=10)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
     new_dag = _make_dag()
     repo.create_dag.return_value = new_dag
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
+    result = await handler.handle_dag_completion(dag, request, workflow)
 
-    assert action == "rescue"
+    assert isinstance(result, CompletionResult)
+    assert result.action == "rescue"
     repo.create_dag.assert_called_once()
     create_kwargs = repo.create_dag.call_args[1]
     assert create_kwargs["parent_dag_id"] == dag.id
@@ -109,53 +110,53 @@ async def test_low_failure_ratio_triggers_rescue(handler, repo):
 
 
 async def test_below_threshold_triggers_rescue(handler, repo):
-    """3/20 failed (15%) — below 20% threshold → 'rescue'."""
-    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20)
+    """3/20 work units failed (15%) — below 20% threshold → 'rescue'."""
+    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
     new_dag = _make_dag()
     repo.create_dag.return_value = new_dag
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
+    result = await handler.handle_dag_completion(dag, request, workflow)
 
-    assert action == "rescue"
+    assert result.action == "rescue"
     repo.create_dag.assert_called_once()
 
 
 async def test_at_threshold_holds(handler, repo):
-    """4/20 failed (20%) — at threshold → 'hold'."""
-    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20)
+    """4/20 work units failed (20%) — at threshold → 'hold'."""
+    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
+    result = await handler.handle_dag_completion(dag, request, workflow)
 
-    assert action == "hold"
+    assert result.action == "hold"
     repo.create_dag.assert_not_called()
 
 
 async def test_high_failure_ratio_holds(handler, repo):
-    """8/20 failed (40%) — above threshold → 'hold'."""
-    dag = _make_dag(nodes_done=12, nodes_failed=8, total_nodes=20)
+    """8/20 work units failed (40%) — above threshold → 'hold'."""
+    dag = _make_dag(nodes_done=12, nodes_failed=8, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
+    result = await handler.handle_dag_completion(dag, request, workflow)
 
-    assert action == "hold"
+    assert result.action == "hold"
     repo.create_dag.assert_not_called()
 
 
 async def test_zero_successes_holds(handler, repo):
     """0/20 succeeded (100% failure) → 'hold' (not auto-abort)."""
-    dag = _make_dag(nodes_done=0, nodes_failed=20, total_nodes=20)
+    dag = _make_dag(nodes_done=0, nodes_failed=20, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
+    result = await handler.handle_dag_completion(dag, request, workflow)
 
-    assert action == "hold"
+    assert result.action == "hold"
     # FAILED is manual only — error handler never sets it
     repo.update_workflow.assert_not_called()
 
@@ -209,9 +210,9 @@ async def test_max_rescue_attempts_exceeded(repo, condor):
     workflow = _make_workflow(dag_id=dag3.id)
 
     # ratio is 1% (below threshold), but max rescues blocks it
-    action = await handler.handle_dag_completion(dag3, request, workflow)
+    result = await handler.handle_dag_completion(dag3, request, workflow)
 
-    assert action == "hold"
+    assert result.action == "hold"
     # No workflow status change — FAILED is manual only
     repo.update_workflow.assert_not_called()
 
@@ -221,7 +222,7 @@ async def test_max_rescue_attempts_exceeded(repo, condor):
 
 async def test_dag_history_recorded(handler, repo):
     """create_dag_history called with event_type and detail."""
-    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20)
+    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
@@ -232,6 +233,7 @@ async def test_dag_history_recorded(handler, repo):
     assert call_kwargs["event_type"] == "dag_completion"
     assert call_kwargs["dag_id"] == dag.id
     assert "failure_ratio" in call_kwargs["detail"]
+    assert "total_work_units" in call_kwargs["detail"]
 
 
 # ── Custom Thresholds ────────────────────────────────────────
@@ -243,15 +245,15 @@ async def test_custom_threshold(repo, condor):
     handler = ErrorHandler(repo, condor, settings)
 
     # 3/20 = 15% < 30% custom threshold → rescue
-    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20)
+    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
     new_dag = _make_dag()
     repo.create_dag.return_value = new_dag
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
-    assert action == "rescue"
+    result = await handler.handle_dag_completion(dag, request, workflow)
+    assert result.action == "rescue"
 
 
 async def test_custom_threshold_holds_above(repo, condor):
@@ -259,23 +261,23 @@ async def test_custom_threshold_holds_above(repo, condor):
     settings = _make_settings(error_hold_threshold=0.10)
     handler = ErrorHandler(repo, condor, settings)
 
-    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20)
+    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
-    action = await handler.handle_dag_completion(dag, request, workflow)
-    assert action == "hold"
+    result = await handler.handle_dag_completion(dag, request, workflow)
+    assert result.action == "hold"
 
 
 # ── POST Data Reading ────────────────────────────────────────
 
 
 async def test_read_post_data(handler, tmp_path):
-    """read_post_data reads final post.json files from submit directory."""
+    """read_post_data reads all post.json files (final and non-final)."""
     mg_dir = tmp_path / "mg_000000"
     mg_dir.mkdir()
 
-    # Final post.json (should be included)
+    # Final post.json
     final_post = {
         "node_name": "proc_000001",
         "final": True,
@@ -284,7 +286,7 @@ async def test_read_post_data(handler, tmp_path):
     }
     (mg_dir / "proc_000001.post.json").write_text(json.dumps(final_post))
 
-    # Non-final post.json (should be excluded)
+    # Non-final post.json (early-aborted node — still included)
     intermediate_post = {
         "node_name": "proc_000002",
         "final": False,
@@ -294,9 +296,9 @@ async def test_read_post_data(handler, tmp_path):
     (mg_dir / "proc_000002.post.json").write_text(json.dumps(intermediate_post))
 
     results = handler.read_post_data(str(tmp_path))
-    assert len(results) == 1
-    assert results[0]["node_name"] == "proc_000001"
-    assert results[0]["classification"]["category"] == "data"
+    assert len(results) == 2
+    node_names = {r["node_name"] for r in results}
+    assert node_names == {"proc_000001", "proc_000002"}
 
 
 async def test_read_post_data_empty_dir(handler, tmp_path):
@@ -365,7 +367,7 @@ async def test_handle_dag_completion_bans_problem_sites(repo, condor):
     site_manager.ban_site = AsyncMock(return_value=MagicMock())
     handler = ErrorHandler(repo, condor, settings, site_manager=site_manager)
 
-    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20)
+    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
@@ -379,8 +381,10 @@ async def test_handle_dag_completion_bans_problem_sites(repo, condor):
     ]
 
     with patch.object(handler, "read_post_data", return_value=post_data):
-        await handler.handle_dag_completion(dag, request, workflow)
+        result = await handler.handle_dag_completion(dag, request, workflow)
 
+    assert result.action == "hold"
+    assert "T2_US_Bad" in result.problem_sites
     # ban_site called for the problem site
     site_manager.ban_site.assert_called()
     ban_calls = site_manager.ban_site.call_args_list
@@ -393,7 +397,7 @@ async def test_handle_dag_completion_no_site_manager(repo, condor):
     settings = _make_settings()
     handler = ErrorHandler(repo, condor, settings)  # no site_manager
 
-    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20)
+    dag = _make_dag(nodes_done=16, nodes_failed=4, total_nodes=20, total_work_units=20)
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
@@ -405,9 +409,10 @@ async def test_handle_dag_completion_no_site_manager(repo, condor):
 
     with patch.object(handler, "read_post_data", return_value=post_data):
         # Should not raise — just logs warning
-        action = await handler.handle_dag_completion(dag, request, workflow)
+        result = await handler.handle_dag_completion(dag, request, workflow)
 
-    assert action == "hold"
+    assert result.action == "hold"
+    assert "T2_US_Bad" in result.problem_sites
 
 
 # ── Failure Data Builder ─────────────────────────────────────
@@ -427,3 +432,92 @@ async def test_build_failure_data(handler):
     assert result["failed_jobs"] == 2
     assert result["categories"]["infrastructure"] == 1
     assert result["categories"]["data"] == 1
+
+
+# ── Site Exclusions for Rescue DAGs ──────────────────────────
+
+
+async def test_apply_site_exclusions(tmp_path):
+    """apply_site_exclusions rewrites landing.sub files with Requirements."""
+    mg_dir = tmp_path / "mg_000000"
+    mg_dir.mkdir()
+    landing = mg_dir / "landing.sub"
+    landing.write_text("executable = /bin/true\nqueue\n")
+
+    mg_dir2 = tmp_path / "mg_000001"
+    mg_dir2.mkdir()
+    landing2 = mg_dir2 / "landing.sub"
+    landing2.write_text("executable = /bin/true\nqueue\n")
+
+    ErrorHandler.apply_site_exclusions(str(tmp_path), ["T2_US_Bad", "T2_DE_Broken"])
+
+    content = landing.read_text()
+    assert 'TARGET.GLIDEIN_CMSSite =!= "T2_US_Bad"' in content
+    assert 'TARGET.GLIDEIN_CMSSite =!= "T2_DE_Broken"' in content
+    assert "queue" in content
+
+    content2 = landing2.read_text()
+    assert 'TARGET.GLIDEIN_CMSSite =!= "T2_US_Bad"' in content2
+
+
+async def test_apply_site_exclusions_replaces_existing(tmp_path):
+    """Existing Requirements line is replaced, not duplicated."""
+    mg_dir = tmp_path / "mg_000000"
+    mg_dir.mkdir()
+    landing = mg_dir / "landing.sub"
+    landing.write_text(
+        'executable = /bin/true\n'
+        'Requirements = TARGET.GLIDEIN_CMSSite =!= "T2_US_Old"\n'
+        'queue\n'
+    )
+
+    ErrorHandler.apply_site_exclusions(str(tmp_path), ["T2_US_New"])
+
+    content = landing.read_text()
+    assert content.count("Requirements") == 1
+    assert 'TARGET.GLIDEIN_CMSSite =!= "T2_US_New"' in content
+    assert "T2_US_Old" not in content
+
+
+async def test_apply_site_exclusions_empty_list(tmp_path):
+    """Empty banned_sites is a no-op."""
+    mg_dir = tmp_path / "mg_000000"
+    mg_dir.mkdir()
+    landing = mg_dir / "landing.sub"
+    original = "executable = /bin/true\nqueue\n"
+    landing.write_text(original)
+
+    ErrorHandler.apply_site_exclusions(str(tmp_path), [])
+
+    assert landing.read_text() == original
+
+
+# ── CompletionResult with problem sites ──────────────────────
+
+
+async def test_completion_result_includes_problem_sites(repo, condor):
+    """Rescue result includes problem_sites from site analysis."""
+    settings = _make_settings()
+    handler = ErrorHandler(repo, condor, settings)
+
+    # 1/10 work units failed → rescue
+    dag = _make_dag(nodes_done=9, nodes_failed=1, total_nodes=100, total_work_units=10)
+    request = make_request_row(status="active")
+    workflow = _make_workflow(dag_id=dag.id)
+
+    new_dag = _make_dag()
+    repo.create_dag.return_value = new_dag
+
+    # Post data with a problem site
+    post_data = [
+        {"job": {"site": "T2_US_Bad"}, "classification": {"category": "infrastructure"}},
+        {"job": {"site": "T2_US_Bad"}, "classification": {"category": "infrastructure"}},
+        {"job": {"site": "T2_US_Bad"}, "classification": {"category": "infrastructure"}},
+        {"job": {"site": "T2_US_Bad"}, "classification": {"category": "infrastructure"}},
+    ]
+
+    with patch.object(handler, "read_post_data", return_value=post_data):
+        result = await handler.handle_dag_completion(dag, request, workflow)
+
+    assert result.action == "rescue"
+    assert "T2_US_Bad" in result.problem_sites

@@ -7,13 +7,19 @@ Uses a single 20% threshold (error_hold_threshold):
 - Below threshold + rescue attempts remaining → submit rescue DAG
 - At or above threshold, or rescues exhausted → hold for operator
 
+The failure ratio is computed per work unit (merge group), not per inner
+node — a sub-DAG that fails is one work unit failure regardless of how
+many processing nodes it contains.
+
 See docs/error_handling.md Section 3 for the full design.
 """
 
+import dataclasses
 import glob
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 
 from wms2.adapters.base import CondorAdapter
@@ -24,6 +30,13 @@ from wms2.models.enums import DAGStatus, WorkflowStatus
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass
+class CompletionResult:
+    """Result of handle_dag_completion: action + context for the caller."""
+    action: str                    # "rescue" or "hold"
+    problem_sites: list[str]       # sites to exclude from rescue landing nodes
+
+
 class ErrorHandler:
     def __init__(self, repository: Repository, condor_adapter: CondorAdapter, settings: Settings,
                  site_manager=None):
@@ -32,18 +45,22 @@ class ErrorHandler:
         self.settings = settings
         self.site_manager = site_manager
 
-    async def handle_dag_completion(self, dag, request, workflow) -> str:
-        """Handle DAG that completed with failures. Returns 'rescue' or 'hold'."""
-        ratio = dag.nodes_failed / max(dag.total_nodes, 1)
+    async def handle_dag_completion(self, dag, request, workflow) -> CompletionResult:
+        """Handle DAG that completed with failures. Returns CompletionResult."""
+        # Ratio is per work unit, not per inner node — a failed sub-DAG
+        # is one work unit regardless of how many proc nodes it contains.
+        ratio = dag.nodes_failed / max(dag.total_work_units, 1)
         await self._record_event(dag, "dag_completion", {
             "failure_ratio": ratio,
             "nodes_done": dag.nodes_done,
             "nodes_failed": dag.nodes_failed,
             "total_nodes": dag.total_nodes,
+            "total_work_units": dag.total_work_units,
         })
 
         # Read POST script side files for failure analysis
         post_data = self.read_post_data(dag.submit_dir)
+        problem_sites: list[str] = []
         if post_data:
             self._log_failure_summary(post_data, request.request_name)
             problem_sites = self.analyze_site_failures(post_data)
@@ -68,20 +85,25 @@ class ErrorHandler:
                 "Max rescue attempts (%d) reached for %s",
                 rescue_count, request.request_name,
             )
-            return "hold"
+            return CompletionResult(action="hold", problem_sites=problem_sites)
 
         if ratio < self.settings.error_hold_threshold:
             await self._prepare_rescue(dag, request, workflow)
-            return "rescue"
+            return CompletionResult(action="rescue", problem_sites=problem_sites)
         else:
             logger.error(
                 "ALERT [dag_completion] %s: %.1f%% failed — held for operator",
                 request.request_name, ratio * 100,
             )
-            return "hold"
+            return CompletionResult(action="hold", problem_sites=problem_sites)
 
     def read_post_data(self, submit_dir: str) -> list[dict]:
-        """Read all final post.json files from submit directory tree."""
+        """Read all post.json files from submit directory tree.
+
+        All entries are included regardless of their ``final`` flag —
+        early-aborted nodes write ``final=False`` but still contain valid
+        failure data needed for site analysis and ratio decisions.
+        """
         post_files = glob.glob(
             os.path.join(submit_dir, "**", "*.post.json"), recursive=True
         )
@@ -90,8 +112,7 @@ class ErrorHandler:
             try:
                 with open(path) as f:
                     data = json.load(f)
-                    if data.get("final"):
-                        results.append(data)
+                    results.append(data)
             except (json.JSONDecodeError, OSError):
                 logger.warning("Failed to read post data: %s", path)
         return results
@@ -117,6 +138,37 @@ class ErrorHandler:
             if total > 0 and failures / total > 0.5 and failures >= 3:
                 problem_sites.append(site)
         return problem_sites
+
+    @staticmethod
+    def apply_site_exclusions(submit_dir: str, banned_sites: list[str]) -> None:
+        """Rewrite landing.sub files in all merge groups to add site exclusions.
+
+        Before submitting a rescue DAG, this ensures the new landing nodes
+        won't pick the same broken site again. Adds/updates a Requirements
+        line with ``TARGET.GLIDEIN_CMSSite =!= "site"`` clauses.
+        """
+        if not banned_sites:
+            return
+        exclusion_clauses = " && ".join(
+            f'TARGET.GLIDEIN_CMSSite =!= "{site}"' for site in banned_sites
+        )
+        landing_files = glob.glob(os.path.join(submit_dir, "mg_*", "landing.sub"))
+        for landing_path in landing_files:
+            try:
+                with open(landing_path) as f:
+                    content = f.read()
+                # Remove any existing Requirements line (we'll replace it)
+                content = re.sub(r'^Requirements\s*=.*\n?', '', content, flags=re.MULTILINE)
+                # Add the new Requirements line before the queue statement
+                if "queue" in content:
+                    content = content.replace("queue", f"Requirements = {exclusion_clauses}\nqueue")
+                else:
+                    content += f"\nRequirements = {exclusion_clauses}\n"
+                with open(landing_path, "w") as f:
+                    f.write(content)
+                logger.info("Added site exclusions to %s: %s", landing_path, banned_sites)
+            except OSError:
+                logger.warning("Failed to update landing.sub: %s", landing_path)
 
     def _build_failure_data(self, post_data: list[dict], site_name: str) -> dict:
         """Build failure summary for a specific site from POST data."""

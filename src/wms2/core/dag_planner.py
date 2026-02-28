@@ -273,6 +273,23 @@ class DAGPlanner:
                 workflow_id=workflow.id
             )
 
+        # Resolve pileup file availability via Rucio
+        pileup_files: dict[str, list[str]] = {}
+        manifest_steps = config.get("manifest_steps", [])
+        if self.rucio and manifest_steps:
+            for step in manifest_steps:
+                for field in ("mc_pileup", "data_pileup"):
+                    ds = step.get(field, "")
+                    if ds and ds not in pileup_files:
+                        try:
+                            files = await self.rucio.get_available_pileup_files(ds)
+                            pileup_files[ds] = files
+                            logger.info("Pileup %s: %d on-disk files", ds, len(files))
+                        except Exception:
+                            logger.warning(
+                                "Rucio pileup query failed for %s", ds, exc_info=True
+                            )
+
         dag_file_path = _generate_dag_files(
             submit_dir=submit_dir,
             workflow_id=str(workflow.id),
@@ -287,6 +304,7 @@ class DAGPlanner:
             sandbox_path=sandbox_path,
             resource_params=resource_params or None,
             banned_sites=banned_sites or None,
+            pileup_files=pileup_files or None,
         )
 
         # 8. Count totals
@@ -418,7 +436,6 @@ class DAGPlanner:
         params = workflow.splitting_params or {}
         events_per_job = params.get("events_per_job") or params.get("eventsPerJob") or 100_000
         total_events = config.get("request_num_events") or 0
-        max_files = self.settings.max_input_files
 
         if total_events <= 0:
             logger.warning("GEN workflow %s has no RequestNumEvents, using 1 node", workflow.id)
@@ -431,10 +448,6 @@ class DAGPlanner:
             return []
 
         num_jobs = math.ceil(remaining_events / events_per_job)
-
-        # Respect --max-files limit (reinterpreted as max jobs for GEN)
-        if max_files > 0:
-            num_jobs = min(num_jobs, max_files)
 
         # Adaptive cap: limit batch size per round
         if max_jobs > 0:
@@ -539,6 +552,7 @@ def _generate_dag_files(
     sandbox_path: str | None = None,
     resource_params: dict[str, int] | None = None,
     banned_sites: list[str] | None = None,
+    pileup_files: dict[str, list[str]] | None = None,
 ) -> str:
     """Generate all DAG files on disk. Returns path to outer workflow.dag."""
     submit_path = Path(submit_dir)
@@ -571,6 +585,13 @@ def _generate_dag_files(
 
         outer_lines.append(f"SUBDAG EXTERNAL {mg_name} {mg_dir / 'group.dag'} DIR {mg_dir}")
 
+        # Write pileup_files.json if pileup datasets were resolved
+        if pileup_files:
+            _write_file(
+                str(mg_dir / "pileup_files.json"),
+                json.dumps(pileup_files, indent=2),
+            )
+
         # Generate merge group sub-DAG
         _generate_group_dag(
             group_dir=mg_dir,
@@ -584,6 +605,7 @@ def _generate_dag_files(
             sandbox_path=sandbox_path,
             resource_params=resource_params,
             banned_sites=banned_sites,
+            pileup_files=pileup_files,
         )
 
     # Category throttling for merge groups
@@ -610,6 +632,7 @@ def _generate_group_dag(
     sandbox_path: str | None = None,
     resource_params: dict[str, int] | None = None,
     banned_sites: list[str] | None = None,
+    pileup_files: dict[str, list[str]] | None = None,
 ) -> None:
     """Generate a single merge group sub-DAG (group.dag) + submit files."""
     exe = executables or {}
@@ -700,6 +723,11 @@ def _generate_group_dag(
     # Add output_info.json to proc transfer files so proc jobs can stage out
     if output_info_path and os.path.isfile(output_info_path):
         proc_transfer_files.append(output_info_path)
+
+    # Add pileup_files.json to proc transfer files for PSet injection
+    pileup_json_path = str(group_dir / "pileup_files.json")
+    if pileup_files and os.path.isfile(pileup_json_path):
+        proc_transfer_files.append(pileup_json_path)
 
     proc_nodes = merge_group.processing_nodes
     lines: list[str] = [
@@ -996,9 +1024,12 @@ if [ "$CLASSIFICATION" = "infrastructure_memory" ]; then
 fi
 
 # --- Early abort on repeated identical failures ---
-# If 3+ different proc nodes failed with the same exit code, this is systemic.
+# If N different proc nodes failed with the same exit code, this is systemic.
 # Abort the sub-DAG instead of burning through all retries on remaining nodes.
-IDENTICAL_THRESHOLD=3
+# Threshold scales to group size: min(proc_count, 3) so a 2-node group
+# aborts after 2 matching failures instead of never reaching 3.
+PROC_COUNT=$(ls proc_*.sub 2>/dev/null | wc -l)
+IDENTICAL_THRESHOLD=$((PROC_COUNT < 3 ? PROC_COUNT : 3))
 CURRENT_EXIT="$EXIT_CODE"
 match_count=0
 for pj in proc_*.post.json; do
@@ -1021,8 +1052,15 @@ case "$CLASSIFICATION" in
         exit 1 ;;
     permanent|data)
         exit $UNLESS_EXIT ;;
-    infrastructure|infrastructure_memory)
-        sleep 300
+    infrastructure)
+        # Site-pinned sub-DAG: retrying on same broken site is pointless.
+        # Exit with UNLESS_EXIT (42) so DAGMan skips retries — Level 2
+        # recovery (rescue DAG) will pick a different site.
+        exit $UNLESS_EXIT ;;
+    infrastructure_memory)
+        # Memory bump already applied to .sub file above — retry on same
+        # site with more memory is valid.
+        sleep 60
         exit 1 ;;
     catastrophic)
         exit $ABORT_EXIT ;;
@@ -1187,6 +1225,13 @@ run_step() {
     mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
     cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
     [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
+    # Rewrite catalog URLs in copied siteconf to use absolute paths within _siteconf.
+    # TrivialFileCatalog resolves relative to CWD, not SITECONFIG_PATH, so we must
+    # make the PhEDEx/storage.xml reference absolute to where we copied it.
+    for slc in "$WORK_DIR/_siteconf/JobConfig/site-local-config.xml" \
+               "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/site-local-config.xml"; do
+        [[ -f "$slc" ]] && sed -i "s|trivialcatalog_file:[^?]*storage.xml|trivialcatalog_file:$WORK_DIR/_siteconf/PhEDEx/storage.xml|g" "$slc"
+    done
 
     cat > _step_runner.sh <<STEPEOF
 #!/bin/bash
@@ -1375,6 +1420,10 @@ run_step0_parallel() {
     mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
     cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
     [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
+    for slc in "$WORK_DIR/_siteconf/JobConfig/site-local-config.xml" \
+               "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/site-local-config.xml"; do
+        [[ -f "$slc" ]] && sed -i "s|trivialcatalog_file:[^?]*storage.xml|trivialcatalog_file:$WORK_DIR/_siteconf/PhEDEx/storage.xml|g" "$slc"
+    done
 
     # Setup CMSSW project once (before forking instances) via cmssw-env
     cat > "$WORK_DIR/_setup_cmssw.sh" <<SETUPEOF
@@ -1527,6 +1576,10 @@ run_all_steps_pipeline() {
     mkdir -p "$WORK_DIR/_siteconf/SITECONF/local/JobConfig"
     cp "$SITE_CFG/JobConfig/site-local-config.xml" "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/" 2>/dev/null || true
     [[ -d "$SITE_CFG/PhEDEx" ]] && cp -r "$SITE_CFG/PhEDEx" "$WORK_DIR/_siteconf/SITECONF/local/"
+    for slc in "$WORK_DIR/_siteconf/JobConfig/site-local-config.xml" \
+               "$WORK_DIR/_siteconf/SITECONF/local/JobConfig/site-local-config.xml"; do
+        [[ -f "$slc" ]] && sed -i "s|trivialcatalog_file:[^?]*storage.xml|trivialcatalog_file:$WORK_DIR/_siteconf/PhEDEx/storage.xml|g" "$slc"
+    done
 
     # Setup all unique CMSSW versions via cmssw-env
     local setup_versions=()
@@ -1643,6 +1696,26 @@ if nthreads > 1:
     lines.append('    process.options = cms.untracked.PSet()')
     lines.append('process.options.numberOfThreads = cms.untracked.uint32(' + str(nthreads) + ')')
     lines.append('process.options.numberOfStreams = cms.untracked.uint32(0)')
+
+# Override pileup file list with Rucio-resolved on-disk files
+import json as _json
+for _pu_candidate in [os.path.join(os.path.dirname(pset), '..', 'pileup_files.json'), 'pileup_files.json']:
+    if os.path.isfile(_pu_candidate):
+        _pu = _json.load(open(_pu_candidate))
+        _manifest_path = os.path.join(os.path.dirname(pset), '..', 'manifest.json')
+        if not os.path.isfile(_manifest_path):
+            _manifest_path = 'manifest.json'
+        if os.path.isfile(_manifest_path):
+            _manifest = _json.load(open(_manifest_path))
+            _step = _manifest.get('steps', [{}])[step_idx] if step_idx < len(_manifest.get('steps', [])) else {}
+            _ds = _step.get('mc_pileup') or _step.get('data_pileup', '')
+            if _ds and _ds in _pu and _pu[_ds]:
+                _pu_lfns = ', '.join(repr(f) for f in _pu[_ds])
+                lines.append('for _mixer in [\"mixData\", \"mix\"]:')
+                lines.append('    if hasattr(process, _mixer) and hasattr(getattr(process, _mixer), \"input\"):')
+                lines.append('        getattr(process, _mixer).input.fileNames = cms.untracked.vstring(' + _pu_lfns + ')')
+                lines.append('        print(\"WMS2: Overrode \" + _mixer + \".input.fileNames with \" + str(len(_pu[\"' + _ds + '\"])) + \" on-disk pileup files\")')
+        break
 
 with open(pset, 'a') as f:
     f.write(chr(10).join(lines) + chr(10))
@@ -1915,6 +1988,26 @@ if nthreads > 1:
     lines.append('    process.options = cms.untracked.PSet()')
     lines.append('process.options.numberOfThreads = cms.untracked.uint32(' + str(nthreads) + ')')
     lines.append('process.options.numberOfStreams = cms.untracked.uint32(0)')
+
+# Override pileup file list with Rucio-resolved on-disk files
+import json as _json
+for _pu_candidate in [os.path.join(os.path.dirname(pset), '..', 'pileup_files.json'), 'pileup_files.json']:
+    if os.path.isfile(_pu_candidate):
+        _pu = _json.load(open(_pu_candidate))
+        _manifest_path = os.path.join(os.path.dirname(pset), '..', 'manifest.json')
+        if not os.path.isfile(_manifest_path):
+            _manifest_path = 'manifest.json'
+        if os.path.isfile(_manifest_path):
+            _manifest = _json.load(open(_manifest_path))
+            _step = _manifest.get('steps', [{}])[step_idx] if step_idx < len(_manifest.get('steps', [])) else {}
+            _ds = _step.get('mc_pileup') or _step.get('data_pileup', '')
+            if _ds and _ds in _pu and _pu[_ds]:
+                _pu_lfns = ', '.join(repr(f) for f in _pu[_ds])
+                lines.append('for _mixer in [\"mixData\", \"mix\"]:')
+                lines.append('    if hasattr(process, _mixer) and hasattr(getattr(process, _mixer), \"input\"):')
+                lines.append('        getattr(process, _mixer).input.fileNames = cms.untracked.vstring(' + _pu_lfns + ')')
+                lines.append('        print(\"WMS2: Overrode \" + _mixer + \".input.fileNames with \" + str(len(_pu[\"' + _ds + '\"])) + \" on-disk pileup files\")')
+        break
 
 with open(pset, 'a') as f:
     f.write(chr(10).join(lines) + chr(10))

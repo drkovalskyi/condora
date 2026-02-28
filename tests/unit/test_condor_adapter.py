@@ -38,7 +38,7 @@ async def test_submit_dag(adapter):
 
     assert cluster_id == "99999"
     assert schedd == "test-schedd"
-    adapter._mock.Submit.from_dag.assert_called_once_with("/tmp/test.dag")
+    adapter._mock.Submit.from_dag.assert_called_once_with("/tmp/test.dag", options={})
 
 
 async def test_submit_job(adapter):

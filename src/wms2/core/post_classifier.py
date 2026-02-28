@@ -87,6 +87,19 @@ INFRASTRUCTURE_CODES: set[int] = {
 # Memory-specific subset (trigger request_memory bump)
 MEMORY_CODES: set[int] = {50660, 50661, 8004, 8030, 8031}
 
+# Error message patterns that override 8001 (generic CMS Exception) from
+# permanent to infrastructure.  8001 is a catch-all; when the message reveals
+# a site-environment cause the failure is retryable at a different site.
+_INFRA_MESSAGE_PATTERNS: list[str] = [
+    "site-local-config",
+]
+
+
+def _is_infra_by_message(error_message: str) -> bool:
+    """Check if an error message matches a known infrastructure pattern."""
+    msg_lower = error_message.lower()
+    return any(pat in msg_lower for pat in _INFRA_MESSAGE_PATTERNS)
+
 
 def classify_error(
     cmssw_exit_code: int,
@@ -120,6 +133,16 @@ def classify_error(
     code = cmssw_exit_code if cmssw_exit_code != 0 else job_exit_code
 
     if code in PERMANENT_CODES:
+        # 8001 is generic "CMS Exception" — check if the message reveals
+        # an infrastructure cause (e.g. site-local-config not found)
+        if code == 8001 and error_message and _is_infra_by_message(error_message):
+            return {
+                "category": "infrastructure",
+                "retryable": True,
+                "bad_input_files": [],
+                "action": "retry_with_cooloff",
+                "memory_exceeded": False,
+            }
         return {
             "category": "permanent",
             "retryable": False,
@@ -210,6 +233,12 @@ INFRASTRUCTURE_CODES = {
     60311, 60315, 60316, 60321,
 }
 MEMORY_CODES = {50660, 50661, 8004, 8030, 8031}
+_INFRA_MESSAGE_PATTERNS = ["site-local-config"]
+
+
+def _is_infra_by_message(msg):
+    msg_lower = msg.lower()
+    return any(pat in msg_lower for pat in _INFRA_MESSAGE_PATTERNS)
 
 
 def classify_error(cmssw_exit_code, job_exit_code, error_message=""):
@@ -221,6 +250,11 @@ def classify_error(cmssw_exit_code, job_exit_code, error_message=""):
         }
     code = cmssw_exit_code if cmssw_exit_code != 0 else job_exit_code
     if code in PERMANENT_CODES:
+        if code == 8001 and error_message and _is_infra_by_message(error_message):
+            return {
+                "category": "infrastructure", "retryable": True,
+                "bad_input_files": [], "action": "retry_with_cooloff", "memory_exceeded": False,
+            }
         return {
             "category": "permanent", "retryable": False,
             "bad_input_files": [], "action": "permanent_failure", "memory_exceeded": False,

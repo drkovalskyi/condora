@@ -29,9 +29,11 @@ class Settings(BaseSettings):
 
     # External services
     reqmgr2_url: str = "https://cmsweb.cern.ch/reqmgr2"
+    configcache_url: str = "https://cmsweb.cern.ch/couchdb/reqmgr_config_cache"
     dbs_url: str = "https://cmsweb.cern.ch/dbs/prod/global/DBSReader"
     rucio_url: str = "https://cms-rucio.cern.ch"
     rucio_account: str = "wms2"
+    rucio_home: str = "/tmp/rucio"
 
     # Agent identity
     agent_name: str = "wms2-agent"

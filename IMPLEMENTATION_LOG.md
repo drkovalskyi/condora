@@ -3738,3 +3738,42 @@ Added a pattern-detection block to the POST script (`_write_post_script()` in `d
 
 - All 440 unit tests pass
 - Block placement: after collector writes post.json, after OOM memory adjustment, before retry/sleep logic
+
+---
+
+## Pileup File Availability Check via Rucio (2026-02-28)
+
+### Problem
+
+CMSSW DIGIPremix steps require pileup (premix) files via xrootd. The ConfigCache PSet has a baked-in file list, but these may be tape-only and inaccessible. In the BPH test workflow, all 5 baked-in premix files were on tape, causing `FileOpenError: No servers are available to read the file`. The premix dataset has 69K total files but only ~31% (21K) have on-disk replicas.
+
+### Solution
+
+Before each DAG submission round, the DAG Planner queries Rucio for on-disk pileup files and injects the available list into the CMSSW PSet at runtime.
+
+### How It Works
+
+1. **`cli.py`**: Stores `manifest_steps` (with `mc_pileup`/`data_pileup` per step) in `config_data`
+2. **`dag_planner.py` plan_production_dag()**: Reads manifest_steps, queries `rucio.get_available_pileup_files(dataset)` for each unique pileup dataset
+3. **`dag_planner.py` _generate_dag_files()**: Writes `pileup_files.json` to each merge group directory; adds it to `transfer_input_files` in processing submit files
+4. **`dag_planner.py` wms2_proc.sh PSet injection**: Both pipeline and standard code paths read `pileup_files.json` + `manifest.json`, determine which pileup dataset the current step needs, and override `process.mixData.input.fileNames` (or `process.mix.input.fileNames`) with on-disk LFNs
+5. **`rucio.py`**: Uses rucio-clients Python API (`list_replicas`) in a thread to query for files with non-tape RSE replicas
+6. **`config.py`**: Added `rucio_home` setting for native rucio-client configuration
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/wms2/adapters/base.py` | Added `get_available_pileup_files()` abstract method to `RucioAdapter` |
+| `src/wms2/adapters/rucio.py` | Implemented via `rucio.client.Client.list_replicas()` in thread |
+| `src/wms2/adapters/mock.py` | Mock implementation returning `_pileup_files` attribute |
+| `src/wms2/core/dag_planner.py` | Pileup query in planner, `pileup_files.json` write, PSet injection in both code paths |
+| `src/wms2/cli.py` | Store `manifest_steps` in `config_data`, set `RUCIO_HOME` env var |
+| `src/wms2/config.py` | Added `rucio_home` setting |
+| `docs/spec.md` | Added pileup file resolution to DAG Planner section (4.5) |
+| `tests/unit/test_dag_planner.py` | 5 new tests for pileup resolution |
+
+### Verification
+
+- All 456 unit tests pass
+- 5 new pileup-specific tests: query called, JSON written, no query without steps, transfer_input_files, dedup

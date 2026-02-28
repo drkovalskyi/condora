@@ -1,6 +1,8 @@
 """Real Rucio adapter using httpx with X.509 certificate authentication."""
 
+import asyncio
 import logging
+import os
 import re
 from typing import Any
 
@@ -97,3 +99,23 @@ class RucioClient(RucioAdapter):
         url = f"{self._base_url}/rules/{rule_id}"
         resp = await self._client.delete(url)
         resp.raise_for_status()
+
+    async def get_available_pileup_files(self, dataset: str) -> list[str]:
+        """Get LFNs with on-disk replicas using rucio-clients Python API."""
+        return await asyncio.to_thread(self._get_pileup_sync, dataset)
+
+    def _get_pileup_sync(self, dataset: str) -> list[str]:
+        from rucio.client import Client as RucioNativeClient
+
+        rucio_home = os.environ.get("RUCIO_HOME", "/tmp/rucio")
+        os.environ.setdefault("RUCIO_HOME", rucio_home)
+        c = RucioNativeClient()
+        available = []
+        for replica in c.list_replicas(
+            [{"scope": "cms", "name": dataset}],
+            schemes=["root"],
+        ):
+            states = replica.get("states", {})
+            if any(rse for rse in states if not rse.endswith("_Tape")):
+                available.append(replica["name"])
+        return available

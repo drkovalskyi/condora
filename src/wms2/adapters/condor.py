@@ -40,14 +40,15 @@ class HTCondorAdapter(CondorAdapter):
     async def submit_job(self, submit_file: str) -> tuple[str, str]:
         return await asyncio.to_thread(self._submit_job_sync, submit_file)
 
-    def _submit_dag_sync(self, dag_file: str) -> tuple[str, str]:
-        dag_submit = htcondor2.Submit.from_dag(str(dag_file))
+    def _submit_dag_sync(self, dag_file: str, force: bool = False) -> tuple[str, str]:
+        options = {"Force": True} if force else {}
+        dag_submit = htcondor2.Submit.from_dag(str(dag_file), options=options)
         result = self._schedd.submit(dag_submit)
         cluster_id = str(result.cluster())
         return (cluster_id, self._schedd_name)
 
-    async def submit_dag(self, dag_file: str) -> tuple[str, str]:
-        return await asyncio.to_thread(self._submit_dag_sync, dag_file)
+    async def submit_dag(self, dag_file: str, force: bool = False) -> tuple[str, str]:
+        return await asyncio.to_thread(self._submit_dag_sync, dag_file, force)
 
     def _query_job_sync(self, cluster_id: str) -> dict[str, Any] | None:
         constraint = f"ClusterId == {cluster_id}"

@@ -8,8 +8,13 @@ class CondorAdapter(ABC):
         """Submit a job. Returns (cluster_id, schedd_name)."""
 
     @abstractmethod
-    async def submit_dag(self, dag_file: str) -> tuple[str, str]:
-        """Submit a DAG. Returns (dagman_cluster_id, schedd_name)."""
+    async def submit_dag(self, dag_file: str, force: bool = False) -> tuple[str, str]:
+        """Submit a DAG. Returns (dagman_cluster_id, schedd_name).
+
+        Args:
+            force: If True, pass Force option to from_dag() to allow
+                   resubmission over existing lock/output files (rescue DAGs).
+        """
 
     @abstractmethod
     async def query_job(self, schedd_name: str, cluster_id: str) -> dict[str, Any] | None:
@@ -90,6 +95,10 @@ class RucioAdapter(ABC):
     @abstractmethod
     async def delete_rule(self, rule_id: str) -> None:
         """Delete a Rucio rule."""
+
+    @abstractmethod
+    async def get_available_pileup_files(self, dataset: str) -> list[str]:
+        """Get LFNs with on-disk replicas for a pileup dataset."""
 
 
 class CRICAdapter(ABC):

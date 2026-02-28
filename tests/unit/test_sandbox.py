@@ -188,6 +188,7 @@ class TestCreateSandboxFromSpec:
                 data_pileup="",
                 event_streams=0,
                 request_num_events=0,
+                config_cache_id="",
             ))
         return StepChainSpec(
             request_name="test_spec",
