@@ -15,15 +15,15 @@ python scripts/fetch-workflow-info.py \
 
 ## Quick Reference
 
-| Name | Request | Type | Steps | Cores | Memory | FilterEff | CPU-days | Output Tiers |
-|------|---------|------|-------|-------|--------|-----------|----------|--------------|
-| NPS | `NPS-Run3Summer22EEGS-00049` | StepChain | 5 | 8 | 16 GB | 1.0 | 363.5 | MINIAODSIM, NANOAODSIM |
-| B2G | `B2G-Run3Summer23BPixwmLHEGS-06000` | StepChain | 5 | 8 | 16 GB | 1.0 | 17.7 | AODSIM, MINIAODSIM, NANOAODSIM |
-| GEN-QCD | `GEN-RunIII2024Summer24GS-00002` | StepChain | 5 | 8 | 16 GB | 0.0028 | 110,103.8 | AODSIM, MINIAODSIM, NANOAODSIM |
-| DY2L | `GEN-Run3Summer22EEwmLHEGS-00600` | StepChain | 5 | 4 | 8 GB | 0.1023 | 17,970.5 | AODSIM, MINIAODSIM, NANOAODSIM |
-| BPH | `BPH-RunIISummer20UL18GEN-00292` | StepChain | 7 | 16 | 32 GB | 0.00034 | 171,637.3 | MINIAODSIM, NANOAODSIM, AODSIM |
+| Name    | Request                                  | Type      | Steps | Cores | Memory | FilterEff | CPU-days  | Output Tiers                  |
+|---------|------------------------------------------|-----------|-------|-------|--------|-----------|-----------|-------------------------------|
+| NPS     | `NPS-Run3Summer22EEGS-00049`             | StepChain |     5 |     8 |  16 GB |   1.0     |       364 | MINIAODSIM, NANOAODSIM        |
+| B2G     | `B2G-Run3Summer23BPixwmLHEGS-06000`     | StepChain |     5 |     8 |  16 GB |   1.0     |        18 | AODSIM, MINIAODSIM, NANOAODSIM|
+| GEN-QCD | `GEN-RunIII2024Summer24GS-00002`        | StepChain |     5 |     8 |  16 GB |   0.0028  |   110,104 | AODSIM, MINIAODSIM, NANOAODSIM|
+| DY2L    | `GEN-Run3Summer22EEwmLHEGS-00600`       | StepChain |     5 |     4 |   8 GB |   0.1023  |    17,971 | AODSIM, MINIAODSIM, NANOAODSIM|
+| BPH     | `BPH-RunIISummer20UL18GEN-00292`         | StepChain |     7 |    16 |  32 GB |   0.00034 |   171,637 | MINIAODSIM, NANOAODSIM, AODSIM|
 
-CPU-days = TimePerEvent × Multicore × RequestNumEvents / FilterEfficiency / 86400
+CPU-days = TimePerEvent x Multicore x RequestNumEvents / FilterEfficiency / 86400
 
 TimePerEvent is per *generated* event (the full chain cost per one event entering step 1).
 RequestNumEvents is desired *output* events. For GenFilter workflows, the actual number
@@ -44,13 +44,13 @@ of generated events is RequestNumEvents / FilterEfficiency.
 - **CPU-days**: 363.5
 - **Output tiers**: MINIAODSIM, NANOAODSIM
 
-| Step | Name | CMSSW | Arch | Keep | GlobalTag |
-|------|------|-------|------|------|-----------|
-| 1 | NPS-Run3Summer22EEGS-00049_0 | CMSSW_12_4_25 | el8_amd64_gcc10 | no | 124X_mcRun3_2022_realistic_postEE_v1 |
-| 2 | NPS-Run3Summer22EEDRPremix-00840_0 | CMSSW_12_4_25 | el8_amd64_gcc10 | no | 124X_mcRun3_2022_realistic_postEE_v1 |
-| 3 | NPS-Run3Summer22EEDRPremix-00840_1 | CMSSW_12_4_25 | el8_amd64_gcc10 | no | 124X_mcRun3_2022_realistic_postEE_v1 |
-| 4 | NPS-Run3Summer22EEMiniAODv4-00841_0 | CMSSW_13_0_23 | el8_amd64_gcc11 | yes | 130X_mcRun3_2022_realistic_postEE_v6 |
-| 5 | NPS-Run3Summer22EENanoAODv12-00209_0 | CMSSW_13_0_23 | el8_amd64_gcc11 | yes | 130X_mcRun3_2022_realistic_postEE_v6 |
+| Step | Name                                    | CMSSW         | Arch            | Keep | GlobalTag                              |
+|------|-----------------------------------------|---------------|-----------------|------|----------------------------------------|
+|    1 | NPS-Run3Summer22EEGS-00049_0            | CMSSW_12_4_25 | el8_amd64_gcc10 | no   | 124X_mcRun3_2022_realistic_postEE_v1   |
+|    2 | NPS-Run3Summer22EEDRPremix-00840_0      | CMSSW_12_4_25 | el8_amd64_gcc10 | no   | 124X_mcRun3_2022_realistic_postEE_v1   |
+|    3 | NPS-Run3Summer22EEDRPremix-00840_1      | CMSSW_12_4_25 | el8_amd64_gcc10 | no   | 124X_mcRun3_2022_realistic_postEE_v1   |
+|    4 | NPS-Run3Summer22EEMiniAODv4-00841_0     | CMSSW_13_0_23 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2022_realistic_postEE_v6   |
+|    5 | NPS-Run3Summer22EENanoAODv12-00209_0    | CMSSW_13_0_23 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2022_realistic_postEE_v6   |
 
 **Output datasets**:
 ```
@@ -77,13 +77,13 @@ of generated events is RequestNumEvents / FilterEfficiency.
 - **CPU-days**: 17.7
 - **Output tiers**: AODSIM, MINIAODSIM, NANOAODSIM
 
-| Step | Name | CMSSW | Arch | Keep | GlobalTag |
-|------|------|-------|------|------|-----------|
-| 1 | B2G-Run3Summer23BPixwmLHEGS-06000_0 | CMSSW_13_0_23 | el8_amd64_gcc11 | no | 130X_mcRun3_2023_realistic_postBPix_v6 |
-| 2 | B2G-Run3Summer23BPixDRPremix-05176_0 | CMSSW_13_0_23 | el8_amd64_gcc11 | no | 130X_mcRun3_2023_realistic_postBPix_v6 |
-| 3 | B2G-Run3Summer23BPixDRPremix-05176_1 | CMSSW_13_0_23 | el8_amd64_gcc11 | yes | 130X_mcRun3_2023_realistic_postBPix_v6 |
-| 4 | B2G-Run3Summer23BPixMiniAODv4-05176_0 | CMSSW_13_0_23 | el8_amd64_gcc11 | yes | 130X_mcRun3_2023_realistic_postBPix_v6 |
-| 5 | B2G-Run3Summer23BPixNanoAODv12-05176_0 | CMSSW_13_0_23 | el8_amd64_gcc11 | yes | 130X_mcRun3_2023_realistic_postBPix_v6 |
+| Step | Name                                         | CMSSW         | Arch            | Keep | GlobalTag                                  |
+|------|----------------------------------------------|---------------|-----------------|------|--------------------------------------------|
+|    1 | B2G-Run3Summer23BPixwmLHEGS-06000_0          | CMSSW_13_0_23 | el8_amd64_gcc11 | no   | 130X_mcRun3_2023_realistic_postBPix_v6     |
+|    2 | B2G-Run3Summer23BPixDRPremix-05176_0         | CMSSW_13_0_23 | el8_amd64_gcc11 | no   | 130X_mcRun3_2023_realistic_postBPix_v6     |
+|    3 | B2G-Run3Summer23BPixDRPremix-05176_1         | CMSSW_13_0_23 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_postBPix_v6     |
+|    4 | B2G-Run3Summer23BPixMiniAODv4-05176_0        | CMSSW_13_0_23 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_postBPix_v6     |
+|    5 | B2G-Run3Summer23BPixNanoAODv12-05176_0       | CMSSW_13_0_23 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_postBPix_v6     |
 
 **Output datasets**:
 ```
@@ -112,13 +112,13 @@ of generated events is RequestNumEvents / FilterEfficiency.
 - **CPU-days**: 110,103.8
 - **Output tiers**: AODSIM, MINIAODSIM, NANOAODSIM
 
-| Step | Name | CMSSW | Arch | Keep | GlobalTag |
-|------|------|-------|------|------|-----------|
-| 1 | GEN-RunIII2024Summer24GS-00002_0 | CMSSW_14_0_21 | el8_amd64_gcc12 | no | 140X_mcRun3_2024_realistic_v26 |
-| 2 | GEN-RunIII2024Summer24DRPremix-00625_0 | CMSSW_14_0_22 | el8_amd64_gcc12 | no | 140X_mcRun3_2024_realistic_v26 |
-| 3 | GEN-RunIII2024Summer24DRPremix-00625_1 | CMSSW_14_0_22 | el8_amd64_gcc12 | yes | 140X_mcRun3_2024_realistic_v26 |
-| 4 | GEN-RunIII2024Summer24MiniAODv6-00624_0 | CMSSW_15_0_18 | el8_amd64_gcc12 | yes | 150X_mcRun3_2024_realistic_v2 |
-| 5 | GEN-RunIII2024Summer24NanoAODv15-00730_0 | CMSSW_15_0_18 | el8_amd64_gcc12 | yes | 150X_mcRun3_2024_realistic_v2 |
+| Step | Name                                           | CMSSW         | Arch            | Keep | GlobalTag                        |
+|------|-------------------------------------------------|---------------|-----------------|------|----------------------------------|
+|    1 | GEN-RunIII2024Summer24GS-00002_0                | CMSSW_14_0_21 | el8_amd64_gcc12 | no   | 140X_mcRun3_2024_realistic_v26   |
+|    2 | GEN-RunIII2024Summer24DRPremix-00625_0          | CMSSW_14_0_22 | el8_amd64_gcc12 | no   | 140X_mcRun3_2024_realistic_v26   |
+|    3 | GEN-RunIII2024Summer24DRPremix-00625_1          | CMSSW_14_0_22 | el8_amd64_gcc12 | yes  | 140X_mcRun3_2024_realistic_v26   |
+|    4 | GEN-RunIII2024Summer24MiniAODv6-00624_0         | CMSSW_15_0_18 | el8_amd64_gcc12 | yes  | 150X_mcRun3_2024_realistic_v2    |
+|    5 | GEN-RunIII2024Summer24NanoAODv15-00730_0        | CMSSW_15_0_18 | el8_amd64_gcc12 | yes  | 150X_mcRun3_2024_realistic_v2    |
 
 **Output datasets**:
 ```
@@ -147,13 +147,13 @@ of generated events is RequestNumEvents / FilterEfficiency.
 - **CPU-days**: 17,970.5
 - **Output tiers**: AODSIM, MINIAODSIM, NANOAODSIM
 
-| Step | Name | CMSSW | Arch | Keep | GlobalTag |
-|------|------|-------|------|------|-----------|
-| 1 | GEN-Run3Summer22EEwmLHEGS-00600_0 | CMSSW_12_4_19 | el8_amd64_gcc10 | no | 124X_mcRun3_2022_realistic_postEE_v1 |
-| 2 | GEN-Run3Summer22EEDRPremix-00448_0 | CMSSW_12_4_16 | el8_amd64_gcc10 | no | 124X_mcRun3_2022_realistic_postEE_v1 |
-| 3 | GEN-Run3Summer22EEDRPremix-00448_1 | CMSSW_12_4_16 | el8_amd64_gcc10 | yes | 124X_mcRun3_2022_realistic_postEE_v1 |
-| 4 | GEN-Run3Summer22EEMiniAODv4-00441_0 | CMSSW_13_0_13 | el8_amd64_gcc11 | yes | 130X_mcRun3_2022_realistic_postEE_v6 |
-| 5 | GEN-Run3Summer22EENanoAODv12-00478_0 | CMSSW_13_0_13 | el8_amd64_gcc11 | yes | 130X_mcRun3_2022_realistic_postEE_v6 |
+| Step | Name                                    | CMSSW         | Arch            | Keep | GlobalTag                              |
+|------|-----------------------------------------|---------------|-----------------|------|----------------------------------------|
+|    1 | GEN-Run3Summer22EEwmLHEGS-00600_0      | CMSSW_12_4_19 | el8_amd64_gcc10 | no   | 124X_mcRun3_2022_realistic_postEE_v1   |
+|    2 | GEN-Run3Summer22EEDRPremix-00448_0     | CMSSW_12_4_16 | el8_amd64_gcc10 | no   | 124X_mcRun3_2022_realistic_postEE_v1   |
+|    3 | GEN-Run3Summer22EEDRPremix-00448_1     | CMSSW_12_4_16 | el8_amd64_gcc10 | yes  | 124X_mcRun3_2022_realistic_postEE_v1   |
+|    4 | GEN-Run3Summer22EEMiniAODv4-00441_0    | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2022_realistic_postEE_v6   |
+|    5 | GEN-Run3Summer22EENanoAODv12-00478_0   | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2022_realistic_postEE_v6   |
 
 **Output datasets**:
 ```
@@ -182,15 +182,15 @@ of generated events is RequestNumEvents / FilterEfficiency.
 - **CPU-days**: 171,637.3
 - **Output tiers**: MINIAODSIM, NANOAODSIM, AODSIM
 
-| Step | Name | CMSSW | Arch | Keep | GlobalTag |
-|------|------|-------|------|------|-----------|
-| 1 | BPH-RunIISummer20UL18GEN-00292_0 | CMSSW_10_6_47 | slc7_amd64_gcc700 | no | 106X_upgrade2018_realistic_v4 |
-| 2 | BPH-RunIISummer20UL18SIM-00537_0 | CMSSW_10_6_47 | slc7_amd64_gcc700 | no | 106X_upgrade2018_realistic_v11_L1v1 |
-| 3 | BPH-RunIISummer20UL18DIGIPremix-00476_0 | CMSSW_10_6_26 | slc7_amd64_gcc700 | no | 106X_upgrade2018_realistic_v16_L1v1 |
-| 4 | BPH-RunIISummer20UL18HLT-00536_0 | CMSSW_10_2_16_UL2 | slc7_amd64_gcc700 | no | 102X_upgrade2018_realistic_v15 |
-| 5 | BPH-RunIISummer20UL18RECO-00536_0 | CMSSW_10_6_26 | slc7_amd64_gcc700 | yes | 106X_upgrade2018_realistic_v16_L1v1 |
-| 6 | BPH-RunIISummer20UL18MiniAODv2-00573_0 | CMSSW_10_6_26 | slc7_amd64_gcc700 | yes | 106X_upgrade2018_realistic_v16_L1v1 |
-| 7 | BPH-RunIISummer20UL18NanoAODv9-00545_0 | CMSSW_10_6_47_patch1 | slc7_amd64_gcc700 | yes | 106X_upgrade2018_realistic_v16_L1v1 |
+| Step | Name                                         | CMSSW              | Arch              | Keep | GlobalTag                              |
+|------|----------------------------------------------|--------------------|-------------------|------|----------------------------------------|
+|    1 | BPH-RunIISummer20UL18GEN-00292_0             | CMSSW_10_6_47      | slc7_amd64_gcc700 | no   | 106X_upgrade2018_realistic_v4          |
+|    2 | BPH-RunIISummer20UL18SIM-00537_0             | CMSSW_10_6_47      | slc7_amd64_gcc700 | no   | 106X_upgrade2018_realistic_v11_L1v1    |
+|    3 | BPH-RunIISummer20UL18DIGIPremix-00476_0      | CMSSW_10_6_26      | slc7_amd64_gcc700 | no   | 106X_upgrade2018_realistic_v16_L1v1    |
+|    4 | BPH-RunIISummer20UL18HLT-00536_0             | CMSSW_10_2_16_UL2  | slc7_amd64_gcc700 | no   | 102X_upgrade2018_realistic_v15         |
+|    5 | BPH-RunIISummer20UL18RECO-00536_0            | CMSSW_10_6_26      | slc7_amd64_gcc700 | yes  | 106X_upgrade2018_realistic_v16_L1v1    |
+|    6 | BPH-RunIISummer20UL18MiniAODv2-00573_0       | CMSSW_10_6_26      | slc7_amd64_gcc700 | yes  | 106X_upgrade2018_realistic_v16_L1v1    |
+|    7 | BPH-RunIISummer20UL18NanoAODv9-00545_0       | CMSSW_10_6_47_ptch | slc7_amd64_gcc700 | yes  | 106X_upgrade2018_realistic_v16_L1v1    |
 
 **Output datasets**:
 ```
