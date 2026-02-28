@@ -1,6 +1,7 @@
 # Claude Code — commit shared config, ignore per-machine files
 .claude/environment.local.md
 .claude/settings.local.json
+CURRENT_OBJECTIVES.md
 
 # Python
 __pycache__/
