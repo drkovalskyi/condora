@@ -3707,3 +3707,34 @@ Flow: `CLI --test-fraction` → `config_data["test_fraction"]` → `resource_par
 
 - All 440 unit tests pass
 - Argument flows through: CLI → config_data → resource_params → proc_args → proc wrapper
+
+---
+
+## Early Abort on Repeated Identical Failures (2026-02-28)
+
+### Problem
+
+When a merge group (sub-DAG) hits a systemic error — e.g. missing `storage.xml` — every proc node fails with the same error. Each node exhausts all 3 retries independently before DAGMan gives up. With 8 nodes × 4 attempts = 32 wasted job runs, each re-doing GEN+SIM (~5 min) before crashing at the same step.
+
+### Solution
+
+Added a pattern-detection block to the POST script (`_write_post_script()` in `dag_planner.py`). After each proc node failure, the script scans sibling `proc_*.post.json` files. If 3+ different nodes have failed with the same exit code, it exits with code 43 (`ABORT_EXIT`), telling DAGMan to abort the sub-DAG immediately.
+
+### How It Works
+
+1. The collector writes `proc_NNNNNN.post.json` before this check runs
+2. The script iterates `proc_*.post.json`, extracting `job.exit_code` from each
+3. Counts how many match the current node's exit code
+4. If count ≥ 3 (`IDENTICAL_THRESHOLD`), emits an abort message and exits 43
+5. One post.json per node (overwritten on retry), so the count reflects distinct nodes
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/wms2/core/dag_planner.py` | Added 18-line early abort block in `_write_post_script()`, between memory adjustment and classification `case` statement |
+
+### Verification
+
+- All 440 unit tests pass
+- Block placement: after collector writes post.json, after OOM memory adjustment, before retry/sleep logic
