@@ -427,7 +427,7 @@ async def run_import(args: argparse.Namespace) -> None:
                 from wms2.adapters.mock import MockCondorAdapter as _MockCondor
 
                 dp_dry = DAGPlanner(repo, dbs, rucio, _MockCondor(), settings)
-                dag = await dp_dry.plan_production_dag(workflow)
+                dag = await dp_dry.plan_production_dag(workflow, adaptive=True)
                 await session.commit()
 
                 print(f"      dag_file:    {dag.dag_file_path}")
@@ -441,7 +441,7 @@ async def run_import(args: argparse.Namespace) -> None:
                 return
 
             print("[2/5] Planning production DAG + submitting to HTCondor...")
-            dag = await dp.plan_production_dag(workflow)
+            dag = await dp.plan_production_dag(workflow, adaptive=True)
             await session.commit()
 
             print(f"      dag_id:      {dag.id}")
@@ -450,118 +450,176 @@ async def run_import(args: argparse.Namespace) -> None:
             print(f"      schedd:      {dag.schedd_name}")
             print(f"      nodes:       {dag.total_nodes}")
             print(f"      work_units:  {dag.total_work_units}")
+            current_round = getattr(workflow, "current_round", 0) or 0
+            print(f"      round:       {current_round}")
             print()
 
             # Transition request to ACTIVE — a DAG is now running
             await _transition_request(repo, request_name, "submitted", RequestStatus.ACTIVE)
             await session.commit()
 
-            # 3. Monitor (with rescue loop)
+            # 3. Monitor (with rescue loop + multi-round adaptive lifecycle)
             print(f"[3/5] Monitoring DAG (poll every {args.poll_interval}s)...")
             dm = DAGMonitor(repo, condor)
             # OutputManager with mock DBS/Rucio for output lifecycle
             om = OutputManager(repo, _MockDBS(), _MockRucio())
             eh = ErrorHandler(repo, condor, settings)
             terminal = {DAGStatus.COMPLETED, DAGStatus.FAILED, DAGStatus.PARTIAL}
+            held = False  # break out of both loops on HELD
 
-            while True:
-                await asyncio.sleep(args.poll_interval)
-                dag = await repo.get_dag(dag.id)
-                workflow = await repo.get_workflow(workflow.id)
-                result = await dm.poll_dag(dag)
+            while True:  # outer loop: rounds
+                while True:  # inner loop: poll + rescue within a round
+                    await asyncio.sleep(args.poll_interval)
+                    dag = await repo.get_dag(dag.id)
+                    workflow = await repo.get_workflow(workflow.id)
+                    result = await dm.poll_dag(dag)
 
-                # Process completed work units through output manager
-                if result.newly_completed_work_units:
-                    blocks = await repo.get_processing_blocks(workflow.id)
-                    for wu in result.newly_completed_work_units:
-                        print(f"    completed work unit: {wu['group_name']}")
-                        manifest = wu.get("manifest") or {}
-                        datasets_info = manifest.get("datasets", {})
-                        for block in blocks:
-                            ds_info = datasets_info.get(block.dataset_name, {})
-                            await om.handle_work_unit_completion(
-                                workflow.id, block.id, {
-                                    "output_files": ds_info.get("files", []),
-                                    "site": manifest.get("site", "local"),
-                                    "node_name": wu["group_name"],
-                                }
-                            )
-                    await om.process_blocks_for_workflow(workflow.id)
+                    # Process completed work units through output manager
+                    if result.newly_completed_work_units:
+                        blocks = await repo.get_processing_blocks(workflow.id)
+                        for wu in result.newly_completed_work_units:
+                            print(f"    completed work unit: {wu['group_name']}")
+                            manifest = wu.get("manifest") or {}
+                            datasets_info = manifest.get("datasets", {})
+                            for block in blocks:
+                                ds_info = datasets_info.get(block.dataset_name, {})
+                                await om.handle_work_unit_completion(
+                                    workflow.id, block.id, {
+                                        "output_files": ds_info.get("files", []),
+                                        "site": manifest.get("site", "local"),
+                                        "node_name": wu["group_name"],
+                                    }
+                                )
+                        await om.process_blocks_for_workflow(workflow.id)
 
-                await session.commit()
-
-                print(
-                    f"  [{result.status.value}] "
-                    f"done={result.nodes_done} running={result.nodes_running} "
-                    f"idle={result.nodes_idle} failed={result.nodes_failed} "
-                    f"held={result.nodes_held}"
-                )
-
-                if result.status not in terminal:
-                    continue
-
-                # Process any final outputs
-                if result.newly_completed_work_units:
-                    await om.process_blocks_for_workflow(workflow.id)
                     await session.commit()
 
-                # ── Terminal status handling (mirrors lifecycle_manager._handle_active) ──
+                    print(
+                        f"  [{result.status.value}] "
+                        f"done={result.nodes_done} running={result.nodes_running} "
+                        f"idle={result.nodes_idle} failed={result.nodes_failed} "
+                        f"held={result.nodes_held}"
+                    )
 
-                if result.status == DAGStatus.COMPLETED:
+                    if result.status not in terminal:
+                        continue
+
+                    # Process any final outputs
+                    if result.newly_completed_work_units:
+                        await om.process_blocks_for_workflow(workflow.id)
+                        await session.commit()
+
+                    # ── Terminal status handling ──
+
+                    if result.status == DAGStatus.COMPLETED:
+                        break  # exit inner loop → handle round completion
+
+                    # PARTIAL or FAILED — invoke error handler
+                    dag = await repo.get_dag(dag.id)
+                    request = await repo.get_request(request_name)
+                    workflow = await repo.get_workflow(workflow.id)
+
+                    from wms2.core.error_handler import CompletionResult
+                    result = await eh.handle_dag_completion(dag, request, workflow)
+                    await session.commit()
+
+                    if result.action == "rescue":
+                        # ErrorHandler._prepare_rescue() already created the rescue DAG
+                        # record and pointed the workflow at it. Submit it.
+                        workflow = await repo.get_workflow(workflow.id)
+                        rescue_dag = await repo.get_dag(workflow.dag_id)
+
+                        if result.problem_sites:
+                            from wms2.core.error_handler import ErrorHandler as EH
+                            EH.apply_site_exclusions(dag.submit_dir, result.problem_sites)
+                            print(f"  Excluded sites from rescue: {', '.join(result.problem_sites)}")
+
+                        print(f"\n  Submitting rescue DAG (attempt from {rescue_dag.rescue_dag_path})...")
+                        cluster_id, schedd = await condor.submit_dag(
+                            rescue_dag.rescue_dag_path or rescue_dag.dag_file_path,
+                            force=True,
+                        )
+                        await repo.update_dag(
+                            rescue_dag.id,
+                            dagman_cluster_id=cluster_id,
+                            schedd_name=schedd,
+                            status=DAGStatus.SUBMITTED.value,
+                        )
+                        await _transition_request(repo, request_name, "active", RequestStatus.RESUBMITTING)
+                        await _transition_request(repo, request_name, "resubmitting", RequestStatus.ACTIVE)
+                        await session.commit()
+
+                        # Update dag reference for the monitoring loop
+                        dag = rescue_dag
+                        print(f"  Rescue DAG submitted: cluster_id={cluster_id}")
+                        print(f"  Continuing monitoring...\n")
+                        continue  # re-enter inner monitoring loop
+
+                    # result.action == "hold"
+                    await _transition_request(repo, request_name, "active", RequestStatus.HELD)
+                    await session.commit()
+
+                    print(f"\n=== Request HELD — operator intervention required ===")
+                    post_data = eh.read_post_data(dag.submit_dir)
+                    _print_error_summary(post_data)
+                    held = True
+                    break  # exit inner loop
+
+                if held:
+                    break  # exit outer round loop
+
+                # ── Round completed successfully — advance to next round ──
+                workflow = await repo.get_workflow(workflow.id)
+                config = workflow.config_data or {}
+                current_round = getattr(workflow, "current_round", 0) or 0
+                is_gen = config.get("_is_gen", False)
+
+                # Compute offset advance from the completed DAG
+                proc_jobs = (dag.node_counts or {}).get("processing", 0)
+                if is_gen:
+                    params = workflow.splitting_params or {}
+                    events_per_job = params.get("events_per_job") or params.get("eventsPerJob") or 100_000
+                    old_nfe = getattr(workflow, "next_first_event", 1) or 1
+                    new_nfe = old_nfe + proc_jobs * events_per_job
+                    await repo.update_workflow(
+                        workflow.id,
+                        current_round=current_round + 1,
+                        next_first_event=new_nfe,
+                    )
+                else:
+                    params = workflow.splitting_params or {}
+                    files_per_job = params.get("files_per_job") or params.get("filesPerJob") or 1
+                    old_offset = getattr(workflow, "file_offset", 0) or 0
+                    new_offset = old_offset + proc_jobs * files_per_job
+                    await repo.update_workflow(
+                        workflow.id,
+                        current_round=current_round + 1,
+                        file_offset=new_offset,
+                    )
+                await session.commit()
+
+                next_round = current_round + 1
+                print(f"\n  Round {current_round} complete ({proc_jobs} proc jobs).")
+                print(f"  Advancing to round {next_round}...")
+
+                # Plan next round
+                workflow = await repo.get_workflow(workflow.id)
+                next_dag = await dp.plan_production_dag(workflow, adaptive=True)
+
+                if next_dag is None:
+                    # All work done
+                    print(f"  All work consumed — no more rounds needed.")
                     await _transition_request(repo, request_name, "active", RequestStatus.COMPLETED)
                     await repo.update_workflow(workflow.id, status="completed")
                     await session.commit()
                     break
 
-                # PARTIAL or FAILED — invoke error handler
-                dag = await repo.get_dag(dag.id)
-                request = await repo.get_request(request_name)
-                workflow = await repo.get_workflow(workflow.id)
-
-                from wms2.core.error_handler import CompletionResult
-                result = await eh.handle_dag_completion(dag, request, workflow)
                 await session.commit()
-
-                if result.action == "rescue":
-                    # ErrorHandler._prepare_rescue() already created the rescue DAG
-                    # record and pointed the workflow at it. Submit it.
-                    workflow = await repo.get_workflow(workflow.id)
-                    rescue_dag = await repo.get_dag(workflow.dag_id)
-
-                    if result.problem_sites:
-                        from wms2.core.error_handler import ErrorHandler as EH
-                        EH.apply_site_exclusions(dag.submit_dir, result.problem_sites)
-                        print(f"  Excluded sites from rescue: {', '.join(result.problem_sites)}")
-
-                    print(f"\n  Submitting rescue DAG (attempt from {rescue_dag.rescue_dag_path})...")
-                    cluster_id, schedd = await condor.submit_dag(
-                        rescue_dag.rescue_dag_path or rescue_dag.dag_file_path,
-                        force=True,
-                    )
-                    await repo.update_dag(
-                        rescue_dag.id,
-                        dagman_cluster_id=cluster_id,
-                        schedd_name=schedd,
-                        status=DAGStatus.SUBMITTED.value,
-                    )
-                    await _transition_request(repo, request_name, "active", RequestStatus.RESUBMITTING)
-                    await _transition_request(repo, request_name, "resubmitting", RequestStatus.ACTIVE)
-                    await session.commit()
-
-                    # Update dag reference for the monitoring loop
-                    dag = rescue_dag
-                    print(f"  Rescue DAG submitted: cluster_id={cluster_id}")
-                    print(f"  Continuing monitoring...\n")
-                    continue  # re-enter monitoring loop
-
-                # result.action == "hold"
-                await _transition_request(repo, request_name, "active", RequestStatus.HELD)
-                await session.commit()
-
-                print(f"\n=== Request HELD — operator intervention required ===")
-                post_data = eh.read_post_data(dag.submit_dir)
-                _print_error_summary(post_data)
-                break
+                dag = next_dag
+                print(f"  Round {next_round}: dag_id={dag.id}, "
+                      f"nodes={dag.total_nodes}, work_units={dag.total_work_units}")
+                print(f"  Continuing monitoring...\n")
+                # continue outer loop → monitor the new DAG
 
             # Print output summary
             print()

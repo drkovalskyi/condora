@@ -103,7 +103,8 @@ WMS2-wide settings, not per-request:
 | `max_memory_per_core` | 3000 MB | Upper bound for adaptive sizing |
 | `safety_margin` | 0.20 | Percentage added to measured memory |
 | `jobs_per_work_unit` | 8 | Fixed jobs per merge group (non-adaptive Round 0 and non-adaptive workflows) |
-| `work_units_per_round` | 10 | Work units per processing round (adaptive workflows) |
+| `first_round_work_units` | 1 | Work units for Round 0 (pilot) — small to validate pipeline quickly |
+| `work_units_per_round` | 10 | Work units per production round (adaptive, Round 1+) |
 | `target_wall_time_hours` | 8 | Target wall time per processing job (for Round 1+ events_per_job tuning) |
 | `target_block_size_tb` | 1.0 | Target total output per processing block |
 
@@ -284,14 +285,14 @@ Simple, predictable, no estimates needed. Suitable for small requests, simple wo
 
 Two-DAG lifecycle. Round 1 uses the same fixed `jobs_per_group` as non-adaptive. Round 2 computes `jobs_per_group` from **measured output sizes** — not estimates.
 
-**Round 1 (pilot DAG):**
+**Round 0 (pilot DAG):**
 ```
-jobs_per_group = config.jobs_per_work_unit  # same fixed default
-num_work_units = config.pilot_work_units    # default: 10
-total_pilot_jobs = num_work_units × jobs_per_group
+jobs_per_group = config.jobs_per_work_unit      # same fixed default
+num_work_units = config.first_round_work_units  # default: 1
+total_pilot_jobs = num_work_units × jobs_per_group  # 1 × 8 = 8
 ```
 
-Round 1 processes a small fraction of the total work (e.g., 80 jobs out of 10,000). The goal is not optimal output — it's collecting measured data: per-tier output sizes, memory, CPU efficiency, wall time.
+Round 0 processes a small fraction of the total work (e.g., 8 jobs out of 10,000). The goal is not optimal output — it's validating the pipeline and collecting measured data: per-tier output sizes, memory, CPU efficiency, wall time.
 
 **Round 2 (production DAG):**
 
@@ -486,18 +487,18 @@ All parameters come from request hints. `SizePerEvent` is used only for `request
 
 ### 6.2 Adaptive Workflow — Multi-Round Lifecycle
 
-Adaptive workflows process work in fixed-size rounds. Each round is a separate DAG with `work_units_per_round` WUs (default 10). After each round completes, the request returns to the admission queue. The dispatcher decides when and at what priority the next round runs.
+Adaptive workflows process work in multiple rounds. Round 0 is a small pilot (`first_round_work_units` WUs, default 1). Subsequent rounds use `work_units_per_round` WUs (default 10). Each round is a separate DAG. After each round completes, the request returns to the admission queue. The dispatcher decides when and at what priority the next round runs.
 
 **Round 0 (pilot):**
 
-Same parameter flow as non-adaptive. Uses request hints, fixed `jobs_per_work_unit`. The DAG is small:
+Same parameter flow as non-adaptive. Uses request hints, fixed `jobs_per_work_unit`. The DAG is small — just 1 work unit by default — to validate the pipeline quickly:
 
 ```
-total_pilot_jobs = work_units_per_round × jobs_per_work_unit  # 10 × 8 = 80
-pilot_events = total_pilot_jobs × events_per_job               # 80 × 10K = 800K
+total_pilot_jobs = first_round_work_units × jobs_per_work_unit  # 1 × 8 = 8
+pilot_events = total_pilot_jobs × events_per_job                # 8 × 10K = 80K
 ```
 
-Round 0's purpose is metrics collection: memory, CPU efficiency, time-per-event, per-tier output sizes. When it completes, the Lifecycle Manager aggregates metrics and returns the request to the queue.
+Round 0's purpose is pipeline validation and metrics collection: memory, CPU efficiency, time-per-event, per-tier output sizes. When it completes, the Lifecycle Manager aggregates metrics and returns the request to the queue.
 
 **Round 1+ (production rounds):**
 
@@ -529,7 +530,7 @@ Each production round processes at most `work_units_per_round` WUs of remaining 
 ```
 adaptive=true:
 
-  Round 0: QUEUED → ACTIVE (pilot, 10 WUs, request defaults) → complete
+  Round 0: QUEUED → ACTIVE (pilot, 1 WU, request defaults) → complete
            → collect metrics → QUEUED (back to admission queue)
 
   Round 1: QUEUED → ACTIVE (10 WUs, optimized params) → complete
@@ -552,7 +553,7 @@ adaptive=false:
 
 - **Rounds run to completion.** Once a round starts, it finishes — no priority-based preemption mid-round. This prevents the starvation problem where partially-processed requests hang because their jobs lost priority.
 - **FIFO within a round, priority between rounds.** The admission controller dispatches the next round based on priority. A low-priority request waits its turn after each round completes.
-- **Fixed round size limits resource commitment.** 10 WUs × optimized jobs_per_group jobs is a bounded commitment. Other requests get their turn after each round.
+- **Fixed round size limits resource commitment.** Round 0 uses just 1 WU (pilot); subsequent rounds use 10 WUs × optimized jobs_per_group jobs — a bounded commitment. Other requests get their turn after each round.
 - **Partial production is subsumed.** Priority demotion (`production_steps`) applies between rounds when the request re-enters the queue. No need for clean stop — the round boundary is the natural scheduling point.
 - **Each DAG is self-contained.** Processing blocks, output management, and metrics are per-DAG. No cross-DAG state.
 
@@ -565,7 +566,7 @@ For GEN workflows, event ranges are non-overlapping by construction (each round 
 The adaptive system may decide to run **more jobs with fewer cores** in Round 1+ (see adaptive.md §4.2). Since every round is a new DAG, this is naturally supported:
 
 ```
-Round 0: 8 cores/job, 80 jobs (10 WUs × 8 jobs), request defaults
+Round 0: 8 cores/job, 8 jobs (1 WU × 8 jobs), request defaults (pilot)
 Round 1: 4 cores/job, different jobs_per_group from measured data
          New DAG, fully replanned
 ```
@@ -590,12 +591,12 @@ The workflow row tracks a single counter: `next_first_event`.
 
 ```
 Round 0: next_first_event = 1
-         Plan 10 WUs: events 1–800,000
-         After completion: next_first_event = 800,001
+         Plan 1 WU: events 1–80,000 (pilot)
+         After completion: next_first_event = 80,001
 
-Round 1: next_first_event = 800,001
-         Plan 10 WUs: events 800,001–1,952,000
-         After completion: next_first_event = 1,952,001
+Round 1: next_first_event = 80,001
+         Plan 10 WUs: events 80,001–1,232,000 (optimized params)
+         After completion: next_first_event = 1,232,001
 
 ...
 ```
@@ -613,11 +614,11 @@ For MVP, offset-based is sufficient. The file list is fetched once from DBS at r
 
 ```
 Round 0: file_offset = 0, files_per_job = 5, jobs_per_work_unit = 8
-         Process files 0–399 (80 jobs × 5 files)
-         After completion: file_offset = 400
+         Process files 0–39 (8 jobs × 5 files, 1 WU pilot)
+         After completion: file_offset = 40
 
-Round 1: file_offset = 400, optimized files_per_job and jobs_per_group
-         Process files 400–499 (next batch)
+Round 1: file_offset = 40, optimized files_per_job and jobs_per_group
+         Process files 40–439 (next batch, 10 WUs)
          ...
 ```
 
@@ -672,12 +673,12 @@ Total jobs at request params: ceil(10,000,000 / 10,000) = 1000
 
 **Round 0 (pilot):**
 ```
-work_units_per_round = 10, jobs_per_work_unit = 8
-total_pilot_jobs = 80, pilot_events = 800,000
+first_round_work_units = 1, jobs_per_work_unit = 8
+total_pilot_jobs = 8, pilot_events = 80,000
 
-DAG 0: 80 proc + 10 landing + 10 merge + 10 cleanup = 110 nodes
-Processes events 1–800,000 (8% of total)
-→ complete → collect metrics → back to queue
+DAG 0: 8 proc + 1 landing + 1 merge + 1 cleanup = 11 nodes
+Processes events 1–80,000 (0.8% of total)
+→ complete → collect metrics → advance to round 1
 ```
 
 **After Round 0 — measured data:**
@@ -704,23 +705,23 @@ work_units_per_round = 10 → 20 jobs × 57,600 events = 1,152,000 events
 request_memory = 12,000 × 1.20 = 14,400 MB
 
 DAG 1: 20 proc + 10 landing + 10 merge + 10 cleanup = 50 nodes
-Processes events 800,001–1,952,000
-→ complete → back to queue
+Processes events 80,001–1,232,000
+→ complete → advance to round 2
 ```
 
-**Round 2–7:** Same parameters, 10 WUs each, ~1.15M events per round.
+**Round 2–8:** Same parameters, 10 WUs each, ~1.15M events per round.
 
-**Round 8 (final):** Remaining ~740K events → 13 jobs → 7 WUs (< 10, final round).
+**Round 9 (final):** Remaining ~580K events → 11 jobs → 6 WUs (< 10, final round).
 
 **Totals across all rounds:**
 ```
-Round 0:   80 jobs, 800K events    (unoptimized, pilot)
-Round 1-7: 140 jobs, 8.06M events  (optimized, 7 rounds × 20 jobs)
-Round 8:   13 jobs, 740K events    (optimized, final)
-Total:     233 jobs, 10M events    (vs. 1000 jobs at original events_per_job)
+Round 0:   8 jobs, 80K events      (unoptimized, pilot)
+Round 1-8: 160 jobs, 9.22M events  (optimized, 8 rounds × 20 jobs)
+Round 9:   11 jobs, 580K events    (optimized, final)
+Total:     179 jobs, 10M events    (vs. 1000 jobs at original events_per_job)
 ```
 
-Note: Optimizing `events_per_job` from 10K to 57.6K reduced total jobs from 1000 to 233 — fewer, longer jobs are more efficient.
+Note: Optimizing `events_per_job` from 10K to 57.6K reduced total jobs from 1000 to 179 — fewer, longer jobs are more efficient. The small Round 0 pilot (8 jobs vs. 80) validates the pipeline quickly.
 
 ### 7.3 File-Based Reprocessing (Non-Adaptive)
 
@@ -796,7 +797,7 @@ events_per_job = floor(target_wall_time / measured_time_per_event)
 
 ### RESOLVED: OQ-P8 — Round Sizing
 
-**Decision**: Fixed `work_units_per_round` (default 10) for all rounds, including Round 0 (pilot). The admission controller controls pacing between rounds via the queue. See §6.3.
+**Decision**: Round 0 (pilot) uses `first_round_work_units` (default 1) to validate the pipeline quickly with minimal resource commitment. Round 1+ uses `work_units_per_round` (default 10). The admission controller controls pacing between rounds via the queue. See §6.3.
 
 If remaining work is less than `work_units_per_round`, the final round is smaller. If a non-adaptive workflow's total work fits in one round, it runs as a single DAG.
 
@@ -847,8 +848,8 @@ With `work_units_per_round=10`, each DAG has at most 10 × `jobs_per_group` proc
 | Processing block creation | Implemented (all-in-one) | `dag_planner.py:plan_production_dag()` |
 | Merge group DAG generation | Implemented | `dag_planner.py:_generate_dag_files()` |
 | `SizePerEvent` → `request_disk` | Implemented | `dag_planner.py` submit file generation |
-| Multi-round adaptive lifecycle | **Not implemented** | Round 0 pilot → Round 1+ production → queue between rounds |
-| Round bookkeeping | **Not implemented** | `next_first_event` (GEN) / `file_offset` (file-based) on workflow row |
+| Multi-round adaptive lifecycle | Implemented (CLI) | Round 0 pilot (1 WU) → Round 1+ production (10 WUs) → auto-advance between rounds |
+| Round bookkeeping | Implemented (CLI) | `next_first_event` (GEN) / `file_offset` (file-based) advanced after each round |
 | Measured-output merge sizing | **Not implemented** | Round 1+ `jobs_per_group` from real file sizes |
 | Lumi-section assignment | **Not implemented** | Per-job (default) or per-WU mode |
 | `events_per_job` tuning | **Not implemented** | Round 1+ recomputes from measured time-per-event |
@@ -856,7 +857,7 @@ With `work_units_per_round=10`, each DAG has at most 10 × `jobs_per_group` proc
 
 ### 9.2 Known Gaps
 
-1. **No multi-round lifecycle**. The Lifecycle Manager treats every DAG as the only DAG for a workflow. It has no concept of "round completed, collect metrics, return to queue, plan next round." This is the primary implementation gap.
+1. **~~No multi-round lifecycle~~** (Resolved). The CLI implements adaptive multi-round lifecycle: Round 0 as a 1-WU pilot, Round 1+ with 10 WUs each, automatic offset advancement between rounds.
 
 2. **No measured-output-based merge group sizing**. After Round 0 completes, there is no code to measure per-tier output sizes from merged files and compute optimized `jobs_per_group` for production rounds.
 

@@ -395,3 +395,80 @@ class TestPileupResolution:
 
         pileup_calls = [c for c in rucio.calls if c[0] == "get_available_pileup_files"]
         assert len(pileup_calls) == 1, "Same dataset should only be queried once"
+
+
+# ── Adaptive first_round_work_units tests ─────────────────────────
+
+
+class TestFirstRoundWorkUnits:
+    async def test_round0_adaptive_uses_first_round_work_units(self, tmp_path):
+        """Round 0 + adaptive=True → caps to first_round_work_units (1 WU = 8 jobs)."""
+        planner = _make_planner(tmp_path, first_round_work_units=1, work_units_per_round=10)
+        wf = _make_workflow(
+            config_data={"_is_gen": True, "request_num_events": 1_000_000},
+            splitting_params={"events_per_job": 10_000},
+            next_first_event=1,
+            current_round=0,
+        )
+
+        dag = await planner.plan_production_dag(wf, adaptive=True)
+
+        # 1 WU × 8 jobs_per_work_unit = 8 max jobs
+        assert dag is not None
+        proc_count = dag.node_counts["processing"] if hasattr(dag, "node_counts") else None
+        # The mock returns a MagicMock for the DAG row, so check planner call args
+        create_dag_call = planner.db.create_dag.call_args
+        node_counts = create_dag_call.kwargs.get("node_counts", {})
+        assert node_counts["processing"] == 8
+
+    async def test_round1_adaptive_uses_work_units_per_round(self, tmp_path):
+        """Round 1 + adaptive=True → caps to work_units_per_round (10 WUs = 80 jobs)."""
+        planner = _make_planner(tmp_path, first_round_work_units=1, work_units_per_round=10)
+        wf = _make_workflow(
+            config_data={"_is_gen": True, "request_num_events": 10_000_000},
+            splitting_params={"events_per_job": 10_000},
+            next_first_event=80_001,  # round 0 already processed 80K events
+            current_round=1,
+        )
+
+        dag = await planner.plan_production_dag(wf, adaptive=True)
+
+        assert dag is not None
+        create_dag_call = planner.db.create_dag.call_args
+        node_counts = create_dag_call.kwargs.get("node_counts", {})
+        assert node_counts["processing"] == 80  # 10 WUs × 8 jobs
+
+    async def test_round0_non_adaptive_no_cap(self, tmp_path):
+        """adaptive=False → no cap, all jobs in one DAG."""
+        planner = _make_planner(tmp_path, first_round_work_units=1, work_units_per_round=10)
+        wf = _make_workflow(
+            config_data={"_is_gen": True, "request_num_events": 500_000},
+            splitting_params={"events_per_job": 10_000},
+            next_first_event=1,
+            current_round=0,
+        )
+
+        dag = await planner.plan_production_dag(wf, adaptive=False)
+
+        assert dag is not None
+        create_dag_call = planner.db.create_dag.call_args
+        node_counts = create_dag_call.kwargs.get("node_counts", {})
+        assert node_counts["processing"] == 50  # all 50 jobs, no cap
+
+    async def test_round0_default_first_round_is_1(self, tmp_path):
+        """Default first_round_work_units=1 produces 1 WU."""
+        planner = _make_planner(tmp_path)  # uses defaults
+        wf = _make_workflow(
+            config_data={"_is_gen": True, "request_num_events": 1_000_000},
+            splitting_params={"events_per_job": 10_000},
+            next_first_event=1,
+            current_round=0,
+        )
+
+        dag = await planner.plan_production_dag(wf, adaptive=True)
+
+        assert dag is not None
+        create_dag_call = planner.db.create_dag.call_args
+        node_counts = create_dag_call.kwargs.get("node_counts", {})
+        # Default first_round_work_units=1 × jobs_per_work_unit=8 = 8 jobs
+        assert node_counts["processing"] == 8

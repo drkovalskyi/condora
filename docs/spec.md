@@ -2339,11 +2339,12 @@ DAG. See `docs/processing.md` §6.2–6.5 for the complete specification.
 **Round 0** (pilot, `current_round=0`, `adaptive=true`):
 - Uses request resource defaults (Memory, TimePerEvent)
 - Fixed `jobs_per_work_unit` (default 8) for merge group sizing
-- Produces `work_units_per_round` work units (default 10)
+- Produces `first_round_work_units` work units (default 1) — small pilot
+  to validate the pipeline quickly before committing more resources
 - Collects FJR metrics: per-step RSS, CPU efficiency, time-per-event,
   per-tier output sizes
 - On completion: metrics aggregated into `workflow.step_metrics`,
-  request returns to admission queue
+  round 1+ uses CPU and memory parameters optimized from measured data
 
 **Round 1+** (production, `current_round>=1`, `adaptive=true`):
 - `events_per_job` tuned to target wall time (default 8h)
@@ -2358,15 +2359,15 @@ DAG. See `docs/processing.md` §6.2–6.5 for the complete specification.
 - No pilot round, no inter-round optimization
 
 ```
-Round 0: Request defaults → pilot DAG (10 WUs) → metrics collected
+Round 0: Request defaults → pilot DAG (1 WU) → metrics collected
               │
-              ▼ (DAG completes, request returns to queue)
+              ▼ (DAG completes, advance offsets)
          Lifecycle Manager: aggregate metrics → step_metrics
               │
               ▼
 Round 1: Optimized params → production DAG (10 WUs) → metrics refined
               │
-              ▼ (if work remains, request returns to queue)
+              ▼ (if work remains, advance offsets)
 Round K: Remaining work (≤10 WUs) → final DAG → COMPLETED
 ```
 
@@ -3287,11 +3288,12 @@ Non-adaptive workflows still use the original clean-stop mechanism.
 ### DD-12: Adaptive execution instead of dedicated pilot
 
 **Decision**: WMS2 uses the first processing round (Round 0) as an implicit
-pilot. It processes a small fixed number of work units (default 10) using
+pilot. It processes `first_round_work_units` work units (default 1) using
 request resource defaults. The outputs are real production data (registered
 in DBS, archived to tape), not throwaway measurements. After Round 0
 completes, FJR metrics are aggregated and used to optimize all parameters
-for Round 1+. See `docs/processing.md` §6.2.
+for Round 1+. A single work unit validates the pipeline quickly before
+committing more resources. See `docs/processing.md` §6.2.
 
 **Why**: A dedicated pilot phase adds ~8 hours of latency and produces no
 usable output. Round 0 starts producing real results immediately while

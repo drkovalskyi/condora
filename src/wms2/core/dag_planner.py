@@ -207,13 +207,17 @@ class DAGPlanner:
         config = workflow.config_data or {}
         is_gen = config.get("_is_gen", False)
 
-        # Adaptive cap: limit the number of processing jobs per round
-        max_jobs = (
-            self.settings.work_units_per_round * self.settings.jobs_per_work_unit
-            if adaptive else 0
-        )
-
         current_round = getattr(workflow, "current_round", 0) or 0
+
+        # Adaptive cap: limit the number of processing jobs per round
+        if adaptive:
+            if current_round == 0:
+                wus = self.settings.first_round_work_units
+            else:
+                wus = self.settings.work_units_per_round
+            max_jobs = wus * self.settings.jobs_per_work_unit
+        else:
+            max_jobs = 0
 
         if is_gen:
             # GEN workflow: no input files, create synthetic event-range nodes
