@@ -3777,3 +3777,67 @@ Before each DAG submission round, the DAG Planner queries Rucio for on-disk pile
 
 - All 456 unit tests pass
 - 5 new pileup-specific tests: query called, JSON written, no query without steps, transfer_input_files, dedup
+
+---
+
+## First-Round Work Unit Cap and Adaptive Multi-Round Lifecycle
+
+**Date**: 2026-02-28
+**Commit**: `3b035fb`
+
+### Problem
+
+With the BPH test workflow, all 50 proc nodes (7 WUs) were submitted in round 0. On a 64-CPU machine with 16 CPUs/job, only 4 jobs run at a time — the other 46 sit idle. The 4 slots are spread across all 7 WUs, so no single WU finishes quickly for validation. Two issues:
+
+1. The CLI didn't pass `adaptive=True` to `plan_production_dag()`, so `max_jobs=0` and everything went into one round.
+2. The spec said 10 WUs for round 0, but 1 WU is better — validate the pipeline quickly before scaling up.
+
+### What Was Built
+
+#### 1. `first_round_work_units` config setting (`config.py`)
+- New setting `first_round_work_units: int = 1` — work units for round 0 (pilot)
+- `work_units_per_round` (default 10) now only applies to round 1+
+
+#### 2. DAG planner round-aware capping (`dag_planner.py`)
+- Moved `current_round` read before `max_jobs` computation
+- Round 0 + adaptive: `max_jobs = first_round_work_units × jobs_per_work_unit` (1 × 8 = 8)
+- Round 1+ + adaptive: `max_jobs = work_units_per_round × jobs_per_work_unit` (10 × 8 = 80)
+- Non-adaptive: `max_jobs = 0` (no cap, unchanged)
+
+#### 3. CLI adaptive multi-round lifecycle (`cli.py`)
+- Both dry-run and live calls now pass `adaptive=True`
+- Restructured monitor into nested loops: outer loop for rounds, inner loop for poll+rescue
+- After each successful round:
+  - Computes offset advance from DAG's `node_counts["processing"]`
+  - GEN: advances `next_first_event` by `proc_jobs × events_per_job`
+  - File-based: advances `file_offset` by `proc_jobs × files_per_job`
+  - Increments `current_round`
+  - Calls `plan_production_dag()` again; if `None` → all work done → COMPLETED
+- HELD state correctly breaks out of both loops
+
+#### 4. Spec and docs updates
+- **spec.md §5.3**: Round 0 produces `first_round_work_units` (default 1), updated ASCII diagram
+- **spec.md DD-12**: Updated default from 10 to 1 with rationale
+- **processing.md**: Updated config table, §6.2 pilot sizing (1×8=8), §6.3 lifecycle diagram, §6.4 round example, §6.5 bookkeeping examples, §7.2 worked example (recalculated totals), OQ-P8 (differentiated round 0 vs 1+), §9.1 implementation status (multi-round lifecycle and round bookkeeping marked implemented), §9.2 gap #1 marked resolved
+
+### Design Decisions
+
+- **1 WU for round 0 (not 10)**: On a resource-constrained machine, 1 WU (8 jobs) can all run concurrently with 16 CPUs/job on 64 CPUs. This validates the full pipeline (proc → merge → cleanup) quickly. 10 WUs would spread resources across 80 jobs with most idle.
+- **Offset computation in CLI**: After a round, the CLI computes the advance from `node_counts["processing"]` × splitting params, rather than storing it in the planner. This keeps the planner stateless between rounds.
+- **Nested loop structure**: Inner loop handles poll+rescue within a single round's DAG. Outer loop handles round transitions. Clean separation of concerns.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `src/wms2/config.py` | Added `first_round_work_units: int = 1` |
+| `src/wms2/core/dag_planner.py` | Round-aware `max_jobs`: `first_round_work_units` for round 0, `work_units_per_round` for round 1+ |
+| `src/wms2/cli.py` | Pass `adaptive=True`, multi-round lifecycle loop with offset advancement |
+| `docs/spec.md` | Updated §5.3, DD-12 for 1 WU pilot |
+| `docs/processing.md` | Updated config table, §6.2–6.5, §7.2, OQ-P8, §9.1–9.2 |
+| `tests/unit/test_dag_planner.py` | 4 new tests for `first_round_work_units` behavior |
+
+### Verification
+
+- All 460 unit tests pass (4 new tests for adaptive round capping)
+- Tests cover: round 0 uses `first_round_work_units`, round 1 uses `work_units_per_round`, non-adaptive has no cap, default produces 1 WU
