@@ -102,6 +102,21 @@ class TestClassify8001MessageOverride:
         assert result["category"] == "permanent"
 
 
+class TestClassifyZeroEventOutput:
+    """Exit code 80: 0-event output from GenFilter."""
+
+    def test_exit_80_is_permanent(self):
+        result = classify_error(0, 80)
+        assert result["category"] == "permanent"
+        assert result["retryable"] is False
+        assert result["action"] == "permanent_failure"
+
+    def test_exit_80_as_cmssw_code(self):
+        result = classify_error(80, 1)
+        assert result["category"] == "permanent"
+        assert result["retryable"] is False
+
+
 class TestClassifyTransient:
     @pytest.mark.parametrize("code", [1, 11, 139, 195, 99999])
     def test_unknown_codes_are_transient(self, code):
@@ -349,3 +364,23 @@ class TestCollectorWritesPostJson:
 
         data = json.loads((tmp_path / "proc_000001.post.json").read_text())
         assert data["classification"]["category"] == "permanent"
+
+    def test_collector_exit_80_zero_event_output(self, tmp_path):
+        """Exit 80 (0-event GenFilter output) → permanent in collector."""
+        script = generate_collector_script()
+        script_path = tmp_path / "wms2_post_collect.py"
+        script_path.write_text(script)
+
+        import subprocess
+        result = subprocess.run(
+            ["python3", str(script_path), "proc_000001", "80", "0", "3"],
+            cwd=str(tmp_path),
+            capture_output=True, text=True, timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "permanent"
+
+        data = json.loads((tmp_path / "proc_000001.post.json").read_text())
+        assert data["classification"]["category"] == "permanent"
+        assert data["classification"]["retryable"] is False

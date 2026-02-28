@@ -191,10 +191,15 @@ def _normalize_request(reqdata: dict[str, Any]) -> dict[str, Any]:
     # Build SplittingParams from scattered fields if not present
     if not reqdata.get("SplittingParams"):
         params = {}
-        for key in ("FilesPerJob", "EventsPerJob", "LumisPerJob"):
+        _key_map = {
+            "FilesPerJob": "files_per_job",
+            "EventsPerJob": "events_per_job",
+            "LumisPerJob": "lumis_per_job",
+        }
+        for key, snake in _key_map.items():
             val = reqdata.get(key)
             if val is not None:
-                params[key.lower()] = val
+                params[snake] = val
         if params:
             reqdata["SplittingParams"] = params
 
@@ -359,6 +364,7 @@ async def run_import(args: argparse.Namespace) -> None:
                 "multicore": reqdata.get("Multicore", 1),
                 "time_per_event": reqdata.get("TimePerEvent", 1.0),
                 "size_per_event": reqdata.get("SizePerEvent", 1.5),
+                "filter_efficiency": reqdata.get("FilterEfficiency", 1.0),
             }
             if reqdata.get("_is_gen"):
                 config_data["_is_gen"] = True
@@ -380,6 +386,8 @@ async def run_import(args: argparse.Namespace) -> None:
                 from wms2.core.stepchain import parse_stepchain
                 _spec = parse_stepchain(reqdata)
                 config_data["manifest_steps"] = [_asdict(s) for s in _spec.steps]
+                # Use parsed filter_efficiency (handles Step1 fallback)
+                config_data["filter_efficiency"] = _spec.filter_efficiency
 
             # Print CMSSW info if available
             cmssw_ver = reqdata.get("CMSSWVersion")

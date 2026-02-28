@@ -75,12 +75,18 @@ def parse_stepchain(data: dict) -> StepChainSpec:
                 config_cache_id=step.get("ConfigCacheID", ""),
             )
         )
+    filter_eff = float(data.get("FilterEfficiency", 0))
+    if not filter_eff and num_steps > 0:
+        step1 = data.get("Step1", {})
+        filter_eff = float(step1.get("FilterEfficiency", 1.0))
+    if filter_eff <= 0:
+        filter_eff = 1.0
     return StepChainSpec(
         request_name=data.get("RequestName", ""),
         steps=steps,
         time_per_event=float(data.get("TimePerEvent", 1.0)),
         size_per_event=float(data.get("SizePerEvent", 1.5)),
-        filter_efficiency=float(data.get("FilterEfficiency", 1.0)),
+        filter_efficiency=filter_eff,
     )
 
 

@@ -455,6 +455,51 @@ class TestFirstRoundWorkUnits:
         node_counts = create_dag_call.kwargs.get("node_counts", {})
         assert node_counts["processing"] == 50  # all 50 jobs, no cap
 
+    async def test_filter_efficiency_in_proc_args(self, tmp_path):
+        """filter_efficiency < 1.0 → --filter-eff appears in proc submit file."""
+        planner = _make_planner(tmp_path, first_round_work_units=1)
+        wf = _make_workflow(
+            config_data={
+                "_is_gen": True,
+                "request_num_events": 100_000,
+                "filter_efficiency": 0.00034,
+            },
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+            current_round=0,
+        )
+
+        await planner.plan_production_dag(wf, adaptive=True)
+
+        # Check proc submit file contains --filter-eff
+        wf_dir = tmp_path / str(wf.id) / "mg_000000"
+        proc_sub = wf_dir / "proc_000000.sub"
+        assert proc_sub.exists()
+        content = proc_sub.read_text()
+        assert "--filter-eff 0.00034" in content
+
+    async def test_no_filter_eff_when_1(self, tmp_path):
+        """filter_efficiency=1.0 → no --filter-eff in proc submit file."""
+        planner = _make_planner(tmp_path, first_round_work_units=1)
+        wf = _make_workflow(
+            config_data={
+                "_is_gen": True,
+                "request_num_events": 100_000,
+                "filter_efficiency": 1.0,
+            },
+            splitting_params={"events_per_job": 50_000},
+            next_first_event=1,
+            current_round=0,
+        )
+
+        await planner.plan_production_dag(wf, adaptive=True)
+
+        wf_dir = tmp_path / str(wf.id) / "mg_000000"
+        proc_sub = wf_dir / "proc_000000.sub"
+        assert proc_sub.exists()
+        content = proc_sub.read_text()
+        assert "--filter-eff" not in content
+
     async def test_round0_default_first_round_is_1(self, tmp_path):
         """Default first_round_work_units=1 produces 1 WU."""
         planner = _make_planner(tmp_path)  # uses defaults

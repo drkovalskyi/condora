@@ -132,6 +132,16 @@ def classify_error(
     # Use whichever code is non-zero; prefer CMSSW code if both are set
     code = cmssw_exit_code if cmssw_exit_code != 0 else job_exit_code
 
+    # Exit 80: 0-event output from GenFilter — not retryable
+    if code == 80:
+        return {
+            "category": "permanent",
+            "retryable": False,
+            "bad_input_files": [],
+            "action": "permanent_failure",
+            "memory_exceeded": False,
+        }
+
     if code in PERMANENT_CODES:
         # 8001 is generic "CMS Exception" — check if the message reveals
         # an infrastructure cause (e.g. site-local-config not found)
@@ -249,6 +259,11 @@ def classify_error(cmssw_exit_code, job_exit_code, error_message=""):
             "bad_input_files": [], "action": "none", "memory_exceeded": False,
         }
     code = cmssw_exit_code if cmssw_exit_code != 0 else job_exit_code
+    if code == 80:
+        return {
+            "category": "permanent", "retryable": False,
+            "bad_input_files": [], "action": "permanent_failure", "memory_exceeded": False,
+        }
     if code in PERMANENT_CODES:
         if code == 8001 and error_message and _is_infra_by_message(error_message):
             return {

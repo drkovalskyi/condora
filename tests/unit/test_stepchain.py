@@ -377,3 +377,54 @@ class TestParseStepchain:
         assert _normalize_arch([]) == ""
         assert _normalize_arch("") == ""
         assert _normalize_arch(None) == ""
+
+    def test_filter_efficiency_from_step1_fallback(self):
+        """Step1.FilterEfficiency used when top-level is absent."""
+        data = {
+            "StepChain": 1,
+            "CMSSWVersion": "CMSSW_14_0_0",
+            "Step1": {
+                "StepName": "GEN-SIM",
+                "FilterEfficiency": 0.00034,
+            },
+        }
+        spec = parse_stepchain(data)
+        assert spec.filter_efficiency == pytest.approx(0.00034)
+
+    def test_filter_efficiency_top_level_preferred(self):
+        """Top-level FilterEfficiency takes priority over Step1."""
+        data = {
+            "StepChain": 1,
+            "CMSSWVersion": "CMSSW_14_0_0",
+            "FilterEfficiency": 0.5,
+            "Step1": {
+                "StepName": "GEN-SIM",
+                "FilterEfficiency": 0.00034,
+            },
+        }
+        spec = parse_stepchain(data)
+        assert spec.filter_efficiency == pytest.approx(0.5)
+
+    def test_filter_efficiency_zero_defaults_to_1(self):
+        """FilterEfficiency=0 at both levels → defaults to 1.0."""
+        data = {
+            "StepChain": 1,
+            "CMSSWVersion": "CMSSW_14_0_0",
+            "FilterEfficiency": 0,
+            "Step1": {
+                "StepName": "GEN-SIM",
+                "FilterEfficiency": 0,
+            },
+        }
+        spec = parse_stepchain(data)
+        assert spec.filter_efficiency == 1.0
+
+    def test_filter_efficiency_absent_everywhere_defaults_to_1(self):
+        """No FilterEfficiency anywhere → defaults to 1.0."""
+        data = {
+            "StepChain": 1,
+            "CMSSWVersion": "CMSSW_14_0_0",
+            "Step1": {"StepName": "GEN-SIM"},
+        }
+        spec = parse_stepchain(data)
+        assert spec.filter_efficiency == 1.0
