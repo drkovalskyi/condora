@@ -262,6 +262,13 @@ def _make_workflow_mock(wf: WorkflowDef, sandbox_path: str) -> MagicMock:
         "_is_gen": True,
         "output_datasets": wf.output_datasets,
     }
+    # Adaptive round fields — must be real values, not MagicMock
+    mock.next_first_event = 1
+    mock.file_offset = 0
+    mock.current_round = 0
+    mock.events_produced = 0
+    mock.target_events = total_events
+    mock.step_metrics = None
     return mock
 
 

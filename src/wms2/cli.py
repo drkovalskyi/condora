@@ -17,6 +17,7 @@ from wms2.config import Settings
 from wms2.core.dag_monitor import DAGMonitor
 from wms2.core.dag_planner import DAGPlanner
 from wms2.core.error_handler import ErrorHandler
+from wms2.core.lifecycle_manager import complete_round
 from wms2.core.output_lfn import derive_merged_lfn_bases
 from wms2.core.output_manager import OutputManager
 from wms2.core.sandbox import create_sandbox
@@ -578,36 +579,19 @@ async def run_import(args: argparse.Namespace) -> None:
 
                 # ── Round completed successfully — advance to next round ──
                 workflow = await repo.get_workflow(workflow.id)
-                config = workflow.config_data or {}
                 current_round = getattr(workflow, "current_round", 0) or 0
-                is_gen = config.get("_is_gen", False)
 
-                # Compute offset advance from the completed DAG
-                proc_jobs = (dag.node_counts or {}).get("processing", 0)
-                if is_gen:
-                    params = workflow.splitting_params or {}
-                    events_per_job = params.get("events_per_job") or params.get("eventsPerJob") or 100_000
-                    old_nfe = getattr(workflow, "next_first_event", 1) or 1
-                    new_nfe = old_nfe + proc_jobs * events_per_job
-                    await repo.update_workflow(
-                        workflow.id,
-                        current_round=current_round + 1,
-                        next_first_event=new_nfe,
-                    )
-                else:
-                    params = workflow.splitting_params or {}
-                    files_per_job = params.get("files_per_job") or params.get("filesPerJob") or 1
-                    old_offset = getattr(workflow, "file_offset", 0) or 0
-                    new_offset = old_offset + proc_jobs * files_per_job
-                    await repo.update_workflow(
-                        workflow.id,
-                        current_round=current_round + 1,
-                        file_offset=new_offset,
-                    )
+                result = await complete_round(repo, settings, workflow, dag)
                 await session.commit()
 
-                next_round = current_round + 1
-                print(f"\n  Round {current_round} complete ({proc_jobs} proc jobs).")
+                next_round = result["new_round"]
+                proc_jobs = result["proc_jobs"]
+                events_from_wus = result["events_from_wus"]
+                adaptive_params = result["adaptive_params"]
+
+                print(f"\n  Round {current_round} complete ({proc_jobs} proc jobs, {events_from_wus} events).")
+                if adaptive_params:
+                    print(f"  Adaptive: tuned_memory_mb={adaptive_params.get('tuned_memory_mb', '?')}")
                 print(f"  Advancing to round {next_round}...")
 
                 # Plan next round

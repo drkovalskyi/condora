@@ -920,6 +920,10 @@ def _generate_group_dag(
     if output_info_path:
         cleanup_args = f"--output-info {os.path.basename(output_info_path)}"
         cleanup_transfer.append(output_info_path)
+    # cleanup_manifest.json is written by the merge job into the group dir;
+    # it exists by the time the cleanup node runs (merge → cleanup dependency).
+    cleanup_manifest_path = str(group_dir / "cleanup_manifest.json")
+    cleanup_transfer.append(cleanup_manifest_path)
     _write_submit_file(
         str(group_dir / "cleanup.sub"),
         executable=cleanup_exe,

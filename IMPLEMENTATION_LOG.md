@@ -6,6 +6,77 @@
 
 ---
 
+## 2026-03-01 — Refactor CLI/lifecycle shared logic, fix cleanup and matrix tests
+
+### What was done
+
+Refactored the round-completion logic so CLI and lifecycle manager share the same
+code path. Previously the CLI had its own inline round-advancement code that
+skipped metrics aggregation, events_produced tracking, and adaptive optimization.
+
+Also fixed two bugs discovered by running the matrix smoke tests.
+
+### Changes
+
+**`src/wms2/core/lifecycle_manager.py`** — extracted shared functions:
+- `_count_events_from_disk()` — reads output events from work_unit_metrics.json
+  (safety net for events_produced=0)
+- `_compute_adaptive_params()` — runs adaptive optimization via core.adaptive
+- `complete_round()` — the shared async function: reads WU metrics from disk,
+  fixes events_produced, aggregates step_metrics, runs adaptive optimization,
+  advances round offset. Returns result dict.
+- `_handle_round_completion()` now delegates to `complete_round()` and only
+  handles termination checks + state transitions.
+
+**`src/wms2/cli.py`** — replaced ~30 lines of duplicated round-advancement
+code with a single `complete_round()` call. Now properly tracks events_produced,
+step_metrics, and adaptive_params.
+
+**`src/wms2/core/dag_planner.py`** — fixed cleanup job: added
+`cleanup_manifest.json` to `transfer_input_files` in `cleanup.sub`. The merge
+job writes this manifest at runtime, but the cleanup job couldn't find it
+because it wasn't transferred to the execute directory.
+
+**`tests/matrix/runner.py`** — fixed `_make_workflow_mock()`: added real values
+for `next_first_event`, `file_offset`, `current_round`, `events_produced`,
+`target_events`, and `step_metrics`. MagicMock returned mock objects for these
+attributes, causing `TypeError: '<=' not supported between MagicMock and int`.
+
+**`PLANNING.md`** — renamed from `CURRENT_OBJECTIVES.md`, updated with current
+status, service mode and monitoring as next milestones.
+
+**`.gitignore`**, **`CLAUDE.md`** — references updated for rename.
+
+### End-to-end test results
+
+Real 5-step StepChain workflow (B2G-Run3Summer23BPixwmLHEGS-06000, test_fraction=0.01):
+- 5 proc jobs (60 events each, 10 for the last) completed all 5 steps
+- Unique random seeds confirmed across all jobs
+- 3 merged outputs: AODSIM (143 MB), MINIAODSIM (29 MB), NANOAODSIM (3.3 MB)
+- Request marked completed in ~20 min
+- events_produced=0 and step_metrics=NULL in DB (CLI bug, fixed in this commit)
+
+Matrix smoke tests (5 workflows): all passed
+- 100.0 synthetic baseline — passed
+- 150.0 simulator single-step — passed
+- 500.0 fault: proc exits 1 — passed
+- 501.0 fault: proc SIGKILL — passed
+- 510.0 fault: merge exits 1 — passed
+
+### Bugs fixed
+
+16. Cleanup job can't find cleanup_manifest.json — manifest written by merge
+    job into group dir but not included in cleanup's transfer_input_files.
+    Cleanup ran in execute dir with no manifest, silently skipped cleanup.
+17. Matrix mock missing adaptive fields — `_make_workflow_mock()` didn't set
+    `next_first_event` etc., MagicMock returned mock objects instead of ints,
+    causing TypeError in dag_planner offset arithmetic.
+18. CLI duplicated round-completion logic — CLI had its own inline code that
+    skipped metrics aggregation and adaptive optimization. Refactored to use
+    shared `complete_round()` function.
+
+---
+
 ## 2026-03-01 — Integrate adaptive optimization into WMS2 core
 
 ### What was built

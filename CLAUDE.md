@@ -2,13 +2,13 @@
 
 ## Current Plan of Work
 
-@CURRENT_OBJECTIVES.md
+@PLANNING.md
 
 ## Compact Instructions
 
 When compacting, preserve the active goal, the current plan and the next 3 concrete steps.
-Include the current contents of CURRENT_OBJECTIVES.md (or at least its top level bullet list).
-After compaction, re-open CURRENT_OBJECTIVES.md before making changes.
+Include the current contents of PLANNING.md (or at least its top level bullet list).
+After compaction, re-open PLANNING.md before making changes.
 
 ## What is this project?
 
