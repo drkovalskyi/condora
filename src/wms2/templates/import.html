@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}WMS2 — Import Request{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/import-form.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="importForm">
+    <h1>Import Request</h1>
+    <p style="opacity:0.7; margin-bottom:1.5rem;">
+        Import a workflow request from ReqMgr2 into WMS2.
+    </p>
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+
+    <div class="form-page">
+        <form @submit.prevent="submit()">
+            <div class="form-group">
+                <label for="request-name">Request Name *</label>
+                <input id="request-name" type="text" x-model="requestName"
+                       placeholder="cmsunified_task_..." required>
+                <div class="form-help">The ReqMgr2 request name to import.</div>
+            </div>
+
+            <div class="form-group">
+                <label for="sandbox-mode">Sandbox Mode</label>
+                <select id="sandbox-mode" x-model="sandboxMode">
+                    <option value="cmssw">cmssw (real CMSSW execution)</option>
+                    <option value="synthetic">synthetic (sized output, no CMSSW)</option>
+                    <option value="simulator">simulator (realistic artifacts)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="test-fraction">Test Fraction</label>
+                <input id="test-fraction" type="number" x-model="testFraction"
+                       step="0.001" min="0.001" max="1" placeholder="e.g. 0.01">
+                <div class="form-help">Process only this fraction of events per job (e.g. 0.01 = 1%). Leave empty for full processing.</div>
+            </div>
+
+            <div class="form-group">
+                <label for="events-per-job">Events Per Job</label>
+                <input id="events-per-job" type="number" x-model="eventsPerJob"
+                       min="1" placeholder="Default from request">
+                <div class="form-help">Override the splitting parameter for GEN workflows.</div>
+            </div>
+
+            <div class="form-group">
+                <label for="files-per-job">Files Per Job</label>
+                <input id="files-per-job" type="number" x-model="filesPerJob"
+                       min="1" placeholder="Default from request">
+                <div class="form-help">Override the splitting parameter for file-based workflows.</div>
+            </div>
+
+            <div class="form-group">
+                <label for="max-files">Max Files</label>
+                <input id="max-files" type="number" x-model="maxFiles"
+                       min="0" placeholder="0 = all">
+                <div class="form-help">Limit DBS file query (0 or empty = all files).</div>
+            </div>
+
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" x-model="dryRun">
+                    Dry Run
+                </label>
+                <div class="form-help">Plan the DAG but don't submit to HTCondor.</div>
+            </div>
+
+            <button type="submit" :disabled="!isValid || submitting"
+                    x-text="submitting ? 'Importing...' : 'Import Request'"></button>
+        </form>
+    </div>
+</div>
+{% endblock %}

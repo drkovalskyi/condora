@@ -1,5 +1,6 @@
 /**
  * Alpine requestDetail — fetches and exposes request + workflow + DAG data.
+ * Includes action methods (stop, release, fail, restart) with toast feedback.
  */
 document.addEventListener('alpine:init', () => {
     Alpine.data('requestDetail', (requestName) => ({
@@ -10,6 +11,13 @@ document.addEventListener('alpine:init', () => {
         errors: null,
         loading: true,
         error: null,
+
+        // Action state
+        actionLoading: false,
+        showStopDialog: false,
+        showFailDialog: false,
+        showRestartDialog: false,
+        stopReason: 'Operator-initiated clean stop',
 
         init() {
             this.fetchAll();
@@ -59,13 +67,98 @@ document.addEventListener('alpine:init', () => {
             if (!this.workflow || !this.workflow.step_metrics) return [];
             const sm = this.workflow.step_metrics;
             if (Array.isArray(sm)) return sm;
-            // step_metrics might be an object keyed by step name
             return Object.entries(sm).map(([step, data]) => ({ step, ...data }));
         },
 
         get transitions() {
             if (!this.request || !this.request.status_transitions) return [];
             return this.request.status_transitions;
+        },
+
+        // Action visibility helpers
+        get canStop() {
+            return this.request && ['active', 'pilot_running'].includes(this.request.status);
+        },
+        get canRelease() {
+            return this.request && this.request.status === 'held';
+        },
+        get canFail() {
+            return this.request && ['held', 'partial'].includes(this.request.status);
+        },
+        get canRestart() {
+            return this.request && ['held', 'partial'].includes(this.request.status);
+        },
+        get hasActions() {
+            return this.canStop || this.canRelease || this.canFail || this.canRestart;
+        },
+
+        // Toast helper
+        toast(type, message) {
+            window.dispatchEvent(new CustomEvent('wms2:toast', {
+                detail: { type, message }
+            }));
+        },
+
+        // Actions
+        async doStop() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.stopRequest(this.name, this.stopReason);
+                this.toast('success', result.message);
+                this.showStopDialog = false;
+                this.stopReason = 'Operator-initiated clean stop';
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Stop failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
+        async doRelease() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.releaseRequest(this.name);
+                this.toast('success', result.message);
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Release failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
+        async doFail() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.failRequest(this.name);
+                this.toast('success', result.message);
+                this.showFailDialog = false;
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Fail failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
+        async doRestart() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.restartRequest(this.name);
+                this.toast('success', result.message);
+                this.showRestartDialog = false;
+                // Redirect to the new request
+                if (result.new_request_name) {
+                    window.location.href = '/ui/requests/' + encodeURIComponent(result.new_request_name);
+                } else {
+                    await this.fetchAll();
+                }
+            } catch (e) {
+                this.toast('error', 'Restart failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
         },
     }));
 });

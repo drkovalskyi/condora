@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}WMS2 — Workflow {{ workflow_id[:8] }}{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/workflow-detail.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="workflowDetail('{{ workflow_id|e }}')" data-workflow-id="{{ workflow_id|e }}">
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+    <div x-show="loading && !workflow" style="opacity:0.6">Loading...</div>
+
+    <template x-if="workflow">
+        <div>
+            <h1 style="font-size:1.3rem;">
+                Workflow
+                <span x-html="statusBadge(workflow.status)" style="margin-left:0.5rem;"></span>
+            </h1>
+            <p style="opacity:0.7; font-size:0.85rem; word-break:break-all;" x-text="workflow.id"></p>
+
+            <!-- Workflow metadata -->
+            <div class="section">
+                <h3>Workflow Info</h3>
+                <dl class="detail-grid">
+                    <dt>Request</dt>
+                    <dd>
+                        <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)"
+                           x-text="workflow.request_name" style="word-break:break-all;"></a>
+                    </dd>
+                    <dt>Input Dataset</dt>
+                    <dd x-text="workflow.input_dataset || '—'" style="word-break:break-all;"></dd>
+                    <dt>Splitting Algorithm</dt>
+                    <dd x-text="workflow.splitting_algo || '—'"></dd>
+                    <dt>Current Round</dt>
+                    <dd x-text="workflow.current_round != null ? workflow.current_round : '—'"></dd>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(workflow.created_at)"></dd>
+                    <dt>Updated</dt>
+                    <dd x-text="fmtDateTime(workflow.updated_at)"></dd>
+                </dl>
+            </div>
+
+            <!-- Splitting params -->
+            <template x-if="Object.keys(splittingDisplay).length > 0">
+                <div class="section">
+                    <h3>Splitting Parameters</h3>
+                    <dl class="detail-grid">
+                        <template x-for="[key, val] in Object.entries(splittingDisplay)" :key="key">
+                            <div>
+                                <dt x-text="key"></dt>
+                                <dd x-text="val"></dd>
+                            </div>
+                        </template>
+                    </dl>
+                </div>
+            </template>
+
+            <!-- Progress -->
+            <div class="section">
+                <h3>Events Progress</h3>
+                <dl class="detail-grid">
+                    <dt>Events Produced</dt>
+                    <dd>
+                        <span x-text="fmtNum(workflow.events_produced)"></span>
+                        / <span x-text="fmtNum(workflow.target_events)"></span>
+                    </dd>
+                    <dt>Files Processed</dt>
+                    <dd>
+                        <span x-text="fmtNum(workflow.files_processed)"></span>
+                        / <span x-text="fmtNum(workflow.total_input_files)"></span>
+                    </dd>
+                    <dt>Progress</dt>
+                    <dd x-text="fmtPct(progressPct)"></dd>
+                </dl>
+                <div class="progress-bar" style="max-width:500px;">
+                    <div class="fill" :style="'width:' + Math.min(100, progressPct) + '%'"></div>
+                </div>
+                <div style="font-size:0.85rem; opacity:0.7; margin-top:0.25rem;">
+                    Nodes: <span x-text="fmtNum(workflow.nodes_done)"></span> done,
+                    <span x-text="fmtNum(workflow.nodes_running)"></span> running,
+                    <span x-text="fmtNum(workflow.nodes_queued)"></span> queued,
+                    <span x-text="fmtNum(workflow.nodes_failed)"></span> failed
+                </div>
+            </div>
+
+            <!-- Step metrics -->
+            <template x-if="stepMetrics.length > 0">
+                <div class="section">
+                    <h3>Step Metrics</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Step</th>
+                                <th>Avg CPU Eff</th>
+                                <th>Avg Memory (MB)</th>
+                                <th>Avg Time/Event (s)</th>
+                                <th>Avg Throughput</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="m in stepMetrics" :key="m.step">
+                                <tr>
+                                    <td x-text="m.step"></td>
+                                    <td x-text="m.avg_cpu_efficiency != null ? fmtPct(m.avg_cpu_efficiency) : '—'"></td>
+                                    <td x-text="m.avg_peak_rss != null ? fmtNum(Math.round(m.avg_peak_rss)) : '—'"></td>
+                                    <td x-text="m.avg_time_per_event != null ? Number(m.avg_time_per_event).toFixed(2) : '—'"></td>
+                                    <td x-text="m.avg_throughput != null ? Number(m.avg_throughput).toFixed(1) : '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Processing blocks -->
+            <template x-if="blocks.length > 0">
+                <div class="section">
+                    <h3>Processing Blocks</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Block</th>
+                                <th>Dataset</th>
+                                <th>Status</th>
+                                <th>Work Units</th>
+                                <th>DBS Block</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="b in blocks" :key="b.id">
+                                <tr>
+                                    <td x-text="b.block_index"></td>
+                                    <td x-text="b.dataset_name || '—'" class="truncate" style="max-width:250px;"></td>
+                                    <td x-html="statusBadge(b.status)"></td>
+                                    <td>
+                                        <span x-text="b.completed_work_units || 0"></span>
+                                        / <span x-text="b.total_work_units || 0"></span>
+                                    </td>
+                                    <td x-text="b.dbs_block_name || '—'" class="truncate" style="max-width:200px;"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- DAG link -->
+            <template x-if="dag">
+                <div class="section">
+                    <h3>DAG</h3>
+                    <dl class="detail-grid">
+                        <dt>Status</dt>
+                        <dd x-html="statusBadge(dag.status)"></dd>
+                        <dt>DAGMan Cluster</dt>
+                        <dd x-text="dag.dagman_cluster_id || '—'"></dd>
+                        <dt>Work Units</dt>
+                        <dd>
+                            <span x-text="dag.completed_work_units || 0"></span>
+                            / <span x-text="dag.total_work_units || 0"></span> completed
+                        </dd>
+                    </dl>
+                    <p style="margin-top:0.5rem;">
+                        <a :href="'/ui/dags/' + encodeURIComponent(dag.id)">View DAG details &rarr;</a>
+                    </p>
+                </div>
+            </template>
+
+            <!-- Back links -->
+            <p>
+                <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)">&larr; Back to Request</a>
+            </p>
+        </div>
+    </template>
+</div>
+{% endblock %}

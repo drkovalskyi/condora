@@ -10,6 +10,7 @@
     <script src="/static/js/api.js"></script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/components/refresh.js"></script>
+    <script src="/static/js/components/toast.js"></script>
     {% block head_scripts %}{% endblock %}
     <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
@@ -20,6 +21,7 @@
             <nav>
                 <a href="/ui/" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
                 <a href="/ui/requests" class="{% if active_page == 'requests' %}active{% endif %}">Requests</a>
+                <a href="/ui/import" class="{% if active_page == 'import' %}active{% endif %}">Import</a>
             </nav>
         </aside>
         <main class="content">
@@ -38,6 +40,15 @@
             </div>
             {% block content %}{% endblock %}
         </main>
+    </div>
+    <!-- Toast notifications -->
+    <div x-data="toastManager" class="toast-container">
+        <template x-for="t in toasts" :key="t.id">
+            <div class="toast" :class="'toast--' + t.type"
+                 @click="remove(t.id)">
+                <span x-text="t.message"></span>
+            </div>
+        </template>
     </div>
     {% block scripts %}{% endblock %}
 </body>

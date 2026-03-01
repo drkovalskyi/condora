@@ -17,6 +17,61 @@
                 <span x-html="statusBadge(request.status)" style="margin-left:0.5rem;"></span>
             </h1>
 
+            <!-- Action buttons -->
+            <template x-if="hasActions">
+                <div class="action-buttons">
+                    <template x-if="canStop">
+                        <button class="outline" @click="showStopDialog = true" :disabled="actionLoading">Stop</button>
+                    </template>
+                    <template x-if="canRelease">
+                        <button class="outline" @click="doRelease()" :disabled="actionLoading">Release</button>
+                    </template>
+                    <template x-if="canFail">
+                        <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444;"
+                                @click="showFailDialog = true" :disabled="actionLoading">Fail</button>
+                    </template>
+                    <template x-if="canRestart">
+                        <button class="outline" @click="showRestartDialog = true" :disabled="actionLoading">Restart</button>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Stop dialog -->
+            <dialog x-ref="stopDialog" :open="showStopDialog || undefined">
+                <h3>Stop Request</h3>
+                <p>Initiate a clean stop. Running jobs will finish; no new jobs will start.</p>
+                <div class="form-group">
+                    <label for="stop-reason">Reason</label>
+                    <textarea id="stop-reason" x-model="stopReason" rows="2" style="width:100%;"></textarea>
+                </div>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showStopDialog = false">Cancel</button>
+                    <button @click="doStop()" :disabled="actionLoading">Confirm Stop</button>
+                </div>
+            </dialog>
+
+            <!-- Fail dialog -->
+            <dialog x-ref="failDialog" :open="showFailDialog || undefined">
+                <h3>Fail Request</h3>
+                <p>This will kill the running DAG and mark the request as failed. This cannot be undone.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showFailDialog = false">Cancel</button>
+                    <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
+                            @click="doFail()" :disabled="actionLoading">Confirm Fail</button>
+                </div>
+            </dialog>
+
+            <!-- Restart dialog -->
+            <dialog x-ref="restartDialog" :open="showRestartDialog || undefined">
+                <h3>Restart Request</h3>
+                <p>This will fail the current request and create a new one with an incremented version.
+                   You will be redirected to the new request.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showRestartDialog = false">Cancel</button>
+                    <button @click="doRestart()" :disabled="actionLoading">Confirm Restart</button>
+                </div>
+            </dialog>
+
             <!-- Request info -->
             <div class="section">
                 <h3>Request Info</h3>
@@ -74,6 +129,9 @@
                         <span x-text="fmtNum(workflow.nodes_queued)"></span> queued,
                         <span x-text="fmtNum(workflow.nodes_failed)"></span> failed
                     </div>
+                    <p style="margin-top:0.5rem;">
+                        <a :href="'/ui/workflows/' + encodeURIComponent(workflow.id)">View workflow details &rarr;</a>
+                    </p>
                 </div>
             </template>
             <template x-if="!hasWorkflow">
@@ -106,6 +164,9 @@
                         <span>Failed: <strong x-text="dag.nodes_failed || 0"></strong></span>
                         <span>Held: <strong x-text="dag.nodes_held || 0"></strong></span>
                     </div>
+                    <p style="margin-top:0.5rem;">
+                        <a :href="'/ui/dags/' + encodeURIComponent(dag.id)">View DAG details &rarr;</a>
+                    </p>
                 </div>
             </template>
 

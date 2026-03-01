@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}WMS2 — DAG {{ dag_id[:8] }}{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/dag-detail.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="dagDetail('{{ dag_id|e }}')" data-dag-id="{{ dag_id|e }}">
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+    <div x-show="loading && !dag" style="opacity:0.6">Loading...</div>
+
+    <template x-if="dag">
+        <div>
+            <h1 style="font-size:1.3rem;">
+                DAG
+                <span x-html="statusBadge(dag.status)" style="margin-left:0.5rem;"></span>
+            </h1>
+            <p style="opacity:0.7; font-size:0.85rem; word-break:break-all;" x-text="dag.id"></p>
+
+            <!-- DAG metadata -->
+            <div class="section">
+                <h3>DAG Info</h3>
+                <dl class="detail-grid">
+                    <dt>DAGMan Cluster ID</dt>
+                    <dd x-text="dag.dagman_cluster_id || '—'"></dd>
+                    <dt>Schedd</dt>
+                    <dd x-text="dag.schedd_name || '—'"></dd>
+                    <dt>Submit Dir</dt>
+                    <dd x-text="dag.submit_dir || '—'" style="word-break:break-all;"></dd>
+                    <dt>DAG File</dt>
+                    <dd x-text="dag.dag_file_path || '—'" style="word-break:break-all;"></dd>
+                    <template x-if="dag.rescue_dag_path">
+                        <div>
+                            <dt>Rescue DAG</dt>
+                            <dd x-text="dag.rescue_dag_path" style="word-break:break-all;"></dd>
+                        </div>
+                    </template>
+                    <template x-if="dag.parent_dag_id">
+                        <div>
+                            <dt>Parent DAG</dt>
+                            <dd>
+                                <a :href="'/ui/dags/' + encodeURIComponent(dag.parent_dag_id)"
+                                   x-text="dag.parent_dag_id"></a>
+                            </dd>
+                        </div>
+                    </template>
+                    <template x-if="dag.stop_requested_at">
+                        <div>
+                            <dt>Stop Requested</dt>
+                            <dd x-text="fmtDateTime(dag.stop_requested_at)"></dd>
+                            <dt>Stop Reason</dt>
+                            <dd x-text="dag.stop_reason || '—'"></dd>
+                        </div>
+                    </template>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(dag.created_at)"></dd>
+                    <dt>Submitted</dt>
+                    <dd x-text="fmtDateTime(dag.submitted_at)"></dd>
+                    <template x-if="dag.completed_at">
+                        <div>
+                            <dt>Completed</dt>
+                            <dd x-text="fmtDateTime(dag.completed_at)"></dd>
+                        </div>
+                    </template>
+                </dl>
+            </div>
+
+            <!-- Node counts with bar -->
+            <div class="section">
+                <h3>Node Counts</h3>
+                <div class="node-bar">
+                    <div class="segment seg-done" :style="'width:' + segPct(dag.nodes_done)"></div>
+                    <div class="segment seg-running" :style="'width:' + segPct(dag.nodes_running)"></div>
+                    <div class="segment seg-idle" :style="'width:' + segPct(dag.nodes_idle)"></div>
+                    <div class="segment seg-failed" :style="'width:' + segPct(dag.nodes_failed)"></div>
+                    <div class="segment seg-held" :style="'width:' + segPct(dag.nodes_held)"></div>
+                </div>
+                <div class="node-counts">
+                    <span>Total: <strong x-text="dag.total_nodes || 0"></strong></span>
+                    <span style="border-left:3px solid #22c55e;">Done: <strong x-text="dag.nodes_done || 0"></strong></span>
+                    <span style="border-left:3px solid #3b82f6;">Running: <strong x-text="dag.nodes_running || 0"></strong></span>
+                    <span style="border-left:3px solid #6b7280;">Idle: <strong x-text="dag.nodes_idle || 0"></strong></span>
+                    <span style="border-left:3px solid #ef4444;">Failed: <strong x-text="dag.nodes_failed || 0"></strong></span>
+                    <span style="border-left:3px solid #f59e0b;">Held: <strong x-text="dag.nodes_held || 0"></strong></span>
+                </div>
+            </div>
+
+            <!-- Work unit progress -->
+            <div class="section">
+                <h3>Work Unit Progress</h3>
+                <div>
+                    <span x-text="dag.completed_work_units || 0"></span>
+                    / <span x-text="dag.total_work_units || 0"></span> completed
+                    (<span x-text="fmtPct(wuPct)"></span>)
+                </div>
+                <div class="progress-bar" style="max-width:500px;">
+                    <div class="fill" :style="'width:' + wuPct + '%'"></div>
+                </div>
+            </div>
+
+            <!-- History timeline -->
+            <template x-if="history.length > 0">
+                <div class="section">
+                    <h3>History</h3>
+                    <table class="timeline-table">
+                        <thead>
+                            <tr>
+                                <th>Event</th>
+                                <th>From</th>
+                                <th>To</th>
+                                <th>Done</th>
+                                <th>Running</th>
+                                <th>Failed</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="h in history" :key="h.id">
+                                <tr>
+                                    <td x-text="h.event_type"></td>
+                                    <td x-html="h.from_status ? statusBadge(h.from_status) : '—'"></td>
+                                    <td x-html="h.to_status ? statusBadge(h.to_status) : '—'"></td>
+                                    <td x-text="h.nodes_done != null ? h.nodes_done : '—'"></td>
+                                    <td x-text="h.nodes_running != null ? h.nodes_running : '—'"></td>
+                                    <td x-text="h.nodes_failed != null ? h.nodes_failed : '—'"></td>
+                                    <td x-text="fmtDateTime(h.created_at)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Back links -->
+            <p>
+                <a :href="'/ui/workflows/' + encodeURIComponent(dag.workflow_id)">&larr; Back to Workflow</a>
+            </p>
+        </div>
+    </template>
+</div>
+{% endblock %}

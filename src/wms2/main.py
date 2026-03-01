@@ -76,8 +76,12 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.session_factory = session_factory
 
-    # Build adapters
+    # Build adapters (also stored on app.state for API endpoints)
     condor, reqmgr, dbs, rucio, cric = _build_adapters(settings)
+    app.state.condor = condor
+    app.state.reqmgr = reqmgr
+    app.state.dbs = dbs
+    app.state.rucio = rucio
 
     # Initial CRIC sync (populate sites table at startup)
     try:
