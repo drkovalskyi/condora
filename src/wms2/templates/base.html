@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="api-prefix" content="{{ api_prefix }}">
+    <title>{% block title %}WMS2{% endblock %}</title>
+    <link rel="stylesheet" href="/static/vendor/pico.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/components/refresh.js"></script>
+    {% block head_scripts %}{% endblock %}
+    <script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body>
+    <div class="layout">
+        <aside class="sidebar">
+            <h2><a href="/ui/" style="text-decoration:none; color:inherit;">WMS2</a></h2>
+            <nav>
+                <a href="/ui/" class="{% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+                <a href="/ui/requests" class="{% if active_page == 'requests' %}active{% endif %}">Requests</a>
+            </nav>
+        </aside>
+        <main class="content">
+            <div x-data="refreshController" class="refresh-bar">
+                <span>Auto-refresh:</span>
+                <select x-model="interval" @change="setInterval($event.target.value)">
+                    <option value="10">10s</option>
+                    <option value="30" selected>30s</option>
+                    <option value="60">60s</option>
+                    <option value="120">2m</option>
+                </select>
+                <button @click="togglePause()" class="outline" x-text="paused ? 'Resume' : 'Pause'"></button>
+                <button @click="refreshNow()" class="outline">Refresh</button>
+                <span x-show="!paused" style="opacity:0.6" x-text="countdown + 's'"></span>
+                <span x-show="paused" style="opacity:0.6">(paused)</span>
+            </div>
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

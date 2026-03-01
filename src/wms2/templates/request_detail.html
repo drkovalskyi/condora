@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}WMS2 — {{ request_name }}{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/request-detail.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="requestDetail('{{ request_name|e }}')" data-request-name="{{ request_name|e }}">
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+    <div x-show="loading && !request" style="opacity:0.6">Loading...</div>
+
+    <template x-if="request">
+        <div>
+            <!-- Header -->
+            <h1 style="font-size:1.3rem; word-break:break-all;">
+                <span x-text="request.request_name"></span>
+                <span x-html="statusBadge(request.status)" style="margin-left:0.5rem;"></span>
+            </h1>
+
+            <!-- Request info -->
+            <div class="section">
+                <h3>Request Info</h3>
+                <dl class="detail-grid">
+                    <dt>Campaign</dt>
+                    <dd x-text="request.campaign || '—'"></dd>
+                    <dt>Priority</dt>
+                    <dd x-text="request.priority"></dd>
+                    <dt>Requestor</dt>
+                    <dd x-text="request.requestor || '—'"></dd>
+                    <dt>Urgent</dt>
+                    <dd x-text="request.urgent ? 'Yes' : 'No'"></dd>
+                    <dt>Adaptive</dt>
+                    <dd x-text="request.adaptive ? 'Yes' : 'No'"></dd>
+                    <dt>Input Dataset</dt>
+                    <dd x-text="request.input_dataset || '—'" style="word-break:break-all;"></dd>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(request.created_at)"></dd>
+                    <dt>Updated</dt>
+                    <dd x-text="fmtDateTime(request.updated_at)"></dd>
+                    <dt>Cleanup Policy</dt>
+                    <dd x-text="request.cleanup_policy || '—'"></dd>
+                </dl>
+            </div>
+
+            <!-- Workflow progress -->
+            <template x-if="hasWorkflow">
+                <div class="section">
+                    <h3>Workflow Progress</h3>
+                    <dl class="detail-grid">
+                        <dt>Status</dt>
+                        <dd x-html="statusBadge(workflow.status)"></dd>
+                        <dt>Round</dt>
+                        <dd x-text="workflow.current_round != null ? workflow.current_round : '—'"></dd>
+                        <dt>Events Produced</dt>
+                        <dd>
+                            <span x-text="fmtNum(workflow.events_produced)"></span>
+                            / <span x-text="fmtNum(workflow.target_events)"></span>
+                        </dd>
+                        <dt>Progress</dt>
+                        <dd x-text="fmtPct(progressPct)"></dd>
+                    </dl>
+                    <div class="progress-bar" style="max-width:500px;">
+                        <div class="fill" :style="'width:' + Math.min(100, progressPct) + '%'"></div>
+                    </div>
+                    <div style="font-size:0.85rem; opacity:0.7; margin-top:0.25rem;">
+                        Nodes: <span x-text="fmtNum(workflow.nodes_done)"></span> done,
+                        <span x-text="fmtNum(workflow.nodes_running)"></span> running,
+                        <span x-text="fmtNum(workflow.nodes_queued)"></span> queued,
+                        <span x-text="fmtNum(workflow.nodes_failed)"></span> failed
+                    </div>
+                </div>
+            </template>
+            <template x-if="!hasWorkflow">
+                <div class="section">
+                    <h3>Workflow</h3>
+                    <p style="opacity:0.6">No workflow created yet.</p>
+                </div>
+            </template>
+
+            <!-- DAG node counts -->
+            <template x-if="hasDAG">
+                <div class="section">
+                    <h3>DAG Details</h3>
+                    <dl class="detail-grid">
+                        <dt>Status</dt>
+                        <dd x-html="statusBadge(dag.status)"></dd>
+                        <dt>DAGMan Cluster</dt>
+                        <dd x-text="dag.dagman_cluster_id || '—'"></dd>
+                        <dt>Work Units</dt>
+                        <dd>
+                            <span x-text="dag.completed_work_units || 0"></span>
+                            / <span x-text="dag.total_work_units || 0"></span> completed
+                        </dd>
+                    </dl>
+                    <div class="node-counts" style="margin-top:0.5rem;">
+                        <span>Total: <strong x-text="dag.total_nodes || 0"></strong></span>
+                        <span>Done: <strong x-text="dag.nodes_done || 0"></strong></span>
+                        <span>Running: <strong x-text="dag.nodes_running || 0"></strong></span>
+                        <span>Idle: <strong x-text="dag.nodes_idle || 0"></strong></span>
+                        <span>Failed: <strong x-text="dag.nodes_failed || 0"></strong></span>
+                        <span>Held: <strong x-text="dag.nodes_held || 0"></strong></span>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Step metrics -->
+            <template x-if="stepMetrics.length > 0">
+                <div class="section">
+                    <h3>Step Metrics</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Step</th>
+                                <th>Avg CPU Eff</th>
+                                <th>Avg Memory (MB)</th>
+                                <th>Avg Time/Event (s)</th>
+                                <th>Avg Throughput</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="m in stepMetrics" :key="m.step">
+                                <tr>
+                                    <td x-text="m.step"></td>
+                                    <td x-text="m.avg_cpu_efficiency != null ? fmtPct(m.avg_cpu_efficiency) : '—'"></td>
+                                    <td x-text="m.avg_peak_rss != null ? fmtNum(Math.round(m.avg_peak_rss)) : '—'"></td>
+                                    <td x-text="m.avg_time_per_event != null ? Number(m.avg_time_per_event).toFixed(2) : '—'"></td>
+                                    <td x-text="m.avg_throughput != null ? Number(m.avg_throughput).toFixed(1) : '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Errors -->
+            <template x-if="hasErrors">
+                <div class="section">
+                    <h3>Errors</h3>
+                    <p>Total failures: <strong x-text="errors.total_failures || 0"></strong></p>
+                    <template x-if="errors.site_errors && errors.site_errors.length > 0">
+                        <table>
+                            <thead><tr><th>Site</th><th>Failures</th><th>Banned</th></tr></thead>
+                            <tbody>
+                                <template x-for="se in errors.site_errors" :key="se.site">
+                                    <tr>
+                                        <td x-text="se.site"></td>
+                                        <td x-text="se.failures"></td>
+                                        <td x-text="se.banned ? 'Yes' : 'No'"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Status history -->
+            <template x-if="transitions.length > 0">
+                <div class="section">
+                    <h3>Status History</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>From</th>
+                                <th>To</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="(t, i) in transitions" :key="i">
+                                <tr>
+                                    <td x-html="statusBadge(t.from)"></td>
+                                    <td x-html="statusBadge(t.to)"></td>
+                                    <td x-text="fmtDateTime(t.timestamp)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Back link -->
+            <p><a href="/ui/requests">&larr; All Requests</a></p>
+        </div>
+    </template>
+</div>
+{% endblock %}

@@ -1,8 +1,11 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from wms2 import __version__
 from wms2.adapters.mock import (
@@ -158,4 +161,16 @@ def create_app() -> FastAPI:
     )
     app.state.settings = settings
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    # Web UI
+    from wms2.ui.routes import ui_router
+
+    static_dir = Path(__file__).resolve().parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.include_router(ui_router)
+
+    @app.get("/")
+    async def root_redirect():
+        return RedirectResponse(url="/ui/")
+
     return app
