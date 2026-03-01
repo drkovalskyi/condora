@@ -6,6 +6,72 @@
 
 ---
 
+## 2026-03-01 — Integrate adaptive optimization into WMS2 core
+
+### What was built
+
+Moved the adaptive execution algorithms from `tests/matrix/adaptive.py` into the
+production code path (`src/wms2/core/adaptive.py`) and wired them into the
+lifecycle manager and DAG planner for automatic inter-round optimization.
+
+**New file: `src/wms2/core/adaptive.py`** (1108 lines)
+- All algorithm functions from `tests/matrix/adaptive.py`: `analyze_wu_metrics`,
+  `load_cgroup_metrics`, `analyze_probe_metrics`, `merge_round_metrics`,
+  `compute_per_step_nthreads`, `compute_job_split`, `compute_all_step_split`,
+  `patch_wu_manifests`, `rewrite_wu_for_job_split`
+- New orchestrator `compute_round_optimization()` that ties the algorithms together
+  for inter-round optimization: reads WU metrics, merges across rounds, calls the
+  appropriate compute function based on adaptive_mode, returns tuned parameters
+
+**Config (`src/wms2/config.py`)** — 4 new settings:
+- `default_memory_per_core` (2000 MB), `max_memory_per_core` (3000 MB),
+  `safety_margin` (0.20), `adaptive_mode` ("per_step")
+
+**Lifecycle manager (`src/wms2/core/lifecycle_manager.py`)** — 3 changes:
+1. **Fix: events_produced=0** — Added `_count_events_from_disk()` safety net that
+   reads work_unit_metrics.json when DB shows 0 events despite completed WUs
+   (session/commit timing issue)
+2. **Fix: step_metrics=NULL** — Enhanced `_aggregate_round_metrics()` to accept
+   `wu_metrics_list` and store real per-step performance data under `rounds` key
+3. **Adaptive wiring** — `_compute_adaptive_params()` calls
+   `compute_round_optimization()` between rounds, stores result in
+   `step_metrics["adaptive_params"]` for the DAG planner to consume
+
+**DAG planner (`src/wms2/core/dag_planner.py`)** — reads `adaptive_params`:
+- When `adaptive=True` and `current_round > 0`, reads
+  `workflow.step_metrics["adaptive_params"]` and overrides `memory_mb`
+- For job_split mode: also overrides `ncpus`, `events_per_job`, and
+  `jobs_per_work_unit` via `_jobs_per_wu_override`
+- Moved merge_groups planning after resource_params to allow adaptive overrides
+
+**Test wrapper (`tests/matrix/adaptive.py`)** — thin import wrapper:
+- All algorithm functions replaced with re-exports from `wms2.core.adaptive`
+- CLI entry points (`_replan_cli`, `main`) preserved for intra-DAG replan
+
+### Design decisions
+
+- **Per-step mode uses measured memory, not per-core floor**: When real performance
+  data is available, the memory floor is a fixed 4 GB minimum instead of
+  `default_memory_per_core × request_cpus` (which is 32 GB for 16-core jobs).
+  This allows memory to drop from 32 GB to ~11 GB based on cgroup measurements.
+- **Lazy import of adaptive module**: The lifecycle manager imports
+  `wms2.core.adaptive` inside `_compute_adaptive_params()` to avoid circular
+  imports and allow graceful fallback if the module is unavailable.
+- **Guard against mock objects**: The dag_planner checks `isinstance(step_metrics, dict)`
+  and `isinstance(adaptive_params, dict)` before accessing, since mock workflows
+  in tests return MagicMock for all attributes.
+
+### Verification
+
+- `compute_round_optimization` on existing Round 0 data produces expected results:
+  - `weighted_cpu_eff=0.81`, `effective_cores=12.95`
+  - `tuned_nthreads=16` (GEN step 93% efficient — keeps 16)
+  - `tuned_memory_mb=10903` (cgroup peak 9086 MB × 1.2 margin, down from 32 GB)
+- 490 unit tests pass (1 pre-existing failure in `test_filter_efficiency_in_proc_args` unrelated)
+- All imports resolve: core module, test wrapper, config settings, lifecycle manager, dag planner
+
+---
+
 ## 2026-03-01 — Fix: Randomize CMSSW random seeds for GEN jobs
 
 ### Problem

@@ -232,11 +232,8 @@ class DAGPlanner:
                 f"No processing nodes generated for workflow {workflow.id}"
             )
 
-        # Plan merge groups (fixed job count per work unit)
-        merge_groups = _plan_merge_groups(
-            nodes,
-            jobs_per_group=self.settings.jobs_per_work_unit,
-        )
+        # Plan merge groups — deferred until after resource_params is built
+        # (adaptive job_split may override jobs_per_wu via _jobs_per_wu_override)
 
         # 7. Generate DAG files on disk
         # Round-aware submit directory for round 2+
@@ -271,6 +268,49 @@ class DAGPlanner:
             resource_params["test_fraction"] = float(test_fraction)
         # filter_efficiency is used at planning time (inflating total_events in
         # _plan_gen_nodes) but not passed to the processing wrapper.
+
+        # ── Apply adaptive params from prior round optimization ──
+        if adaptive and current_round > 0:
+            step_metrics = getattr(workflow, "step_metrics", None)
+            adaptive_params = (
+                step_metrics.get("adaptive_params")
+                if isinstance(step_metrics, dict) else None
+            )
+            if isinstance(adaptive_params, dict):
+                tuned_memory = adaptive_params.get("tuned_memory_mb")
+                if tuned_memory and tuned_memory > 0:
+                    old_mem = resource_params.get("memory_mb", memory_mb)
+                    resource_params["memory_mb"] = int(tuned_memory)
+                    logger.info(
+                        "Adaptive: memory %s -> %d MB (mode=%s, source=%s)",
+                        old_mem, tuned_memory,
+                        adaptive_params.get("mode", "?"),
+                        adaptive_params.get("memory_source", "?"),
+                    )
+
+                # For job_split mode: override cpus and events_per_job
+                mode = adaptive_params.get("mode", "per_step")
+                if mode == "job_split":
+                    tuned_cpus = adaptive_params.get("tuned_request_cpus")
+                    if tuned_cpus and tuned_cpus > 0:
+                        resource_params["ncpus"] = int(tuned_cpus)
+                    tuned_epj = adaptive_params.get("tuned_events_per_job")
+                    if tuned_epj and tuned_epj > 0:
+                        params = workflow.splitting_params or {}
+                        params["events_per_job"] = tuned_epj
+                        # Update jobs_per_work_unit based on multiplier
+                        multiplier = adaptive_params.get("job_multiplier", 1)
+                        if multiplier > 1:
+                            resource_params["_jobs_per_wu_override"] = (
+                                self.settings.jobs_per_work_unit * multiplier
+                            )
+
+        # Plan merge groups (after resource_params is fully built)
+        jobs_per_wu = resource_params.pop("_jobs_per_wu_override", None)
+        merge_groups = _plan_merge_groups(
+            nodes,
+            jobs_per_group=jobs_per_wu or self.settings.jobs_per_work_unit,
+        )
 
         # Query banned sites for this workflow
         banned_sites: list[str] = []

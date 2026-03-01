@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -11,10 +12,16 @@ from wms2.models.enums import DAGStatus, RequestStatus, WorkflowStatus
 logger = logging.getLogger(__name__)
 
 
-def _aggregate_round_metrics(existing_metrics, dag, round_number):
-    """Merge this round's DAG stats into cumulative step_metrics."""
+def _aggregate_round_metrics(existing_metrics, dag, round_number,
+                              wu_metrics_list=None):
+    """Merge this round's DAG stats and WU performance data into step_metrics.
+
+    When wu_metrics_list is provided (list of work_unit_metrics.json dicts),
+    store them under a 'rounds' key keyed by round number. This preserves
+    real per-step performance data that the adaptive algorithm needs.
+    """
     prior = existing_metrics or {}
-    return {
+    result = {
         **prior,
         "rounds_completed": round_number + 1,
         "cumulative_nodes_done": prior.get("cumulative_nodes_done", 0) + (dag.nodes_done or 0),
@@ -22,6 +29,19 @@ def _aggregate_round_metrics(existing_metrics, dag, round_number):
         "last_round_nodes_done": dag.nodes_done or 0,
         "last_round_work_units": dag.total_work_units or 0,
     }
+
+    # Store WU-level performance data for adaptive analysis
+    if wu_metrics_list:
+        rounds = prior.get("rounds", {})
+        rounds[str(round_number)] = {
+            "wu_metrics": wu_metrics_list,
+            "nodes_done": dag.nodes_done or 0,
+            "nodes_failed": dag.nodes_failed or 0,
+            "work_units": dag.total_work_units or 0,
+        }
+        result["rounds"] = rounds
+
+    return result
 
 
 class RequestLifecycleManager:
@@ -546,6 +566,9 @@ class RequestLifecycleManager:
         file-based), NOT on assignment offsets.  Offsets are still advanced
         so the next round knows where to start assigning work.
         """
+        # Re-fetch workflow to get the latest state (caller's object may be stale)
+        workflow = await self.db.get_workflow_by_request(request.request_name)
+
         config = workflow.config_data or {}
         is_gen = config.get("_is_gen", False)
         params = workflow.splitting_params or {}
@@ -569,10 +592,64 @@ class RequestLifecycleManager:
             files_this_round = total_jobs * files_per_job
             new_offset = workflow.file_offset + files_this_round
 
-        # Aggregate step_metrics from completed DAG
+        # ── Fix: events_produced=0 safety net ──
+        # If the DB shows 0 events but work units completed, read from disk
+        if is_gen and (workflow.events_produced or 0) == 0 and dag.completed_work_units:
+            total_from_disk = self._count_events_from_disk(
+                dag.submit_dir, dag.completed_work_units
+            )
+            if total_from_disk > 0:
+                logger.info(
+                    "Request %s: events_produced=0 in DB but %d from disk — fixing",
+                    request.request_name, total_from_disk,
+                )
+                await self.db.update_workflow(
+                    workflow.id, events_produced=total_from_disk
+                )
+                workflow = await self.db.get_workflow_by_request(
+                    request.request_name
+                )
+
+        # ── Collect WU metrics from disk for step_metrics enrichment ──
+        wu_metrics_list = []
+        if dag.submit_dir and dag.completed_work_units:
+            for wu_name in dag.completed_work_units:
+                metrics_path = os.path.join(
+                    dag.submit_dir, wu_name, "work_unit_metrics.json"
+                )
+                if os.path.exists(metrics_path):
+                    try:
+                        wu_metrics_list.append(
+                            json.load(open(metrics_path))
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to read WU metrics: %s", metrics_path
+                        )
+
+        # Aggregate step_metrics from completed DAG (with WU performance data)
         new_metrics = _aggregate_round_metrics(
-            workflow.step_metrics, dag, workflow.current_round
+            workflow.step_metrics, dag, workflow.current_round,
+            wu_metrics_list=wu_metrics_list or None,
         )
+
+        # ── Adaptive optimization between rounds ──
+        adaptive_params = self._compute_adaptive_params(
+            config, dag, workflow, new_metrics
+        )
+        if adaptive_params:
+            new_metrics["adaptive_params"] = adaptive_params
+            logger.info(
+                "Request %s: adaptive optimization — nthreads=%d, memory=%d MB, "
+                "mode=%s, cpu_eff=%.1f%%",
+                request.request_name,
+                adaptive_params.get("tuned_nthreads", 0),
+                adaptive_params.get("tuned_memory_mb", 0),
+                adaptive_params.get("mode", "?"),
+                (adaptive_params.get("metrics_summary", {}) or {}).get(
+                    "weighted_cpu_eff", 0
+                ) * 100,
+            )
 
         new_round = workflow.current_round + 1
 
@@ -663,6 +740,79 @@ class RequestLifecycleManager:
 
         # Return to admission queue for next round
         await self.transition(request, RequestStatus.QUEUED)
+
+    # ── Adaptive helpers ────────────────────────────────────────
+
+    @staticmethod
+    def _count_events_from_disk(submit_dir, completed_wus):
+        """Read output events from work_unit_metrics.json on disk.
+
+        Safety net for when events_produced is 0 in the DB despite work
+        units having completed (session timing / commit ordering issue).
+        """
+        total = 0
+        for wu_name in (completed_wus or []):
+            metrics_path = os.path.join(submit_dir, wu_name, "work_unit_metrics.json")
+            if not os.path.exists(metrics_path):
+                continue
+            try:
+                wu_metrics = json.load(open(metrics_path))
+                per_step = wu_metrics.get("per_step", {})
+                if not per_step:
+                    continue
+                last_key = max(per_step.keys(), key=lambda k: int(k))
+                last_step = per_step[last_key]
+                ew = last_step.get("events_written")
+                if ew and isinstance(ew, dict):
+                    total += ew.get("total", 0)
+                else:
+                    ep = last_step.get("events_processed")
+                    if ep and isinstance(ep, dict):
+                        total += ep.get("total", 0)
+            except Exception:
+                logger.warning("Failed to read WU metrics: %s", metrics_path)
+        return total
+
+    def _compute_adaptive_params(self, config, dag, workflow, new_metrics):
+        """Run adaptive optimization if metrics are available.
+
+        Returns adaptive_params dict or None if optimization can't run.
+        """
+        if not dag.submit_dir or not dag.completed_work_units:
+            return None
+
+        # Read original nthreads from config
+        original_nthreads = int(config.get("multicore", 0))
+        if original_nthreads <= 0:
+            return None
+
+        request_cpus = original_nthreads
+        try:
+            from wms2.core.adaptive import compute_round_optimization
+        except ImportError:
+            logger.warning("wms2.core.adaptive not available — skipping optimization")
+            return None
+
+        params = workflow.splitting_params or {}
+        events_per_job = (params.get("events_per_job")
+                          or params.get("eventsPerJob") or 0)
+
+        try:
+            return compute_round_optimization(
+                submit_dir=dag.submit_dir,
+                completed_wus=list(dag.completed_work_units),
+                original_nthreads=original_nthreads,
+                request_cpus=request_cpus,
+                default_memory_per_core=self.settings.default_memory_per_core,
+                max_memory_per_core=self.settings.max_memory_per_core,
+                safety_margin=self.settings.safety_margin,
+                adaptive_mode=self.settings.adaptive_mode,
+                events_per_job=events_per_job,
+                jobs_per_wu=self.settings.jobs_per_work_unit,
+            )
+        except Exception:
+            logger.exception("Adaptive optimization failed — using defaults")
+            return None
 
     # ── Clean Stop ──────────────────────────────────────────────
 

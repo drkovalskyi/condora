@@ -15,10 +15,19 @@ Make sure that outpus is properly merged in each work unit.
 
 ## Status
 
-Fresh re-import running (previous rounds had duplicate physics due to issue #13).
-Round 0 in progress: 7 of 8 proc jobs completed, proc_000004 retrying (attempt 1
-of 3) after XRootD pileup file timeout. Seed randomization fix verified — all jobs
-have unique RandomNumberGeneratorService seeds.
+Adaptive optimization integrated into core. Previous production runs killed
+(no longer needed — code was validated). Ready for a fresh end-to-end test
+with the full adaptive pipeline:
+- Round 0: 1 WU (8 jobs), measures performance
+- Round 1+: automatic memory optimization (32 GB → ~11 GB based on Round 0 cgroup data)
+- Workflow should complete end-to-end without manual intervention
+
+### Adaptive integration done
+- `src/wms2/core/adaptive.py` — algorithms moved from tests to production
+- Lifecycle manager reads WU metrics from disk, runs adaptive optimization
+  between rounds, stores tuned params in step_metrics
+- DAG planner reads adaptive_params and overrides memory for round 1+
+- Fixed events_produced=0 and step_metrics=NULL bugs
 
 ## Command
 
@@ -43,6 +52,8 @@ wms2 import cmsunified_task_BPH-RunIISummer20UL18GEN-00292__v1_T_250801_104414_1
 11. Premature completion — offset-based termination used assignment offsets for accounting; GenFilter round 0 offset exceeded request_num_events despite producing only ~90 output events vs 250K target
 12. Merge job not merging — manifest.json missing from merge job's transfer_input_files; merge POST script fell back to file copy instead of cmsRun merge
 13. Duplicate physics events — RandomNumberGeneratorService seeds not randomized; all GEN jobs used identical hardcoded seeds from IOMC_cff, producing bit-for-bit identical events. Fixed by calling RandomNumberServiceHelper.populate() (same as WMAgent's AutomaticSeeding)
+14. events_produced=0 after round completion — DB re-fetch timing; fixed with disk fallback in `_count_events_from_disk()`
+15. step_metrics=NULL — `_aggregate_round_metrics` only stored node counts; now stores WU performance data from work_unit_metrics.json
 
 ## Potential issues
 
@@ -57,12 +68,9 @@ wms2 import cmsunified_task_BPH-RunIISummer20UL18GEN-00292__v1_T_250801_104414_1
   site. DAGMan retry handled it (restarts from scratch, likely gets a different
   replica). A future improvement would be to configure CMSSW to prefer local/nearby
   replicas for secondary input, or to provide a site-filtered pileup file list.
-  Details of the failure:
-  - **File**: `/store/mc/RunIISummer20ULPrePremix/Neutrino_E-10_gun/PREMIX/BParking_106X_upgrade2018_realistic_v16_L1v1-v1/80020/5ADFEA0E-6F73-9645-A309-FA7DDE767EBF.root`
-  - **Site**: `se01.indiacms.res.in:1094`
-  - **Error**: XRootD `kXR_open` timeout (two attempts, ~3 min each), then CMSSW `FileOpenError` exit code 84
-  - **Step**: BPH-RunIISummer20UL18DIGIPremix-00476_0
-  - **Resolution**: DAGMan retry #1 of 3; job restarts from GEN (loses ~2h of work)
+- **Intra-DAG replan nodes** — replan between WU0 and WU1 within a single DAG (future)
+- **Probe nodes** — modified last proc node in WU0 for memory measurement (future)
+- **Pipeline split mode** — code moved but not wired in yet
 
 ## After every failure
 
