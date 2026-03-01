@@ -2,12 +2,12 @@
 
 /* Tighten Pico's default font sizing */
 :root {
-    --pico-font-size: 15px;
-    --pico-line-height: 1.4;
+    --pico-font-size: 13.5px;
+    --pico-line-height: 1.35;
 }
-h1 { font-size: 1.5rem; }
-h2 { font-size: 1.25rem; }
-h3 { font-size: 1.1rem; }
+h1 { font-size: 1.4rem; }
+h2 { font-size: 1.15rem; }
+h3 { font-size: 1.0rem; }
 
 /* Layout: sidebar + content */
 .layout {
@@ -96,14 +96,14 @@ h3 { font-size: 1.1rem; }
     opacity: 0.7;
 }
 
-/* Detail grid */
+/* Detail grid — two-column key:value */
 .detail-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 0 2rem;
+    grid-template-columns: auto 1fr;
+    gap: 0.2rem 1.5rem;
 }
-.detail-grid dt { font-weight: 600; margin-top: 0.5rem; }
-.detail-grid dd { margin: 0 0 0.25rem 0; }
+.detail-grid dt { font-weight: 600; white-space: nowrap; }
+.detail-grid dd { margin: 0; }
 
 /* Node counts inline */
 .node-counts {

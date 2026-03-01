@@ -104,3 +104,48 @@ class HTCondorAdapter(CondorAdapter):
 
     async def ping_schedd(self, schedd_name: str) -> bool:
         return await asyncio.to_thread(self._ping_schedd_sync)
+
+    def _count_dag_jobs_sync(self, cluster_id: str) -> dict[str, int]:
+        """Count payload jobs by status under a DAGMan hierarchy.
+
+        First finds sub-DAGMan jobs (inner DAGs), then counts all non-DAGMan
+        jobs managed by those sub-DAGMans.
+
+        HTCondor JobStatus: 1=Idle, 2=Running, 3=Removed, 4=Completed, 5=Held
+        """
+        # Find sub-DAGMan cluster IDs (inner DAG managers)
+        sub_dagman_ads = self._schedd.query(
+            constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
+            projection=["ClusterId"],
+        )
+        sub_ids = [str(ad["ClusterId"]) for ad in sub_dagman_ads]
+
+        if not sub_ids:
+            return {"idle": 0, "running": 0, "done": 0, "held": 0, "failed": 0, "total": 0}
+
+        # Query all payload jobs managed by any sub-DAGMan
+        id_list = " || ".join(f"DAGManJobId == {sid}" for sid in sub_ids)
+        constraint = f"({id_list}) && JobUniverse =!= 7"
+        ads = self._schedd.query(
+            constraint=constraint,
+            projection=["JobStatus"],
+        )
+
+        counts = {"idle": 0, "running": 0, "done": 0, "held": 0, "failed": 0, "total": 0}
+        for ad in ads:
+            status = int(ad["JobStatus"])
+            counts["total"] += 1
+            if status == 1:
+                counts["idle"] += 1
+            elif status == 2:
+                counts["running"] += 1
+            elif status == 4:
+                counts["done"] += 1
+            elif status == 5:
+                counts["held"] += 1
+            elif status == 3:
+                counts["failed"] += 1
+        return counts
+
+    async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
+        return await asyncio.to_thread(self._count_dag_jobs_sync, cluster_id)

@@ -30,13 +30,13 @@
                     <dt>DAG File</dt>
                     <dd x-text="dag.dag_file_path || '—'" style="word-break:break-all;"></dd>
                     <template x-if="dag.rescue_dag_path">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Rescue DAG</dt>
                             <dd x-text="dag.rescue_dag_path" style="word-break:break-all;"></dd>
                         </div>
                     </template>
                     <template x-if="dag.parent_dag_id">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Parent DAG</dt>
                             <dd>
                                 <a :href="'/ui/dags/' + encodeURIComponent(dag.parent_dag_id)"
@@ -45,7 +45,7 @@
                         </div>
                     </template>
                     <template x-if="dag.stop_requested_at">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Stop Requested</dt>
                             <dd x-text="fmtDateTime(dag.stop_requested_at)"></dd>
                             <dt>Stop Reason</dt>
@@ -57,7 +57,7 @@
                     <dt>Submitted</dt>
                     <dd x-text="fmtDateTime(dag.submitted_at)"></dd>
                     <template x-if="dag.completed_at">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Completed</dt>
                             <dd x-text="fmtDateTime(dag.completed_at)"></dd>
                         </div>
@@ -83,13 +83,21 @@
                     <span style="border-left:3px solid #ef4444;">Failed: <strong x-text="dag.nodes_failed || 0"></strong></span>
                     <span style="border-left:3px solid #f59e0b;">Held: <strong x-text="dag.nodes_held || 0"></strong></span>
                 </div>
+                <template x-if="nodeCountsByType.length > 0">
+                    <div style="font-size:0.85rem; opacity:0.7; margin-top:0.25rem;">
+                        By type:
+                        <template x-for="nc in nodeCountsByType" :key="nc.type">
+                            <span x-text="nc.count + ' ' + nc.type" style="margin-right:0.75rem;"></span>
+                        </template>
+                    </div>
+                </template>
             </div>
 
             <!-- Work unit progress -->
             <div class="section">
                 <h3>Work Unit Progress</h3>
                 <div>
-                    <span x-text="dag.completed_work_units || 0"></span>
+                    <span x-text="wuCompleted"></span>
                     / <span x-text="dag.total_work_units || 0"></span> completed
                     (<span x-text="fmtPct(wuPct)"></span>)
                 </div>

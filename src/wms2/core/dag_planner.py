@@ -825,6 +825,7 @@ def _generate_group_dag(
     proc_nodes = merge_group.processing_nodes
     lines: list[str] = [
         f"# Merge group {merge_group.group_index}",
+        f"NODE_STATUS_FILE {group_dir / 'group.dag.status'}",
         "",
     ]
 
@@ -1313,7 +1314,7 @@ cmssw_env_exec() {
 
 # ── CMSSW step execution via cmssw-env ─────────────────────────
 run_step() {
-    local cmssw="$1" arch="$2" cmsrun_args="$3"
+    local cmssw="$1" arch="$2" cmsrun_args="$3" cmsrun_cwd="${4:-}"
 
     # Resolve siteconfig path: default to /opt/cms/siteconf if SITECONFIG_PATH unset
     local SITE_CFG="${SITECONFIG_PATH:-/opt/cms/siteconf}"
@@ -1337,6 +1338,19 @@ run_step() {
         [[ -f "$slc" ]] && sed -i "s|trivialcatalog_file:[^?]*storage.xml|trivialcatalog_file:$WORK_DIR/_siteconf/PhEDEx/storage.xml|g" "$slc"
     done
 
+    # Build step runner with optional tmpfs CWD.
+    # IMPORTANT: Do NOT cd to /dev/shm before launching cmssw-env (apptainer).
+    # Apptainer bind-mounts the CWD into the container; when CWD is under /dev/shm,
+    # the /dev/shm bind conflicts with the container's /dev mount, breaking /dev/null.
+    # Instead, launch from WORK_DIR and cd to tmpfs INSIDE the container after
+    # cmsset_default.sh has been sourced.
+    local _cwd_line=""
+    local _copyback_line=""
+    if [[ -n "$cmsrun_cwd" ]]; then
+        _cwd_line="cd $cmsrun_cwd"
+        _copyback_line="cp *.root $WORK_DIR/ 2>/dev/null || true"
+    fi
+
     cat > _step_runner.sh <<STEPEOF
 #!/bin/bash
 set -e
@@ -1357,7 +1371,9 @@ if [[ ! -d $cmssw/src ]]; then
     scramv1 project CMSSW $cmssw
 fi
 cd $cmssw/src && eval \$(scramv1 runtime -sh) && cd $WORK_DIR
+$_cwd_line
 cmsRun $cmsrun_args
+$_copyback_line
 STEPEOF
     chmod +x _step_runner.sh
 
@@ -2237,32 +2253,19 @@ except Exception:
             echo "  Using tmpfs for step 0: $STEP0_TMPFS"
             # Copy PSet to tmpfs working directory
             cp "$PSET_PATH" "$STEP0_TMPFS/"
-            # Update CMSRUN_ARGS to use tmpfs PSet path
-            CMSRUN_ARGS="-j report_step${step_num}.xml $STEP0_TMPFS/$(basename $PSET_PATH)"
         fi
 
         # Execute via cmssw-env (handles container resolution + bind mounts)
         if [[ -n "$STEP0_TMPFS" ]]; then
-            # Run from tmpfs directory — gridpack extracts to CWD
-            ORIG_DIR="$PWD"
-            cd "$STEP0_TMPFS"
-            # Update FJR path to be absolute
-            CMSRUN_ARGS="-j ${ORIG_DIR}/report_step${step_num}.xml $(basename $PSET_PATH)"
-            # Override WORK_DIR so run_step cd's back to tmpfs
-            # after CMSSW setup (it does `cd $WORK_DIR` internally)
-            SAVED_WORK_DIR="$WORK_DIR"
-            WORK_DIR="$STEP0_TMPFS"
+            # Pass tmpfs path to run_step — it cd's there INSIDE the container
+            # after cmsset_default.sh (avoids apptainer /dev/null breakage).
+            # FJR path is absolute to WORK_DIR; PSet path is absolute to tmpfs.
+            CMSRUN_ARGS="-j $(pwd)/report_step${step_num}.xml $STEP0_TMPFS/$(basename $PSET_PATH)"
             echo "  execution: cmssw-env (tmpfs CWD)"
-            run_step "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS" && STEP_RC=0 || STEP_RC=$?
-            WORK_DIR="$SAVED_WORK_DIR"
+            run_step "$CMSSW_VER" "$STEP_ARCH" "$CMSRUN_ARGS" "$STEP0_TMPFS" && STEP_RC=0 || STEP_RC=$?
             # Measure tmpfs usage before cleanup
             TMPFS_MB=$(du -sm "$STEP0_TMPFS" 2>/dev/null | awk '{print $1}')
             echo "  tmpfs_usage_mb: ${TMPFS_MB:-0}"
-            # Copy ROOT outputs back to work dir
-            for rf in *.root; do
-                [[ -f "$rf" ]] && cp "$rf" "$ORIG_DIR/"
-            done
-            cd "$ORIG_DIR"
             rm -rf "$STEP0_TMPFS"
             echo "  Cleaned tmpfs: $STEP0_TMPFS"
         else
@@ -2308,6 +2311,13 @@ try:
 except Exception:
     pass
 " 2>/dev/null || true)
+        # Fix output path: if FJR points to tmpfs (cleaned up), use WORK_DIR copy
+        if [[ -n "$PREV_OUTPUT" && ! -f "$PREV_OUTPUT" ]]; then
+            _PREV_BN=$(basename "$PREV_OUTPUT")
+            if [[ -f "$_PREV_BN" ]]; then
+                PREV_OUTPUT="$(pwd)/$_PREV_BN"
+            fi
+        fi
         echo "  Output: ${PREV_OUTPUT:-none}"
 
         # Safety net: detect 0-event output from step 1 (GenFilter rejected all)

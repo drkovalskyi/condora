@@ -40,9 +40,25 @@ document.addEventListener('alpine:init', () => {
             return (100 * (count || 0) / this.totalNodes) + '%';
         },
 
+        get wuCompleted() {
+            if (!this.dag) return 0;
+            const wu = this.dag.completed_work_units;
+            if (Array.isArray(wu)) return wu.length;
+            return wu || 0;
+        },
+
         get wuPct() {
             if (!this.dag || !this.dag.total_work_units) return 0;
-            return Math.min(100, 100 * (this.dag.completed_work_units || 0) / this.dag.total_work_units);
+            return Math.min(100, 100 * this.wuCompleted / this.dag.total_work_units);
+        },
+
+        get nodeCountsByType() {
+            if (!this.dag || !this.dag.node_counts) return [];
+            const nc = this.dag.node_counts;
+            const order = ['processing', 'landing', 'merge', 'cleanup'];
+            return order
+                .filter(t => nc[t] != null && nc[t] > 0)
+                .map(t => ({ type: t.charAt(0).toUpperCase() + t.slice(1), count: nc[t] }));
         },
     }));
 });

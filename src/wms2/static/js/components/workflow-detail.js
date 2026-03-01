@@ -80,6 +80,17 @@ document.addEventListener('alpine:init', () => {
             return result;
         },
 
+        get stepsInfo() {
+            const steps = this.configData.manifest_steps || [];
+            return steps.map((s, i) => ({
+                index: i + 1,
+                name: s.name || `Step ${i + 1}`,
+                cmssw: s.cmssw_version || '—',
+                global_tag: s.global_tag || '—',
+                scram_arch: s.scram_arch || '—',
+            }));
+        },
+
         get reqmgrUrl() {
             if (!this.workflow) return null;
             return 'https://cmsweb.cern.ch/reqmgr2/fetch?rid=' + encodeURIComponent(this.workflow.request_name);

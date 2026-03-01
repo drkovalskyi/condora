@@ -62,17 +62,26 @@ class DAGMonitor:
         status_file = dag.dag_file_path + ".status"
         summary = self._parse_dagman_status(status_file)
 
+        # Aggregate inner SUBDAG status files for actual node counts;
+        # fall back to condor_q if inner status files don't exist yet
+        inner_summary = self._aggregate_inner_status(dag, summary)
+        if inner_summary is summary:
+            # No inner status files found — try condor_q
+            condor_counts = await self._count_jobs_from_condor(dag)
+            if condor_counts is not None:
+                inner_summary = condor_counts
+
         # Detect newly completed work units
         newly_completed = self._detect_completed_work_units(dag, summary)
 
-        # Update DAG row with current counts
+        # Update DAG row with current counts (use inner counts for accurate display)
         now = datetime.now(timezone.utc)
         update_kwargs = {
-            "nodes_idle": summary.idle,
-            "nodes_running": summary.running,
-            "nodes_done": summary.done,
-            "nodes_failed": summary.failed,
-            "nodes_held": summary.held,
+            "nodes_idle": inner_summary.idle,
+            "nodes_running": inner_summary.running,
+            "nodes_done": inner_summary.done,
+            "nodes_failed": inner_summary.failed,
+            "nodes_held": inner_summary.held,
             "status": DAGStatus.RUNNING.value,
         }
         if newly_completed:
@@ -86,20 +95,20 @@ class DAGMonitor:
         if dag.workflow_id:
             await self.db.update_workflow(
                 dag.workflow_id,
-                nodes_done=summary.done,
-                nodes_failed=summary.failed,
-                nodes_running=summary.running,
-                nodes_queued=summary.idle,
+                nodes_done=inner_summary.done,
+                nodes_failed=inner_summary.failed,
+                nodes_running=inner_summary.running,
+                nodes_queued=inner_summary.idle,
             )
 
         return DAGPollResult(
             dag_id=str(dag.id),
             status=DAGStatus.RUNNING,
-            nodes_idle=summary.idle,
-            nodes_running=summary.running,
-            nodes_done=summary.done,
-            nodes_failed=summary.failed,
-            nodes_held=summary.held,
+            nodes_idle=inner_summary.idle,
+            nodes_running=inner_summary.running,
+            nodes_done=inner_summary.done,
+            nodes_failed=inner_summary.failed,
+            nodes_held=inner_summary.held,
             newly_completed_work_units=newly_completed,
         )
 
@@ -187,6 +196,57 @@ class DAGMonitor:
             failed=failed,
             held=held,
             node_statuses=node_statuses,
+        )
+
+    def _aggregate_inner_status(self, dag, outer_summary: NodeSummary) -> NodeSummary:
+        """Aggregate node counts from inner SUBDAG status files.
+
+        The outer DAG's status file only reports top-level nodes (mg_NNNNNN SUBDAGs).
+        To get actual job-level counts, we parse each inner group.dag.status file
+        and sum up all inner node counts across all merge groups.
+        Falls back to outer summary if no inner status files are found.
+        """
+        total = NodeSummary()
+        found_any = False
+
+        for node_name, status in outer_summary.node_statuses.items():
+            if not node_name.startswith("mg_"):
+                continue
+            inner_status_file = os.path.join(
+                dag.submit_dir, node_name, "group.dag.status"
+            )
+            if not os.path.exists(inner_status_file):
+                continue
+
+            found_any = True
+            inner = self._parse_dagman_status(inner_status_file)
+            total.idle += inner.idle
+            total.running += inner.running
+            total.done += inner.done
+            total.failed += inner.failed
+            total.held += inner.held
+
+        if not found_any:
+            return outer_summary
+        return total
+
+    async def _count_jobs_from_condor(self, dag) -> NodeSummary | None:
+        """Query condor_q for actual job counts under this DAG hierarchy.
+
+        Used as fallback when inner SUBDAG status files are not available
+        (e.g. DAGs submitted before NODE_STATUS_FILE was added to inner DAGs).
+        """
+        if not dag.dagman_cluster_id:
+            return None
+        counts = await self.condor.count_dag_jobs(dag.dagman_cluster_id)
+        if counts is None or counts["total"] == 0:
+            return None
+        return NodeSummary(
+            idle=counts["idle"],
+            running=counts["running"],
+            done=counts["done"],
+            failed=counts["failed"],
+            held=counts["held"],
         )
 
     def _parse_dagman_metrics(self, metrics_file: str) -> NodeSummary:
@@ -289,7 +349,7 @@ class DAGMonitor:
         status_summary = self._parse_dagman_status(status_file)
         newly_completed = self._detect_completed_work_units(dag, status_summary)
 
-        # Determine final status
+        # Determine final status (uses outer summary — 1 SUBDAG = 1 work unit)
         total = dag.total_work_units or (summary.done + summary.failed)
         if summary.failed == 0 and summary.done > 0:
             final_status = DAGStatus.COMPLETED
@@ -301,11 +361,17 @@ class DAGMonitor:
             # No done, no failed — could be removed/halted
             final_status = DAGStatus.FAILED
 
+        # Try inner SUBDAG counts; fall back to metrics/outer summary
+        inner_summary = self._aggregate_inner_status(dag, status_summary)
+        # Use inner counts if available, otherwise use the metrics-based summary
+        final_done = inner_summary.done if inner_summary.done > 0 else summary.done
+        final_failed = inner_summary.failed if inner_summary.done > 0 else summary.failed
+
         now = datetime.now(timezone.utc)
         update_kwargs = {
             "status": final_status.value,
-            "nodes_done": summary.done,
-            "nodes_failed": summary.failed,
+            "nodes_done": final_done,
+            "nodes_failed": final_failed,
             "nodes_running": 0,
             "nodes_idle": 0,
             "nodes_held": 0,
@@ -322,22 +388,22 @@ class DAGMonitor:
         if dag.workflow_id:
             await self.db.update_workflow(
                 dag.workflow_id,
-                nodes_done=summary.done,
-                nodes_failed=summary.failed,
+                nodes_done=final_done,
+                nodes_failed=final_failed,
                 nodes_running=0,
                 nodes_queued=0,
             )
 
         logger.info(
             "DAG %s completed: status=%s done=%d failed=%d newly_completed_wus=%d",
-            dag.id, final_status.value, summary.done, summary.failed,
+            dag.id, final_status.value, final_done, final_failed,
             len(newly_completed),
         )
 
         return DAGPollResult(
             dag_id=str(dag.id),
             status=final_status,
-            nodes_done=summary.done,
-            nodes_failed=summary.failed,
+            nodes_done=final_done,
+            nodes_failed=final_failed,
             newly_completed_work_units=newly_completed,
         )

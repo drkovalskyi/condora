@@ -89,7 +89,7 @@
                     <dt>Type</dt>
                     <dd x-text="(request.request_data && request.request_data.RequestType) || '—'"></dd>
                     <template x-if="request.input_dataset && !(request.request_data && request.request_data._is_gen)">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Input Dataset</dt>
                             <dd x-text="request.input_dataset" style="word-break:break-all;"></dd>
                         </div>

@@ -32,6 +32,14 @@ class CondorAdapter(ABC):
     async def ping_schedd(self, schedd_name: str) -> bool:
         """Check if a schedd is reachable."""
 
+    async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
+        """Count jobs by status for all payload jobs under a DAGMan hierarchy.
+
+        Returns dict with keys: idle, running, done, held, failed, total.
+        Returns None if not supported by this adapter.
+        """
+        return None
+
 
 class ReqMgrAdapter(ABC):
     @abstractmethod

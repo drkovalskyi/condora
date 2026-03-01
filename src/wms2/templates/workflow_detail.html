@@ -31,35 +31,56 @@
                     <dt>Type</dt>
                     <dd x-text="configData.request_type || '—'"></dd>
                     <template x-if="!isGen">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Input Dataset</dt>
-                            <dd :title="workflow.input_dataset" x-text="fmtMidTruncate(workflow.input_dataset, 70)"></dd>
+                            <dd :title="workflow.input_dataset" x-text="fmtMidTruncate(workflow.input_dataset, 100)"></dd>
                         </div>
                     </template>
-                    <template x-if="pileupDatasets.length > 0">
-                        <div>
-                            <template x-for="pu in pileupDatasets" :key="pu.dataset">
-                                <div>
-                                    <dt x-text="pu.type"></dt>
-                                    <dd :title="pu.dataset" x-text="fmtMidTruncate(pu.dataset, 70)"></dd>
-                                </div>
-                            </template>
+                    <template x-for="pu in pileupDatasets" :key="pu.dataset">
+                        <div style="display:contents;">
+                            <dt x-text="pu.type"></dt>
+                            <dd :title="pu.dataset" x-text="fmtMidTruncate(pu.dataset, 100)"></dd>
                         </div>
                     </template>
                     <dt>Splitting Algorithm</dt>
                     <dd x-text="workflow.splitting_algo || '—'"></dd>
                     <dt>Current Round</dt>
                     <dd x-text="workflow.current_round != null ? workflow.current_round : '—'"></dd>
-                    <dt>CMSSW</dt>
-                    <dd x-text="configData.cmssw_version || '—'"></dd>
-                    <dt>Global Tag</dt>
-                    <dd x-text="configData.global_tag || '—'"></dd>
                     <dt>Created</dt>
                     <dd x-text="fmtDateTime(workflow.created_at)"></dd>
                     <dt>Updated</dt>
                     <dd x-text="fmtDateTime(workflow.updated_at)"></dd>
                 </dl>
             </div>
+
+            <!-- Steps -->
+            <template x-if="stepsInfo.length > 0">
+                <div class="section">
+                    <h3>Steps</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Name</th>
+                                <th>CMSSW</th>
+                                <th>Global Tag</th>
+                                <th>Arch</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in stepsInfo" :key="s.index">
+                                <tr>
+                                    <td x-text="s.index"></td>
+                                    <td x-text="s.name"></td>
+                                    <td x-text="s.cmssw"></td>
+                                    <td x-text="s.global_tag"></td>
+                                    <td x-text="s.scram_arch"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
 
             <!-- Splitting params -->
             <template x-if="Object.keys(splittingDisplay).length > 0">
@@ -86,7 +107,7 @@
                         / <span x-text="fmtNum(workflow.target_events)"></span>
                     </dd>
                     <template x-if="!isGen">
-                        <div>
+                        <div style="display:contents;">
                             <dt>Files Processed</dt>
                             <dd>
                                 <span x-text="fmtNum(workflow.files_processed)"></span>
