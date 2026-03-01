@@ -1,6 +1,63 @@
 # WMS2 Planning
 
-## Current status
+<!-- Everything above and including the "---" divider is human-owned; Claude must not edit it.
+     Everything below the "---" is Claude-owned; update as work progresses. -->
+
+## Objectives
+
+Main objective: make sure we can process a real workflow using WMS2 in
+a fully automated mode from scratch using default splitting. The first
+round should have only one work unit created automatically, which
+measures optimal parameters for the jobs. Next round should
+optimize. Keep track of all issues starting and running the test - we
+need to fix them.
+
+Workflow to use: cmsunified_task_B2G-Run3Summer23BPixwmLHEGS-06000__v1_T_250628_211038_1313
+
+To speed things up we are using test fraction of 0.01.
+
+### Service mode
+
+Build the service that manages requests autonomously:
+
+- Requests are injected into WMS2 DB (via API or import tool)
+- Lifecycle manager service runs continuously, discovers active requests,
+  polls DAGs, handles round transitions, adaptive optimization
+- CLI becomes a thin client: import + optionally tail logs
+- The lifecycle manager already has the core logic; needs to be wired into
+  a long-running service loop
+
+### Monitoring
+
+Build observability for WMS2:
+
+- Dashboard showing active requests, workflow status, round progress
+- Per-workflow metrics: events_produced vs target, current round, job counts
+- Per-step performance: CPU efficiency, memory usage, throughput
+- Alerting on stuck/failed workflows
+- HTCondor queue overview (running/idle/held by workflow)
+- Technology TBD (Prometheus + Grafana, or simple web UI, or CLI status command)
+
+## Future improvements (not fixing now)
+
+- **Pileup (secondary input) site selection** — configure CMSSW to prefer
+  local/nearby replicas or provide a site-filtered pileup file list
+- **Intra-DAG replan nodes** — replan between WU0 and WU1 within a single DAG
+- **Probe nodes** — modified last proc node in WU0 for memory measurement
+- **Pipeline split mode** — code moved but not wired in yet
+
+## After every failure
+
+Review how error handling performed: check POST script exit codes,
+retry behavior, early abort, failure ratio computation, and final
+request status. Confirm no time was wasted on unnecessary retries. If
+error handling misbehaved, fix it before re-running.
+
+---
+
+## Claude Status
+
+### Current status
 
 CLI-based end-to-end processing works for a real 5-step StepChain workflow.
 Matrix smoke tests (5 workflows including fault injection) all pass.
@@ -29,33 +86,11 @@ Matrix smoke tests:
 python -m tests.matrix -l smoke
 ```
 
-## Next: service mode
-
-Build the service that manages requests autonomously:
-
-- Requests are injected into WMS2 DB (via API or import tool)
-- Lifecycle manager service runs continuously, discovers active requests,
-  polls DAGs, handles round transitions, adaptive optimization
-- CLI becomes a thin client: import + optionally tail logs
-- The lifecycle manager already has the core logic; needs to be wired into
-  a long-running service loop
-
-## Next: monitoring
-
-Build observability for WMS2:
-
-- Dashboard showing active requests, workflow status, round progress
-- Per-workflow metrics: events_produced vs target, current round, job counts
-- Per-step performance: CPU efficiency, memory usage, throughput
-- Alerting on stuck/failed workflows
-- HTCondor queue overview (running/idle/held by workflow)
-- Technology TBD (Prometheus + Grafana, or simple web UI, or CLI status command)
-
-## Known issues
+### Known issues
 
 - NanoAOD Rivet segfault on 0 events (CMSSW_10_6_47 bug, not WMS2)
 
-## Historical issues (fixed)
+### Historical issues (fixed)
 
 1. Wrong failure ratio — was using inner node count instead of work units
 2. `read_post_data()` missed early-aborted nodes (filtered on `final=True`)
@@ -75,18 +110,3 @@ Build observability for WMS2:
 16. Cleanup job can't find cleanup_manifest.json — not in transfer_input_files
 17. Matrix mock missing adaptive fields — MagicMock returned mocks instead of ints
 18. CLI duplicated round-completion logic — refactored to shared `complete_round()`
-
-## Future improvements (not fixing now)
-
-- **Pileup (secondary input) site selection** — configure CMSSW to prefer
-  local/nearby replicas or provide a site-filtered pileup file list
-- **Intra-DAG replan nodes** — replan between WU0 and WU1 within a single DAG
-- **Probe nodes** — modified last proc node in WU0 for memory measurement
-- **Pipeline split mode** — code moved but not wired in yet
-
-## After every failure
-
-Review how error handling performed: check POST script exit codes,
-retry behavior, early abort, failure ratio computation, and final
-request status. Confirm no time was wasted on unnecessary retries. If
-error handling misbehaved, fix it before re-running.

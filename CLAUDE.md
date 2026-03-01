@@ -10,6 +10,10 @@ When compacting, preserve the active goal, the current plan and the next 3 concr
 Include the current contents of PLANNING.md (or at least its top level bullet list).
 After compaction, re-open PLANNING.md before making changes.
 
+## PLANNING.md has two zones
+
+See the comment at the top of PLANNING.md for the ownership rule. Obey it.
+
 ## What is this project?
 
 WMS2 is the next-generation CMS Workload Management System, replacing WMCore/WMAgent. It is a thin orchestration layer that delegates job-level execution to HTCondor DAGMan. Currently in the specification/design phase — no application code yet, only the spec document.
