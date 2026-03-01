@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}WMS2 — Workflow {{ workflow_id[:8] }}{% endblock %}
+{% block title %}WMS2 — Processing {{ workflow_id[:8] }}{% endblock %}
 {% block head_scripts %}
 <script src="/static/js/components/workflow-detail.js"></script>
 {% endblock %}
@@ -12,26 +12,48 @@
     <template x-if="workflow">
         <div>
             <h1 style="font-size:1.3rem;">
-                Workflow
+                Processing Details
                 <span x-html="statusBadge(workflow.status)" style="margin-left:0.5rem;"></span>
             </h1>
             <p style="opacity:0.7; font-size:0.85rem; word-break:break-all;" x-text="workflow.id"></p>
 
-            <!-- Workflow metadata -->
             <div class="section">
-                <h3>Workflow Info</h3>
+                <h3>Processing Info</h3>
                 <dl class="detail-grid">
                     <dt>Request</dt>
                     <dd>
+                        <a :href="reqmgrUrl" target="_blank" rel="noopener"
+                           x-text="workflow.request_name" style="word-break:break-all;"
+                           title="Open in ReqMgr2"></a>
                         <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)"
-                           x-text="workflow.request_name" style="word-break:break-all;"></a>
+                           style="margin-left:0.5rem; font-size:0.8rem;">(WMS2)</a>
                     </dd>
-                    <dt>Input Dataset</dt>
-                    <dd x-text="workflow.input_dataset || '—'" style="word-break:break-all;"></dd>
+                    <dt>Type</dt>
+                    <dd x-text="configData.request_type || '—'"></dd>
+                    <template x-if="!isGen">
+                        <div>
+                            <dt>Input Dataset</dt>
+                            <dd :title="workflow.input_dataset" x-text="fmtMidTruncate(workflow.input_dataset, 70)"></dd>
+                        </div>
+                    </template>
+                    <template x-if="pileupDatasets.length > 0">
+                        <div>
+                            <template x-for="pu in pileupDatasets" :key="pu.dataset">
+                                <div>
+                                    <dt x-text="pu.type"></dt>
+                                    <dd :title="pu.dataset" x-text="fmtMidTruncate(pu.dataset, 70)"></dd>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
                     <dt>Splitting Algorithm</dt>
                     <dd x-text="workflow.splitting_algo || '—'"></dd>
                     <dt>Current Round</dt>
                     <dd x-text="workflow.current_round != null ? workflow.current_round : '—'"></dd>
+                    <dt>CMSSW</dt>
+                    <dd x-text="configData.cmssw_version || '—'"></dd>
+                    <dt>Global Tag</dt>
+                    <dd x-text="configData.global_tag || '—'"></dd>
                     <dt>Created</dt>
                     <dd x-text="fmtDateTime(workflow.created_at)"></dd>
                     <dt>Updated</dt>
@@ -63,11 +85,15 @@
                         <span x-text="fmtNum(workflow.events_produced)"></span>
                         / <span x-text="fmtNum(workflow.target_events)"></span>
                     </dd>
-                    <dt>Files Processed</dt>
-                    <dd>
-                        <span x-text="fmtNum(workflow.files_processed)"></span>
-                        / <span x-text="fmtNum(workflow.total_input_files)"></span>
-                    </dd>
+                    <template x-if="!isGen">
+                        <div>
+                            <dt>Files Processed</dt>
+                            <dd>
+                                <span x-text="fmtNum(workflow.files_processed)"></span>
+                                / <span x-text="fmtNum(workflow.total_input_files)"></span>
+                            </dd>
+                        </div>
+                    </template>
                     <dt>Progress</dt>
                     <dd x-text="fmtPct(progressPct)"></dd>
                 </dl>
@@ -129,13 +155,13 @@
                             <template x-for="b in blocks" :key="b.id">
                                 <tr>
                                     <td x-text="b.block_index"></td>
-                                    <td x-text="b.dataset_name || '—'" class="truncate" style="max-width:250px;"></td>
+                                    <td :title="b.dataset_name" x-text="fmtMidTruncate(b.dataset_name, 50)"></td>
                                     <td x-html="statusBadge(b.status)"></td>
                                     <td>
                                         <span x-text="b.completed_work_units || 0"></span>
                                         / <span x-text="b.total_work_units || 0"></span>
                                     </td>
-                                    <td x-text="b.dbs_block_name || '—'" class="truncate" style="max-width:200px;"></td>
+                                    <td :title="b.dbs_block_name" x-text="fmtMidTruncate(b.dbs_block_name, 45)"></td>
                                 </tr>
                             </template>
                         </tbody>
@@ -166,7 +192,7 @@
 
             <!-- Back links -->
             <p>
-                <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)">&larr; Back to Request</a>
+                <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)">&larr; Back to request</a>
             </p>
         </div>
     </template>

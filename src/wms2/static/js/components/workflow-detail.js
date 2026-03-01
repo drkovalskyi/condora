@@ -52,8 +52,37 @@ document.addEventListener('alpine:init', () => {
 
         get splittingDisplay() {
             if (!this.workflow) return {};
-            const sp = this.workflow.splitting_params || {};
-            return sp;
+            return this.workflow.splitting_params || {};
+        },
+
+        get configData() {
+            if (!this.workflow) return {};
+            return this.workflow.config_data || {};
+        },
+
+        get isGen() {
+            return !!this.configData._is_gen;
+        },
+
+        get pileupDatasets() {
+            const steps = this.configData.manifest_steps || [];
+            const seen = new Set();
+            const result = [];
+            for (const s of steps) {
+                for (const key of ['mc_pileup', 'data_pileup']) {
+                    const ds = s[key];
+                    if (ds && !seen.has(ds)) {
+                        seen.add(ds);
+                        result.push({ type: key === 'mc_pileup' ? 'MC Pileup' : 'Data Pileup', dataset: ds });
+                    }
+                }
+            }
+            return result;
+        },
+
+        get reqmgrUrl() {
+            if (!this.workflow) return null;
+            return 'https://cmsweb.cern.ch/reqmgr2/fetch?rid=' + encodeURIComponent(this.workflow.request_name);
         },
     }));
 });

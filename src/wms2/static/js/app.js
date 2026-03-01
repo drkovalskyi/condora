@@ -50,3 +50,12 @@ function fmtDateTime(isoStr) {
     if (!isoStr) return '—';
     return new Date(isoStr).toLocaleString();
 }
+
+function fmtMidTruncate(str, maxLen = 50) {
+    if (!str) return '—';
+    if (str.length <= maxLen) return str;
+    const keep = maxLen - 3; // room for '...'
+    const head = Math.ceil(keep * 0.6);
+    const tail = keep - head;
+    return str.slice(0, head) + '...' + str.slice(-tail);
+}

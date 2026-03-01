@@ -55,12 +55,28 @@ error handling misbehaved, fix it before re-running.
 
 ---
 
+## Technical debt
+
+- **"Workflow" naming confusion** — WMS2 internally uses "workflow" for the
+  execution record of a request (DB table, API endpoints, data model, core
+  components). This clashes with ReqMgr2's use of "workflow" for the request
+  itself. The web UI now says "Processing Details" but the internal name is
+  still `workflow` everywhere: database table, `Workflow` model, `/api/v1/workflows/`
+  endpoints, `WorkflowManager`, repository methods, spec document. A full rename
+  (e.g. to `execution` or `processing`) would require a DB migration, API version
+  bump, and ~100 references in the spec. Low priority but worth resolving for
+  clarity before onboarding other developers.
+
 ## Claude Status
 
 ### Current status
 
 CLI-based end-to-end processing works for a real 5-step StepChain workflow.
 Matrix smoke tests (5 workflows including fault injection) all pass.
+Matrix test 391.4 (DY2L adaptive 3-round) passes — all 3 rounds complete
+with adaptive optimization (CPU eff: 14% → 28% → 53%).
+
+Full 25000-event real workflow test in progress (B2G-Run3Summer23BPixwmLHEGS-06000).
 
 ### Verified working
 
@@ -71,19 +87,25 @@ Matrix smoke tests (5 workflows including fault injection) all pass.
 - Round completion with metrics aggregation, adaptive optimization, events tracking
 - Error handling: retry, rescue DAG, early abort, site exclusion
 - Shared `complete_round()` logic between CLI and lifecycle manager
+- Tmpfs gridpack extraction with split_tmpfs=true (via apptainer)
+- Multi-round adaptive optimization (8T → 4T → 2T with memory tuning)
 
 ### Test commands
 
 Real CMSSW workflow:
 ```bash
 wms2 import cmsunified_task_B2G-Run3Summer23BPixwmLHEGS-06000__v1_T_250628_211038_1313 \
-  --sandbox-mode cmssw \
-  --test-fraction 0.01
+  --sandbox-mode cmssw
 ```
 
 Matrix smoke tests:
 ```bash
 python -m tests.matrix -l smoke
+```
+
+Adaptive 3-round test:
+```bash
+python -m tests.matrix -l 391.4
 ```
 
 ### Known issues
@@ -110,3 +132,4 @@ python -m tests.matrix -l smoke
 16. Cleanup job can't find cleanup_manifest.json — not in transfer_input_files
 17. Matrix mock missing adaptive fields — MagicMock returned mocks instead of ints
 18. CLI duplicated round-completion logic — refactored to shared `complete_round()`
+19. Apptainer `/dev/null: Permission denied` with split_tmpfs — `cd /dev/shm` before launching apptainer caused container's `/dev` mount conflict; fixed by cd-ing to tmpfs inside the container after `cmsset_default.sh`

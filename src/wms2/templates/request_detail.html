@@ -103,10 +103,10 @@
                 </dl>
             </div>
 
-            <!-- Workflow progress -->
+            <!-- Processing progress -->
             <template x-if="hasWorkflow">
                 <div class="section">
-                    <h3>Workflow Progress</h3>
+                    <h3>Processing Progress</h3>
                     <dl class="detail-grid">
                         <dt>Status</dt>
                         <dd x-html="statusBadge(workflow.status)"></dd>
@@ -130,14 +130,14 @@
                         <span x-text="fmtNum(workflow.nodes_failed)"></span> failed
                     </div>
                     <p style="margin-top:0.5rem;">
-                        <a :href="'/ui/workflows/' + encodeURIComponent(workflow.id)">View workflow details &rarr;</a>
+                        <a :href="'/ui/workflows/' + encodeURIComponent(workflow.id)">View processing details &rarr;</a>
                     </p>
                 </div>
             </template>
             <template x-if="!hasWorkflow">
                 <div class="section">
-                    <h3>Workflow</h3>
-                    <p style="opacity:0.6">No workflow created yet.</p>
+                    <h3>Processing</h3>
+                    <p style="opacity:0.6">Not started yet.</p>
                 </div>
             </template>
 
