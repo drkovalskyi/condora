@@ -4043,3 +4043,52 @@ The adaptive round termination in `_handle_round_completion` used `next_first_ev
 - All 468 unit tests pass (1 deselected pre-existing failure: `test_filter_efficiency_in_proc_args`)
 - All modified modules import cleanly
 - Test cases updated: `test_round_completion_gen_returns_to_queued`, `test_round_completion_gen_all_done`, `test_round_completion_file_based_returns_to_queued`, `test_round_completion_priority_demotion`
+
+---
+
+## Fix: Merge Job Not Merging (manifest.json missing)
+
+**Date**: 2026-03-01
+
+### Problem
+
+Round 0 produced 8 unmerged files per data tier instead of 1 merged file. Investigation showed the merge POST script's mode check:
+
+```python
+if manifest.get("mode") in ("cmssw", "simulator"):
+    merge_root_tier(...)  # actual cmsRun merge
+else:
+    # "Non-CMSSW mode": just copy files
+```
+
+The `manifest` dict was always empty because `manifest.json` was never included in the merge job's `transfer_input_files`. The merge submit file only transferred `output_info.json`. When the merge job ran, `manifest.json` didn't exist in the sandbox, so `manifest` stayed `{}`, `mode` was `None`, and all files were copied instead of merged.
+
+### Root Cause
+
+In `_generate_group_dag()`, the merge job's `transfer_input_files` list was built as:
+```python
+merge_transfer = [output_info_path]  # only output_info.json
+```
+
+`manifest.json` was written to the group directory but never added to the transfer list.
+
+### Fix
+
+Added `manifest.json` to `merge_transfer` in `_generate_group_dag()` (dag_planner.py line ~847):
+
+```python
+manifest_path = str(group_dir / "manifest.json")
+if os.path.isfile(manifest_path):
+    merge_transfer.append(manifest_path)
+```
+
+### Impact
+
+- Round 0 output: 8 unmerged files per tier (already on disk, not re-mergeable without rerun)
+- Round 1 (currently running): planned before fix, same issue will occur
+- Round 2+: will merge correctly
+
+### Verification
+
+- All 468 unit tests pass
+- Confirmed current round 1 merge.sub lacks manifest.json (expected — planned before fix)
