@@ -114,7 +114,19 @@ class WorkflowManager:
             "nodes_done": workflow.nodes_done,
             "nodes_failed": workflow.nodes_failed,
             "nodes_running": workflow.nodes_running,
+            "events_produced": workflow.events_produced or 0,
+            "target_events": workflow.target_events or 0,
+            "files_processed": workflow.files_processed or 0,
+            "total_input_files": workflow.total_input_files or 0,
         }
+        if workflow.target_events:
+            result["progress_pct"] = round(
+                100.0 * (workflow.events_produced or 0) / workflow.target_events, 2
+            )
+        elif workflow.total_input_files:
+            result["progress_pct"] = round(
+                100.0 * (workflow.files_processed or 0) / workflow.total_input_files, 2
+            )
 
         if workflow.dag_id:
             dag = await self.db.get_dag(workflow.dag_id)

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -62,6 +62,10 @@ class WorkflowRow(Base):
     current_round: Mapped[int] = mapped_column(Integer, default=0)
     next_first_event: Mapped[int] = mapped_column(Integer, default=1)
     file_offset: Mapped[int] = mapped_column(Integer, default=0)
+    events_produced: Mapped[int] = mapped_column(BigInteger, default=0)
+    target_events: Mapped[int] = mapped_column(BigInteger, default=0)
+    files_processed: Mapped[int] = mapped_column(Integer, default=0)
+    total_input_files: Mapped[int] = mapped_column(Integer, default=0)
     dag_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     category_throttles: Mapped[dict] = mapped_column(
         JSONB, default=lambda: {"Processing": 5000, "Merge": 100, "Cleanup": 50}

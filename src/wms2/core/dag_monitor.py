@@ -219,9 +219,12 @@ class DAGMonitor:
                 continue
             if status in ("done", "success") and node_name not in already_completed:
                 manifest = self._read_merge_manifest(dag, node_name)
+                metrics = self._read_work_unit_metrics(dag, node_name)
                 newly_completed.append({
                     "group_name": node_name,
                     "manifest": manifest,
+                    "metrics": metrics,
+                    "output_events": self._extract_output_events(metrics),
                 })
 
         return newly_completed
@@ -235,6 +238,41 @@ class DAGMonitor:
             return None
         with open(manifest_path) as f:
             return json.load(f)
+
+    def _read_work_unit_metrics(self, dag, group_name: str) -> dict | None:
+        """Read the work_unit_metrics.json for a completed work unit."""
+        metrics_path = os.path.join(dag.submit_dir, group_name, "work_unit_metrics.json")
+        if not os.path.exists(metrics_path):
+            return None
+        try:
+            with open(metrics_path) as f:
+                return json.load(f)
+        except Exception:
+            logger.warning("Failed to read work unit metrics: %s", metrics_path)
+            return None
+
+    @staticmethod
+    def _extract_output_events(metrics: dict | None) -> int:
+        """Extract total output events from work_unit_metrics.json.
+
+        Reads the last step's events_written.total, falling back to
+        events_processed.total if events_written is unavailable.
+        """
+        if not metrics:
+            return 0
+        per_step = metrics.get("per_step", {})
+        if not per_step:
+            return 0
+        # Last step by step number
+        last_step_key = max(per_step.keys(), key=lambda k: int(k))
+        last_step = per_step[last_step_key]
+        ew = last_step.get("events_written")
+        if ew and isinstance(ew, dict):
+            return ew.get("total", 0)
+        ep = last_step.get("events_processed")
+        if ep and isinstance(ep, dict):
+            return ep.get("total", 0)
+        return 0
 
     async def _handle_dag_completion(self, dag) -> DAGPollResult:
         """Handle a DAG whose DAGMan process has exited."""

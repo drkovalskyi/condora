@@ -348,6 +348,28 @@ class DAGPlanner:
                     total_work_units=len(merge_groups),
                 )
 
+        # 10b. Set production targets on round 0
+        if current_round == 0:
+            target_kwargs = {}
+            if is_gen:
+                request_num_events = int(config.get("request_num_events") or 0)
+                tf = float(config.get("test_fraction") or 1.0)
+                target = int(request_num_events * tf)
+                if target > 0:
+                    target_kwargs["target_events"] = target
+            else:
+                # File-based: total input files from what DBS returned
+                # (already filtered by limit/availability in _plan_file_based_nodes)
+                total_files = 0
+                if self.dbs and workflow.input_dataset:
+                    limit = self.settings.max_input_files if self.settings.max_input_files > 0 else 0
+                    all_files = await self.dbs.get_files(workflow.input_dataset, limit=limit)
+                    total_files = len(all_files)
+                if total_files > 0:
+                    target_kwargs["total_input_files"] = total_files
+            if target_kwargs:
+                await self.db.update_workflow(workflow.id, **target_kwargs)
+
         # 11. Submit DAG to HTCondor
         cluster_id, schedd = await self.condor.submit_dag(dag_file_path)
         now = datetime.now(timezone.utc)
@@ -2431,6 +2453,16 @@ def parse_fjr_metrics(fjr_path, step_index):
         nevents = nevents or None
     metrics['events_processed'] = nevents
 
+    # Output events: sum TotalEvents from all <File> entries
+    events_written = 0
+    for f_elem in root.findall('.//File'):
+        te = f_elem.findtext('TotalEvents', '0')
+        try:
+            events_written += int(te)
+        except ValueError:
+            pass
+    metrics['events_written'] = events_written if events_written > 0 else nevents
+
     # Time per event
     if wall is not None and nevents and nevents > 0:
         metrics['time_per_event_sec'] = round(wall / nevents, 4)
@@ -3357,7 +3389,7 @@ if root_files:
 
             # Compute aggregates
             per_step = {}
-            count_metrics = {"events_processed"}  # use total instead of mean
+            count_metrics = {"events_processed", "events_written"}  # use total instead of mean
             for step_num, metrics in sorted(step_data.items()):
                 agg = {"step": step_num, "num_jobs": len(all_proc_metrics)}
                 for key, values in metrics.items():

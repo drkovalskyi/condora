@@ -3984,3 +3984,62 @@ Traced through WMAgent's code (`StepChain.modifyJobSplitting`, `StdBase.calcEvts
 ### Previous "bugs #10-12" Correction
 
 The previous session's "bug #10" (filter_eff division in PSet injection) was incorrectly identified as a bug, then incorrectly reverted. The analysis above shows that the division was indeed wrong — but for the opposite reason than previously thought. The `events_per_job` value is *generated* events, not *output* events.
+
+---
+
+## Production Tracking for Progress & Termination
+
+**Date**: 2026-02-28
+
+### Problem
+
+The adaptive round termination in `_handle_round_completion` used `next_first_event` (an assignment offset) to decide when a request is done. For GenFilter workflows (filter_eff=0.000338), this caused premature completion after round 0: the generated-event offset (5.5M) exceeded `request_num_events` (5M output events), declaring COMPLETED with ~90 actual output events instead of the target 250K (at test_fraction=0.05).
+
+**Principle**: Offsets are for assignment only, never for accounting.
+
+### What Was Built
+
+#### Database (migration 004)
+- Added 4 columns to `workflows` table:
+  - `events_produced` (BIGINT, default 0) — cumulative output events from completed work units
+  - `target_events` (BIGINT, default 0) — target output events (request_num_events × test_fraction)
+  - `files_processed` (INTEGER, default 0) — cumulative input files from completed work units
+  - `total_input_files` (INTEGER, default 0) — total files in input dataset
+
+#### Data Collection (dag_planner.py)
+- Added `events_written` extraction to `parse_fjr_metrics()`: sums `TotalEvents` from all `<File>` entries in the FJR XML (actual output events, not generated events)
+- Added `events_written` to merge POST script `count_metrics` set for per-step aggregation in `work_unit_metrics.json`
+
+#### DAG Monitor (dag_monitor.py)
+- Added `_read_work_unit_metrics()` to read `work_unit_metrics.json` from completed work units
+- Added `_extract_output_events()` static method: reads last step's `events_written.total`, falls back to `events_processed.total`
+- `_detect_completed_work_units()` now includes `metrics` and `output_events` in each completed work unit dict
+
+#### Lifecycle Manager (lifecycle_manager.py)
+- **Accumulation in `_handle_active()`**: After processing completed work units, accumulates `events_produced` on the workflow row
+- **Termination in `_handle_round_completion()`**: Replaced offset-based termination with production-based:
+  - GEN workflows: `events_produced >= target_events` → COMPLETED
+  - File-based workflows: `files_processed >= total_input_files` → COMPLETED
+  - Safety net: if generated-event ranges exhausted but target not met, complete with warning
+  - Offset advancement retained for next-round assignment (not for termination)
+- Priority demotion now uses production-based progress (`events_produced / target_events`) instead of offset-based
+
+#### DAG Planner (dag_planner.py)
+- On round 0, sets `target_events` (GEN) or `total_input_files` (file-based) on the workflow row
+
+#### Progress Reporting
+- `WorkflowManager.get_workflow_status()` includes new fields and `progress_pct`
+- API workflow summary and detail responses include `events_produced`, `target_events`, `files_processed`, `total_input_files`, and computed `progress_pct`
+
+### Design Decisions
+
+- **Two progress models**: GEN (output events vs target) and file-based (files processed vs total). These are the natural units for each workflow type.
+- **events_written vs events_processed**: For GenFilter workflows, `events_processed` counts generated events (millions), while `events_written` counts output events after filtering (hundreds). Using `events_written` from the last step gives the actual production count.
+- **Safety net for exhausted ranges**: If all generated-event ranges are assigned but `events_produced < target_events` (e.g., filter efficiency lower than expected), the request completes with a warning rather than looping forever.
+
+### Verification
+
+- Migration 004 applied successfully
+- All 468 unit tests pass (1 deselected pre-existing failure: `test_filter_efficiency_in_proc_args`)
+- All modified modules import cleanly
+- Test cases updated: `test_round_completion_gen_returns_to_queued`, `test_round_completion_gen_all_done`, `test_round_completion_file_based_returns_to_queued`, `test_round_completion_priority_demotion`

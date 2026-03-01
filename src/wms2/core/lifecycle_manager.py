@@ -238,6 +238,19 @@ class RequestLifecycleManager:
                             }
                         )
 
+            # Accumulate production counters from completed work units
+            if result.newly_completed_work_units:
+                total_new_events = sum(
+                    wu.get("output_events", 0) for wu in result.newly_completed_work_units
+                )
+                if total_new_events > 0:
+                    wf = await self.db.get_workflow_by_request(request.request_name)
+                    if wf:
+                        await self.db.update_workflow(
+                            wf.id,
+                            events_produced=(wf.events_produced or 0) + total_new_events,
+                        )
+
             # Every cycle: retry failed Rucio calls
             if self.output_manager:
                 await self.output_manager.process_blocks_for_workflow(workflow.id)
@@ -525,13 +538,20 @@ class RequestLifecycleManager:
     # ── Adaptive Round Completion ──────────────────────────────
 
     async def _handle_round_completion(self, request, workflow, dag):
-        """Handle completion of one adaptive round. Advance progress offsets,
-        aggregate metrics, and either complete the request or return it to the queue."""
+        """Handle completion of one adaptive round. Advance assignment offsets,
+        aggregate metrics, and decide whether to complete or queue next round.
+
+        Termination is based on actual production (events_produced vs
+        target_events for GEN; files_processed vs total_input_files for
+        file-based), NOT on assignment offsets.  Offsets are still advanced
+        so the next round knows where to start assigning work.
+        """
         config = workflow.config_data or {}
         is_gen = config.get("_is_gen", False)
         params = workflow.splitting_params or {}
 
-        # Compute how many events/files this round processed.
+        # Compute how many events/files this round assigned (for offset
+        # advancement only — NOT for termination).
         # dag.nodes_done counts outer-DAG nodes (SUBDAGs), not processing
         # jobs.  node_counts["processing"] is the actual job count set at
         # planning time and is correct for completed DAGs.
@@ -543,14 +563,11 @@ class RequestLifecycleManager:
                               or params.get("eventsPerJob") or 100_000)
             events_this_round = total_jobs * events_per_job
             new_offset = workflow.next_first_event + events_this_round
-            total_events = config.get("request_num_events", 0)
-            remaining = total_events - new_offset + 1
         else:
             files_per_job = (params.get("files_per_job")
                              or params.get("FilesPerJob") or 1)
             files_this_round = total_jobs * files_per_job
             new_offset = workflow.file_offset + files_this_round
-            remaining = -1  # file-based: check via DBS in planner
 
         # Aggregate step_metrics from completed DAG
         new_metrics = _aggregate_round_metrics(
@@ -571,16 +588,54 @@ class RequestLifecycleManager:
 
         await self.db.update_workflow(workflow.id, **update_kwargs)
 
-        # Check if all work is done
-        if is_gen and remaining <= 0:
-            await self.transition(request, RequestStatus.COMPLETED)
-            return
+        # Re-fetch workflow to get latest production counters
+        workflow = await self.db.get_workflow_by_request(request.request_name)
+
+        # ── Termination check: based on actual production ──
+        if is_gen:
+            target = workflow.target_events or 0
+            produced = workflow.events_produced or 0
+            if target > 0 and produced >= target:
+                logger.info(
+                    "Request %s: COMPLETED — produced %d >= target %d output events",
+                    request.request_name, produced, target,
+                )
+                await self.transition(request, RequestStatus.COMPLETED)
+                return
+
+            # Safety net: if generated-event ranges are exhausted but target
+            # not met, complete with warning (avoid infinite loops)
+            total_gen_events = config.get("request_num_events", 0)
+            filter_eff = float(config.get("filter_efficiency", 1.0))
+            if filter_eff > 0 and filter_eff < 1.0 and total_gen_events > 0:
+                total_gen_events = int(total_gen_events / filter_eff)
+            remaining_gen = total_gen_events - new_offset + 1
+            if remaining_gen <= 0:
+                logger.warning(
+                    "Request %s: generated-event ranges exhausted "
+                    "(produced %d / target %d). Completing.",
+                    request.request_name, produced, target,
+                )
+                await self.transition(request, RequestStatus.COMPLETED)
+                return
+        else:
+            total_files = workflow.total_input_files or 0
+            processed = workflow.files_processed or 0
+            if total_files > 0 and processed >= total_files:
+                logger.info(
+                    "Request %s: COMPLETED — processed %d / %d input files",
+                    request.request_name, processed, total_files,
+                )
+                await self.transition(request, RequestStatus.COMPLETED)
+                return
 
         # Apply production_steps priority demotion between rounds
         steps = request.production_steps or []
-        if steps:
-            if is_gen and total_events > 0:
-                progress = (new_offset - 1) / total_events
+        if steps and is_gen:
+            target = workflow.target_events or 0
+            produced = workflow.events_produced or 0
+            if target > 0:
+                progress = produced / target
                 step = steps[0]
                 fraction = step["fraction"] if isinstance(step, dict) else step.fraction
                 if progress >= fraction:
@@ -598,11 +653,12 @@ class RequestLifecycleManager:
 
         logger.info(
             "Request %s: round %d complete, advancing to round %d "
-            "(%s offset: %s, remaining: %s)",
-            request.request_name, workflow.current_round, new_round,
+            "(produced=%s, target=%s, %s offset=%s)",
+            request.request_name, workflow.current_round - 1, new_round,
+            workflow.events_produced if is_gen else workflow.files_processed,
+            workflow.target_events if is_gen else workflow.total_input_files,
             "event" if is_gen else "file",
             new_offset,
-            remaining if remaining >= 0 else "unknown",
         )
 
         # Return to admission queue for next round

@@ -17,6 +17,11 @@ def _make_workflow(dag_id=None, pilot_cluster_id=None, pilot_schedd=None, **kwar
     wf.pilot_cluster_id = pilot_cluster_id
     wf.pilot_schedd = pilot_schedd
     wf.pilot_output_path = None
+    # Production tracking defaults
+    wf.events_produced = 0
+    wf.target_events = 0
+    wf.files_processed = 0
+    wf.total_input_files = 0
     for k, v in kwargs.items():
         setattr(wf, k, v)
     return wf
@@ -526,6 +531,10 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
         current_round=0,
         step_metrics=None,
         adaptive=True,
+        events_produced=0,
+        target_events=1_000_000,
+        files_processed=0,
+        total_input_files=0,
     )
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
@@ -552,7 +561,7 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
     assert wf_update[1]["step_metrics"]["rounds_completed"] == 1
     assert wf_update[1]["step_metrics"]["cumulative_nodes_done"] == 8
 
-    # Request transitions to QUEUED (not COMPLETED)
+    # Request transitions to QUEUED (not COMPLETED — only 0/1M produced)
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.QUEUED.value
 
@@ -563,6 +572,7 @@ async def test_round_completion_gen_all_done(mock_repository, mock_condor, setti
     from wms2.core.lifecycle_manager import RequestLifecycleManager
 
     # 1M events total, already at event 900_001 (9 rounds done), 1 job of 100k left
+    # events_produced=1M means target reached after this round
     dag = _make_dag(
         status="submitted", nodes_done=1, nodes_failed=0,
         node_counts={"processing": 1, "merge": 1, "cleanup": 1},
@@ -576,6 +586,10 @@ async def test_round_completion_gen_all_done(mock_repository, mock_condor, setti
         current_round=9,
         step_metrics={"rounds_completed": 9, "cumulative_nodes_done": 72},
         adaptive=True,
+        events_produced=1_000_000,
+        target_events=1_000_000,
+        files_processed=0,
+        total_input_files=0,
     )
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
@@ -600,7 +614,7 @@ async def test_round_completion_gen_all_done(mock_repository, mock_condor, setti
     assert wf_update[1]["current_round"] == 10
     assert wf_update[1]["next_first_event"] == 1_000_001
 
-    # Request transitions to COMPLETED (all done)
+    # Request transitions to COMPLETED (events_produced >= target_events)
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.COMPLETED.value
 
@@ -625,6 +639,10 @@ async def test_round_completion_file_based_returns_to_queued(
         current_round=0,
         step_metrics=None,
         adaptive=True,
+        events_produced=0,
+        target_events=0,
+        files_processed=0,
+        total_input_files=100,
     )
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
@@ -650,7 +668,7 @@ async def test_round_completion_file_based_returns_to_queued(
     assert wf_update[1]["file_offset"] == 10  # 5 jobs * 2 files_per_job
     assert "next_first_event" not in wf_update[1]
 
-    # Request transitions to QUEUED
+    # Request transitions to QUEUED (0/100 files processed)
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.QUEUED.value
 
@@ -693,8 +711,7 @@ async def test_round_completion_priority_demotion(mock_repository, mock_condor, 
     from wms2.core.dag_monitor import DAGPollResult
     from wms2.core.lifecycle_manager import RequestLifecycleManager
 
-    # 1000 events, 100 per job, 5 done this round → offset moves to 501
-    # progress = 500/1000 = 0.5, matches first step's fraction
+    # 1000 events target, 500 already produced → 50% progress matches first step
     dag = _make_dag(
         status="submitted", nodes_done=5, nodes_failed=0,
         node_counts={"processing": 5, "merge": 1, "cleanup": 1},
@@ -708,6 +725,8 @@ async def test_round_completion_priority_demotion(mock_repository, mock_condor, 
         current_round=0,
         step_metrics=None,
         adaptive=True,
+        events_produced=500,
+        target_events=1000,
     )
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)

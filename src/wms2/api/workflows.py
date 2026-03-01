@@ -9,7 +9,7 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 
 
 def _workflow_summary(r):
-    return {
+    summary = {
         "id": str(r.id),
         "request_name": r.request_name,
         "input_dataset": r.input_dataset,
@@ -21,12 +21,21 @@ def _workflow_summary(r):
         "nodes_failed": r.nodes_failed,
         "nodes_running": r.nodes_running,
         "nodes_queued": r.nodes_queued,
+        "events_produced": r.events_produced or 0,
+        "target_events": r.target_events or 0,
+        "files_processed": r.files_processed or 0,
+        "total_input_files": r.total_input_files or 0,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
+    if r.target_events:
+        summary["progress_pct"] = round(100.0 * (r.events_produced or 0) / r.target_events, 2)
+    elif r.total_input_files:
+        summary["progress_pct"] = round(100.0 * (r.files_processed or 0) / r.total_input_files, 2)
+    return summary
 
 
 def _workflow_detail(row):
-    return {
+    detail = {
         "id": str(row.id),
         "request_name": row.request_name,
         "input_dataset": row.input_dataset,
@@ -49,9 +58,18 @@ def _workflow_detail(row):
         "nodes_failed": row.nodes_failed,
         "nodes_queued": row.nodes_queued,
         "nodes_running": row.nodes_running,
+        "events_produced": row.events_produced or 0,
+        "target_events": row.target_events or 0,
+        "files_processed": row.files_processed or 0,
+        "total_input_files": row.total_input_files or 0,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+    if row.target_events:
+        detail["progress_pct"] = round(100.0 * (row.events_produced or 0) / row.target_events, 2)
+    elif row.total_input_files:
+        detail["progress_pct"] = round(100.0 * (row.files_processed or 0) / row.total_input_files, 2)
+    return detail
 
 
 def _block_detail(b):
