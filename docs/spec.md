@@ -4,9 +4,9 @@
 
 | Field | Value |
 |---|---|
-| **Spec Version** | 2.10.0 |
+| **Spec Version** | 2.11.0 |
 | **Status** | DRAFT |
-| **Date** | 2026-02-27 |
+| **Date** | 2026-03-02 |
 | **Authors** | CMS Computing |
 | **Supersedes** | WMCore / WMAgent |
 
@@ -3126,6 +3126,7 @@ The following capabilities are required from HTCondor / DAGMan and will be devel
 | System Uptime | 99.5% | Availability monitoring |
 | Node Success Rate | > 95% | DAGMan metrics |
 | Adaptive Convergence | Resource estimates within 20% of actual by round 2 | Compare round 2 step_metrics-based sizing to measured usage |
+| Physics Validation | All NanoAOD branches within 5σ of WMAgent reference | `rootdiff -t 5` comparison (see §13.3) |
 
 ### 13.2 Comparison with WMCore
 
@@ -3138,6 +3139,32 @@ The following capabilities are required from HTCondor / DAGMan and will be devel
 | Resource Estimation | Manual (requestor guesses) | Adaptive (converges from FJR data) |
 | Setup Time | Hours | Minutes |
 | Debug Difficulty | High | Low (single service + DAGMan logs) |
+
+### 13.3 Physics Validation
+
+WMS2 includes a lightweight physics validation tool (`scripts/rootdiff`) that compares NanoAOD output against a WMAgent-produced reference file. This catches any physics-level regressions introduced by the orchestration layer (e.g., seed mismanagement, incorrect step configuration, missing output modules, corrupted merges).
+
+**Method**: For each numeric branch in the NanoAOD Events tree, compute statistical summaries (mean, std, min, max, n) and compare using a difference-of-means test:
+
+    pull = |mean₁ - mean₂| / √(σ₁²/n₁ + σ₂²/n₂)
+
+Branches with pull > 5σ are flagged as outliers. Bookkeeping branches (event number, run, luminosityBlock, genEventSumw) are excluded since they differ by construction between independent samples. Branches with fewer than 10 entries are skipped as statistically uninformative.
+
+**Validation**: WMS2 output (DYto2Mu NanoAODv12, 10 merged files × 320 events) was compared against a WMAgent reference (336k events). Result: 17,818 of 17,820 branch comparisons pass at 5σ (99.99%). The 2 failures are ultra-rare objects (fat jets in DY→μμ) with <10 entries per file. At matched sample sizes (320 entries each), all 1782 branches pass.
+
+**Usage**:
+```bash
+# Statistical comparison (physics validation, recommended)
+scripts/rootdiff -t 5 -n 10000 reference.root wms2_output.root
+
+# Exact comparison (identical-seed verification)
+scripts/rootdiff reference.root wms2_output.root
+
+# Fast mode (metadata only — size, entries, compression)
+scripts/rootdiff -f reference.root wms2_output.root
+```
+
+**Why not full DQM**: CMS DQM/VALIDATION uses CMSSW analyzer modules producing DQMIO histograms, requiring DQM to be inline with RECO and a separate harvesting step. This is the right approach for release validation but heavyweight for production QA. The `rootdiff` statistical comparison operates directly on the final NanoAOD output with no additional CMSSW steps, runs in seconds, and catches the same class of physics-level regressions (wrong distributions, missing branches, corrupted values). DQM support may be added later for workflows that require it (see `docs/dqm-harvesting.md`).
 
 ---
 

@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""Compare ROOT files branch-by-branch.
+
+Works with both TTree and RNTuple formats. For each numeric branch,
+computes min/max/mean/std and reports differences. In fast mode, only
+compares compression, size, and number of entries.
+
+Statistical mode (-t/--tolerance): instead of exact comparison, checks
+whether the means are consistent within N sigma (default 3) of the
+expected statistical fluctuation. This is the right comparison for
+physics validation of independent MC samples.
+
+Requires: uproot, numpy (available in WMS2 venv).
+"""
+import sys
+import argparse
+import re
+from math import sqrt, isnan
+
+import numpy as np
+import uproot
+
+
+parser = argparse.ArgumentParser(description='Compare ROOT files')
+parser.add_argument('files', metavar='files', type=str, nargs=2,
+                    help='files to compare')
+parser.add_argument('-v', '--verbose', dest='verbose', action='store_true',
+                    default=False, help='verbose report')
+parser.add_argument('-d', '--debug', dest='debug', action='store_true',
+                    default=False, help='print debugging information')
+parser.add_argument('-i', '--ignore', dest='ignore', action='store_true',
+                    default=False, help='ignore missing branches')
+parser.add_argument('-f', '--fast', dest='fast', action='store_true',
+                    default=False, help='fast comparison checking only '
+                    'compression, size and number of entries. By default '
+                    'a deep branch by branch comparison is performed.')
+parser.add_argument('-p', '--pattern', dest='pattern', type=str,
+                    help='analyze only branches matching the pattern')
+parser.add_argument('-t', '--tolerance', dest='tolerance', type=float,
+                    default=None, metavar='NSIGMA',
+                    help='statistical comparison: flag branches where '
+                    'means differ by more than NSIGMA standard errors '
+                    '(e.g. -t 3 for 3-sigma). Without this flag, exact '
+                    'comparison is used.')
+parser.add_argument('--validate', dest='validate', action='store_true',
+                    default=False,
+                    help='report problems with data such as NaN values etc')
+parser.add_argument('-s', '--skip', dest='skip', type=str,
+                    help='skip branches matching this regex '
+                    '(e.g. "^(event|run|luminosity)" to exclude bookkeeping)')
+parser.add_argument('-n', '--max-entries', dest='max_entries', type=int,
+                    default=None, metavar='N',
+                    help='read at most N entries per tree (for large files). '
+                    'Statistics converge well with ~10000 entries.')
+
+# Bookkeeping branches that differ by construction between independent samples
+BOOKKEEPING = re.compile(
+    r'^(event|run|luminosityBlock|genEventCount|genEventSumw'
+    r'|genEventSumw2|LHEPdfSumw|LHEScaleSumw|PSSumw)$'
+)
+
+args = parser.parse_args()
+
+
+def find_trees(f, prefix=""):
+    """Recursively find all TTree and RNTuple objects in a ROOT file."""
+    trees = set()
+    for key in f.keys():
+        name = key.split(';')[0]  # strip cycle number
+        obj = f[key]
+        if isinstance(obj, (uproot.TTree,
+                            uproot.models.RNTuple.Model_ROOT_3a3a_RNTuple)):
+            trees.add(name)
+        elif isinstance(obj, uproot.reading.ReadOnlyDirectory):
+            for sub in find_trees(obj, prefix=name + "/"):
+                trees.add(prefix + sub)
+    return trees
+
+
+def get_branch_data_summary(tree):
+    """Compute per-branch statistics: min, max, mean, std, n."""
+    summary = {}
+    branch_names = []
+
+    for name in tree.keys():
+        if args.pattern and not re.search(args.pattern, name):
+            continue
+        branch_names.append(name)
+
+    entry_stop = args.max_entries  # None means read all
+
+    for name in branch_names:
+        try:
+            arr = tree[name].array(library="np", entry_stop=entry_stop)
+        except Exception as e:
+            if args.debug:
+                print(f"  Skipping {name}: {e}")
+            continue
+
+        # Flatten jagged arrays (variable-length branches)
+        if isinstance(arr, np.ndarray) and arr.dtype == object:
+            pieces = []
+            for entry in arr:
+                if isinstance(entry, (str, bytes)):
+                    pieces = []
+                    break
+                if hasattr(entry, '__len__'):
+                    try:
+                        piece = np.asarray(entry)
+                        if piece.dtype.kind in ('U', 'S', 'O'):
+                            pieces = []
+                            break
+                        pieces.append(piece.astype(float))
+                    except (ValueError, TypeError):
+                        pieces = []
+                        break
+                elif isinstance(entry, (int, float, np.integer, np.floating)):
+                    pieces.append(np.array([float(entry)]))
+            if not pieces:
+                continue
+            try:
+                values = np.concatenate(pieces)
+            except (ValueError, TypeError):
+                continue
+        elif isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype,
+                                                            np.number):
+            values = arr.astype(float)
+        elif isinstance(arr, np.ndarray) and np.issubdtype(arr.dtype,
+                                                            np.bool_):
+            values = arr.astype(float)
+        else:
+            continue
+
+        if len(values) == 0:
+            summary[name] = {'min': None, 'max': None, 'mean': None,
+                             'std': None, 'n': 0}
+            continue
+
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            summary[name] = {'min': None, 'max': None, 'mean': None,
+                             'std': None, 'n': len(values)}
+            continue
+
+        if args.debug:
+            print(f"  Branch: {name}\t{values[:5]}...")
+
+        n = len(values)
+        mean = float(np.mean(finite))
+        std = float(np.std(finite))
+        vmin = float(np.min(finite))
+        vmax = float(np.max(finite))
+
+        summary[name] = {
+            'min': vmin,
+            'max': vmax,
+            'mean': mean,
+            'std': std,
+            'n': n,
+        }
+
+        if args.validate:
+            nan_count = int(np.isnan(values).sum())
+            inf_count = int(np.isinf(values).sum())
+            if nan_count > 0 or inf_count > 0:
+                print(f"  WARNING: {name}: {nan_count} NaN, {inf_count} Inf "
+                      f"out of {n} values")
+
+    return summary
+
+
+def get_branch_info_fast(tree):
+    """Fast mode: only report compressed/uncompressed sizes and entries."""
+    info = {}
+    for name in tree.keys():
+        if args.pattern and not re.search(args.pattern, name):
+            continue
+        branch = tree[name]
+        info[name] = {
+            'size': branch.compressed_bytes,
+            'nentries': branch.num_entries,
+        }
+    return info
+
+
+def get_branch_info(tree):
+    if args.fast:
+        return get_branch_info_fast(tree)
+    else:
+        return get_branch_data_summary(tree)
+
+
+def diff_dict(d1, d2):
+    """Compare two stat dicts, handling NaN properly."""
+    if d1 == d2:
+        return True
+    if len(d1) != len(d2):
+        return False
+    for key in d1:
+        v1, v2 = d1[key], d2[key]
+        if v1 is not None and v2 is not None:
+            if isinstance(v1, float) and isinstance(v2, float):
+                if isnan(v1) and isnan(v2):
+                    continue
+        if v1 != v2:
+            if args.debug:
+                print(f"    {key}: {v1} vs {v2}")
+            return False
+    return True
+
+
+def stat_compatible(d1, d2, nsigma):
+    """Check if two branch summaries are statistically compatible.
+
+    Uses the difference of means test: |mean1 - mean2| / SE < nsigma,
+    where SE = sqrt(std1^2/n1 + std2^2/n2) is the standard error of the
+    difference. Returns (compatible, pull) tuple.
+    """
+    m1, m2 = d1.get('mean'), d2.get('mean')
+    s1, s2 = d1.get('std'), d2.get('std')
+    n1, n2 = d1.get('n', 0), d2.get('n', 0)
+
+    # Both empty or both None — compatible
+    if m1 is None and m2 is None:
+        return True, 0.0
+
+    # One None and other not — but if both have few entries, skip
+    if m1 is None or m2 is None:
+        if n1 < 10 and n2 < 10:
+            return True, 0.0
+        return False, float('inf')
+
+    # Both zero std and same mean — compatible (constants)
+    if s1 == 0 and s2 == 0:
+        return m1 == m2, (0.0 if m1 == m2 else float('inf'))
+
+    # Too few entries for meaningful statistics — skip
+    if n1 < 10 or n2 < 10:
+        return True, 0.0
+
+    # Compute standard error of difference
+    var1 = (s1 * s1 / n1) if n1 > 0 else 0
+    var2 = (s2 * s2 / n2) if n2 > 0 else 0
+    se = sqrt(var1 + var2)
+
+    if se == 0:
+        return m1 == m2, (0.0 if m1 == m2 else float('inf'))
+
+    pull = abs(m1 - m2) / se
+    return pull <= nsigma, pull
+
+
+# Open files
+file1 = uproot.open(args.files[0])
+if file1 is None:
+    print(f"Cannot open file {args.files[0]}")
+    sys.exit(2)
+trees1 = find_trees(file1)
+
+file2 = uproot.open(args.files[1])
+if file2 is None:
+    print(f"Cannot open file {args.files[1]}")
+    sys.exit(2)
+trees2 = find_trees(file2)
+
+# Report tree differences
+only1 = trees1 - trees2
+only2 = trees2 - trees1
+if only1:
+    print(f"Trees only in file 1: {sorted(only1)}")
+if only2:
+    print(f"Trees only in file 2: {sorted(only2)}")
+
+# Compare common trees
+common = sorted(trees1 & trees2)
+if args.tolerance is not None:
+    print(f"Comparing {len(common)} common trees "
+          f"(tolerance: {args.tolerance} sigma)...")
+else:
+    print(f"Comparing {len(common)} common trees...")
+
+exit_code = 0
+
+for tree_name in common:
+    print(tree_name)
+    tree1 = file1[tree_name]
+    tree2 = file2[tree_name]
+
+    n1 = tree1.num_entries
+    n2 = tree2.num_entries
+    if n1 != n2:
+        print(f"\tEntry count differs: {n1} vs {n2}")
+
+    info1 = get_branch_info(tree1)
+    info2 = get_branch_info(tree2)
+
+    matched = 0
+    not_matched = 0
+    flagged = []  # branches that fail tolerance check
+
+    for branch in sorted(info1):
+        if branch not in info2:
+            if not args.ignore:
+                print(f"\tBranch {branch} from file 1 is missing in file 2")
+            continue
+
+        if args.skip and re.search(args.skip, branch):
+            matched += 1
+            continue
+
+        if args.tolerance is not None and BOOKKEEPING.search(branch):
+            matched += 1
+            continue
+
+        if args.tolerance is not None and not args.fast:
+            ok, pull = stat_compatible(info1[branch], info2[branch],
+                                       args.tolerance)
+            if ok:
+                matched += 1
+            else:
+                not_matched += 1
+                flagged.append((branch, pull))
+                if args.verbose:
+                    d1, d2 = info1[branch], info2[branch]
+                    print(f"\tBranch {branch}: pull={pull:.1f} sigma")
+                    print(f"\t  file 1: mean={d1['mean']} "
+                          f"std={d1['std']} n={d1['n']}")
+                    print(f"\t  file 2: mean={d2['mean']} "
+                          f"std={d2['std']} n={d2['n']}")
+        else:
+            if diff_dict(info1[branch], info2[branch]):
+                matched += 1
+            else:
+                not_matched += 1
+                if args.verbose:
+                    print(f"\tBranch {branch} has changed")
+                    print(f"\t  file 1: {info1[branch]}")
+                    print(f"\t  file 2: {info2[branch]}")
+
+    if not args.ignore:
+        for branch in sorted(info2):
+            if branch not in info1:
+                print(f"\tBranch {branch} from file 2 is missing in file 1")
+
+    print(f"\tNumber of matching branches: {matched}")
+    print(f"\tNumber of not matching branches: {not_matched}")
+
+    if flagged and args.tolerance is not None:
+        exit_code = 1
+        flagged.sort(key=lambda x: -x[1])
+        print(f"\tTop outliers (>{args.tolerance} sigma):")
+        for name, pull in flagged[:20]:
+            print(f"\t  {pull:6.1f}σ  {name}")
+
+if exit_code:
+    print(f"\nFAILED: branches outside {args.tolerance}-sigma tolerance found")
+sys.exit(exit_code)
