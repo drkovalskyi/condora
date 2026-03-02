@@ -71,12 +71,13 @@ error handling misbehaved, fix it before re-running.
 
 ### Current status
 
-CLI-based end-to-end processing works for a real 5-step StepChain workflow.
-Matrix smoke tests (5 workflows including fault injection) all pass.
-Matrix test 391.4 (DY2L adaptive 3-round) passes — all 3 rounds complete
-with adaptive optimization (CPU eff: 14% → 28% → 53%).
+**Service mode works end-to-end** with real CMSSW workflows. The lifecycle manager
+runs as an autonomous service: CLI imports with `--no-monitor`, service handles
+DAG monitoring, round completion, adaptive optimization, and multi-round planning.
 
-Full 25000-event real workflow test in progress (B2G-Run3Summer23BPixwmLHEGS-06000).
+Tested with `cmsunified_task_GEN-Run3Summer23wmLHEGS-00058` (5-step StepChain,
+test_fraction=0.01): round 0 completed autonomously, adaptive optimization reduced
+memory 7900 → 5672 MB, round 1 automatically planned (10 WUs, 80 jobs).
 
 ### Verified working
 
@@ -89,10 +90,24 @@ Full 25000-event real workflow test in progress (B2G-Run3Summer23BPixwmLHEGS-060
 - Shared `complete_round()` logic between CLI and lifecycle manager
 - Tmpfs gridpack extraction with split_tmpfs=true (via apptainer)
 - Multi-round adaptive optimization (8T → 4T → 2T with memory tuning)
+- **Service mode**: per-cycle DB sessions, explicit commit/rollback, CLI `--no-monitor`
+- **Multi-round service autonomy**: round 0 → adaptive optimization → round 1 planning
 
 ### Test commands
 
-Real CMSSW workflow:
+Service mode (start service + import via CLI):
+```bash
+# Terminal 1: start service
+unset WMS2_CERT_FILE WMS2_KEY_FILE
+WMS2_CONDOR_HOST="localhost:9618" WMS2_LIFECYCLE_CYCLE_INTERVAL=30 \
+  uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
+
+# Terminal 2: import request (exits immediately)
+wms2 import cmsunified_task_GEN-Run3Summer23wmLHEGS-00058__v1_T_230922_115553_5657 \
+  --sandbox-mode cmssw --test-fraction 0.01 --no-monitor
+```
+
+Real CMSSW workflow (CLI monitoring mode):
 ```bash
 wms2 import cmsunified_task_B2G-Run3Summer23BPixwmLHEGS-06000__v1_T_250628_211038_1313 \
   --sandbox-mode cmssw

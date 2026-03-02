@@ -96,7 +96,7 @@ async def get_dag(
         condor = getattr(raw_request.app.state, "condor", None)
         if condor:
             live = await condor.count_dag_jobs(row.dagman_cluster_id)
-            if live:
+            if live and live.get("total", 0) > 0:
                 result["nodes_done"] = live["done"]
                 result["nodes_running"] = live["running"]
                 result["nodes_idle"] = live["idle"]

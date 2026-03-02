@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "WMS2_"}
 
     # Database
-    database_url: str = "postgresql+asyncpg://wms2:wms2pass@localhost:5432/wms2"
+    database_url: str = "postgresql+asyncpg://wms2:wms2dev@localhost:5432/wms2"
     db_pool_size: int = 10
 
     # Lifecycle Manager

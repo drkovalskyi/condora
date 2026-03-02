@@ -1,8 +1,57 @@
 # WMS2 — Implementation Log
 
-**Date**: 2026-03-01
+**Date**: 2026-03-02
 **Spec Version**: 2.4.0
 **Phase**: 1 — Project Scaffold and Foundation
+
+---
+
+## 2026-03-02 — Lifecycle manager service mode: per-cycle sessions + CLI --no-monitor
+
+### What was done
+
+Wired the lifecycle manager to work as an autonomous service. Previously the CLI
+bundled import + monitoring in one blocking process. Now the service handles everything:
+inject via CLI, lifecycle manager monitors and advances rounds automatically.
+
+### Key changes
+
+| File | Change |
+|---|---|
+| `src/wms2/core/lifecycle_manager.py` | Per-cycle sessions with explicit commit/rollback. Constructor accepts both session_factory (service) and repository (tests). Workers rebuilt each cycle via `_build_workers()`. |
+| `src/wms2/main.py` | Simplified `run_lifecycle()`: passes session_factory + adapters to lifecycle manager instead of pre-building all workers with a single long-lived session. |
+| `src/wms2/config.py` | Fixed default DB password (`wms2pass` → `wms2dev`). |
+| `src/wms2/cli.py` | Added `--no-monitor` flag: import + submit DAG, then exit. Lifecycle manager handles monitoring. |
+| `src/wms2/core/dag_planner.py` | Always use absolute paths for wrapper scripts (wms2_proc.sh, wms2_merge.py, wms2_cleanup.py). Fixes round 1+ jobs failing with "executable not found". |
+
+### Design decisions
+
+- **Per-cycle sessions**: Each lifecycle cycle creates a fresh DB session so that
+  API-injected requests are visible immediately, and crashes don't lose state.
+  Each request evaluation is committed individually; failures roll back that
+  request only.
+- **Backward-compatible constructor**: Tests pass repository directly (positional or
+  keyword); service mode passes session_factory. Detected via `hasattr(obj, 'get_request')`.
+- **Captured request_name before try**: Avoids SQLAlchemy MissingGreenlet errors in
+  exception handler (accessing lazy-loaded attributes after session error).
+
+### Verification
+
+- All 468 unit tests pass (1 pre-existing failure: `test_filter_efficiency_in_proc_args`)
+- End-to-end service test with real CMSSW workflow (5-step StepChain, test_fraction=0.01):
+  - CLI imported with `--no-monitor`, exited cleanly after DAG submission
+  - Lifecycle manager detected ACTIVE request, polled DAG every 30s
+  - Round 0 completed: 8 proc jobs → merge → cleanup (320 events produced)
+  - Adaptive optimization: memory 7900 → 5672 MB
+  - Round 1 automatically planned: 10 work units, 80 proc jobs
+  - Jobs ran successfully (not held) with absolute executable paths
+
+### Known issues
+
+- Service started with `WMS2_CERT_FILE`/`WMS2_KEY_FILE` set (from venv activate)
+  will use real CRIC/DBS/Rucio adapters, which fail on SSL if no valid proxy.
+  Workaround: unset those vars when running the service without grid certs.
+- `site_bans` table was missing from DB — created via `Base.metadata.create_all()`.
 
 ---
 

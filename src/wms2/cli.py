@@ -58,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--test-fraction", type=float, default=None,
                      help="Process only this fraction of events per job (e.g. 0.01 = 1%%). "
                           "DAG structure unchanged; jobs finish faster. Not for production.")
+    imp.add_argument("--no-monitor", action="store_true",
+                     help="Import and submit DAG but skip monitoring (for service mode)")
     imp.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     return parser
@@ -466,6 +468,14 @@ async def run_import(args: argparse.Namespace) -> None:
             # Transition request to ACTIVE — a DAG is now running
             await _transition_request(repo, request_name, "submitted", RequestStatus.ACTIVE)
             await session.commit()
+
+            if args.no_monitor:
+                print("[3/5] Skipping monitoring (--no-monitor)")
+                print("[4/5] Skipping output summary (--no-monitor)")
+                print("[5/5] Skipping output files (--no-monitor)")
+                print()
+                print(f"=== DAG submitted — lifecycle manager will handle monitoring ===")
+                return
 
             # 3. Monitor (with rescue loop + multi-round adaptive lifecycle)
             print(f"[3/5] Monitoring DAG (poll every {args.poll_interval}s)...")

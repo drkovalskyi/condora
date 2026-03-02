@@ -733,13 +733,12 @@ def _generate_group_dag(
     merge_exe = exe.get("merge", "run_merge.sh")
     cleanup_exe = exe.get("cleanup", "run_cleanup.sh")
 
-    # In test mode (/bin/true), use the generated trivial scripts instead
-    if proc_exe == "/bin/true":
-        proc_exe = str(submit_dir / "wms2_proc.sh")
-    if merge_exe == "/bin/true":
-        merge_exe = str(submit_dir / "wms2_merge.py")
-    if cleanup_exe == "/bin/true":
-        cleanup_exe = str(submit_dir / "wms2_cleanup.py")
+    # Always use the generated wrapper scripts (absolute paths).
+    # The Settings executable names are placeholders — the real wrappers
+    # are written by the planner to submit_dir.
+    proc_exe = str(submit_dir / "wms2_proc.sh")
+    merge_exe = str(submit_dir / "wms2_merge.py")
+    cleanup_exe = str(submit_dir / "wms2_cleanup.py")
 
     # Resource parameters
     rp = resource_params or {}

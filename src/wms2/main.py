@@ -17,13 +17,8 @@ from wms2.adapters.mock import (
 )
 from wms2.api.router import api_router
 from wms2.config import Settings
-from wms2.core.dag_monitor import DAGMonitor
-from wms2.core.dag_planner import DAGPlanner
-from wms2.core.error_handler import ErrorHandler
 from wms2.core.lifecycle_manager import RequestLifecycleManager
-from wms2.core.output_manager import OutputManager
 from wms2.core.site_manager import SiteManager
-from wms2.core.workflow_manager import WorkflowManager
 from wms2.db.engine import create_engine, create_session_factory
 from wms2.db.repository import Repository
 
@@ -118,24 +113,12 @@ async def lifespan(app: FastAPI):
 
     # Start lifecycle manager
     async def run_lifecycle():
-        async with session_factory() as session:
-            repo = Repository(session)
-            sm = SiteManager(repo, settings, cric_adapter=cric)
-            wm = WorkflowManager(repo, reqmgr)
-            dp = DAGPlanner(repo, dbs, rucio, condor, settings, site_manager=sm)
-            dm = DAGMonitor(repo, condor)
-            om = OutputManager(repo, dbs, rucio)
-            eh = ErrorHandler(repo, condor, settings, site_manager=sm)
-            lm = RequestLifecycleManager(
-                repo, condor, settings,
-                workflow_manager=wm,
-                dag_planner=dp,
-                dag_monitor=dm,
-                output_manager=om,
-                error_handler=eh,
-            )
-            app.state.lifecycle_manager = lm
-            await lm.main_loop()
+        lm = RequestLifecycleManager(
+            session_factory, condor, settings,
+            reqmgr=reqmgr, dbs=dbs, rucio=rucio, cric=cric,
+        )
+        app.state.lifecycle_manager = lm
+        await lm.main_loop()
 
     lifecycle_task = asyncio.create_task(run_lifecycle())
     app.state.lifecycle_task = lifecycle_task

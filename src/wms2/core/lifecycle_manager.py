@@ -222,26 +222,60 @@ class RequestLifecycleManager:
     evaluates all non-terminal requests and dispatches work to the appropriate
     component workers.
 
-    Phase 2+ components (workflow_manager, dag_planner, dag_monitor,
-    output_manager, error_handler) are optional — when None, the corresponding
-    handler logs a skip and returns.
+    Accepts a session_factory and creates a fresh DB session per cycle so that:
+    - Each cycle sees the latest DB state (including API-injected requests)
+    - Changes are committed after each request evaluation
+    - Crashes don't lose previously committed state
+
+    Adapter instances (condor, reqmgr, dbs, rucio, cric) are long-lived and
+    shared across cycles. Worker components (DAGMonitor, DAGPlanner, etc.)
+    are rebuilt per-cycle with the fresh repository.
     """
 
     def __init__(
         self,
-        repository: Repository,
-        condor_adapter: CondorAdapter,
-        settings: Settings,
+        session_factory_or_repo=None,
+        condor_adapter: CondorAdapter = None,
+        settings: Settings = None,
         *,
+        # Service mode: pass adapters, workers built per-cycle
+        reqmgr=None,
+        dbs=None,
+        rucio=None,
+        cric=None,
+        # Test/legacy mode: pass pre-built workers directly
+        repository=None,
         workflow_manager=None,
         dag_planner=None,
         dag_monitor=None,
         output_manager=None,
         error_handler=None,
     ):
-        self.db = repository
         self.condor = condor_adapter
         self.settings = settings
+
+        # Resolve: keyword `repository=` forces repo mode; otherwise check
+        # if the first positional arg is a session_factory (async_sessionmaker)
+        # or a repository-like object (has get_request method).
+        if repository is not None:
+            # Explicit keyword: always repo mode
+            self.session_factory = None
+            self.db = repository
+        elif session_factory_or_repo is not None and hasattr(
+            session_factory_or_repo, "get_request"
+        ):
+            # Repository-like (real Repository or MagicMock with get_request)
+            self.session_factory = None
+            self.db = session_factory_or_repo
+        else:
+            # Service mode: session_factory (async_sessionmaker) passed
+            self.session_factory = session_factory_or_repo
+            self.db = None
+
+        self.reqmgr = reqmgr
+        self.dbs = dbs
+        self.rucio = rucio
+        self.cric = cric
         self.workflow_manager = workflow_manager
         self.dag_planner = dag_planner
         self.dag_monitor = dag_monitor
@@ -269,18 +303,48 @@ class RequestLifecycleManager:
             RequestStatus.PARTIAL: self._handle_partial,
         }
 
+    def _build_workers(self, repo: Repository):
+        """Build per-cycle worker components with a fresh repository."""
+        from wms2.core.dag_monitor import DAGMonitor
+        from wms2.core.dag_planner import DAGPlanner
+        from wms2.core.error_handler import ErrorHandler
+        from wms2.core.output_manager import OutputManager
+        from wms2.core.site_manager import SiteManager
+        from wms2.core.workflow_manager import WorkflowManager
+
+        sm = SiteManager(repo, self.settings, cric_adapter=self.cric)
+        self.db = repo
+        self.workflow_manager = WorkflowManager(repo, self.reqmgr) if self.reqmgr else None
+        self.dag_planner = DAGPlanner(
+            repo, self.dbs, self.rucio, self.condor, self.settings, site_manager=sm,
+        )
+        self.dag_monitor = DAGMonitor(repo, self.condor)
+        self.output_manager = OutputManager(repo, self.dbs, self.rucio)
+        self.error_handler = ErrorHandler(repo, self.condor, self.settings, site_manager=sm)
+
     # ── Main Loop ───────────────────────────────────────────────
 
     async def main_loop(self):
-        """Main loop: query all non-terminal requests, evaluate each."""
+        """Main loop: create fresh session per cycle, evaluate all requests."""
         while True:
             try:
-                requests = await self.db.get_non_terminal_requests()
-                for request in requests:
-                    try:
-                        await self.evaluate_request(request)
-                    except Exception:
-                        logger.exception("Error evaluating %s", request.request_name)
+                async with self.session_factory() as session:
+                    repo = Repository(session)
+                    self._build_workers(repo)
+
+                    requests = await repo.get_non_terminal_requests()
+                    for request in requests:
+                        req_name = request.request_name  # capture before try
+                        try:
+                            await self.evaluate_request(request)
+                            await session.commit()
+                        except Exception:
+                            logger.exception("Error evaluating %s", req_name)
+                            await session.rollback()
+
+                    if not requests:
+                        logger.debug("No non-terminal requests")
+
                 await asyncio.sleep(self.settings.lifecycle_cycle_interval)
             except asyncio.CancelledError:
                 logger.info("Lifecycle manager shutting down")
