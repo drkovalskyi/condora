@@ -12,7 +12,7 @@ measures optimal parameters for the jobs. Next round should
 optimize. Keep track of all issues starting and running the test - we
 need to fix them.
 
-Workflow to use: cmsunified_task_B2G-Run3Summer23BPixwmLHEGS-06000__v1_T_250628_211038_1313
+Workflow to use: cmsunified_task_GEN-Run3Summer23wmLHEGS-00058__v1_T_230922_115553_5657
 
 To speed things up we are using test fraction of 0.01.
 
