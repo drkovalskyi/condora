@@ -21,6 +21,8 @@ python scripts/fetch-workflow-info.py \
 | B2G     | `B2G-Run3Summer23BPixwmLHEGS-06000`     | StepChain |     5 |     8 |  16 GB |   1.0     |        18 | AODSIM, MINIAODSIM, NANOAODSIM|
 | GEN-QCD | `GEN-RunIII2024Summer24GS-00002`        | StepChain |     5 |     8 |  16 GB |   0.0028  |   110,104 | AODSIM, MINIAODSIM, NANOAODSIM|
 | DY2L    | `GEN-Run3Summer22EEwmLHEGS-00600`       | StepChain |     5 |     4 |   8 GB |   0.1023  |    17,971 | AODSIM, MINIAODSIM, NANOAODSIM|
+| DY2Mu   | `GEN-Run3Summer23wmLHEGS-00058`          | StepChain |     5 |     4 |   8 GB |   1.0     |     2,255 | AODSIM, MINIAODSIM, NANOAODSIM|
+| JME     | `JME-Run3Summer22DRPremix-01052`         | StepChain |     4 |     4 |   8 GB |   1.0     |     2,074 | AODSIM, MINIAODSIM, NANOAODSIM|
 | BPH     | `BPH-RunIISummer20UL18GEN-00292`         | StepChain |     7 |    16 |  32 GB |   0.00034 |   171,637 | MINIAODSIM, NANOAODSIM, AODSIM|
 
 CPU-days = TimePerEvent x Multicore x RequestNumEvents / FilterEfficiency / 86400
@@ -168,6 +170,76 @@ of generated events is RequestNumEvents / FilterEfficiency.
 
 ---
 
+## DY2Mu
+
+**Request name**: `cmsunified_task_GEN-Run3Summer23wmLHEGS-00058__v1_T_230922_115553_5657`
+
+- **Type**: StepChain, 5-step (GEN)
+- **Multicore**: 4
+- **Memory**: 7,900 MB
+- **TimePerEvent**: 8.12 s
+- **SizePerEvent**: 1,492.7 KB
+- **FilterEfficiency**: 1.0
+- **RequestNumEvents**: 6,000,000
+- **CPU-days**: 2,255.0
+- **Output tiers**: AODSIM, MINIAODSIM, NANOAODSIM
+
+| Step | Name                                    | CMSSW         | Arch            | Keep | GlobalTag                              |
+|------|-----------------------------------------|---------------|-----------------|------|----------------------------------------|
+|    1 | GEN-Run3Summer23wmLHEGS-00058_0        | CMSSW_13_0_13 | el8_amd64_gcc11 | no   | 130X_mcRun3_2023_realistic_v14         |
+|    2 | GEN-Run3Summer23DRPremix-00035_0       | CMSSW_13_0_13 | el8_amd64_gcc11 | no   | 130X_mcRun3_2023_realistic_v14         |
+|    3 | GEN-Run3Summer23DRPremix-00035_1       | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_v14         |
+|    4 | GEN-Run3Summer23MiniAODv4-00035_0      | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_v14         |
+|    5 | GEN-Run3Summer23NanoAODv12-00035_0     | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_v14         |
+
+**Output datasets**:
+```
+/DYto2Mu_MLL-50to120_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23DRPremix-130X_mcRun3_2023_realistic_v14-v2/AODSIM
+/DYto2Mu_MLL-50to120_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23MiniAODv4-130X_mcRun3_2023_realistic_v14-v2/MINIAODSIM
+/DYto2Mu_MLL-50to120_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23NanoAODv12-130X_mcRun3_2023_realistic_v14-v2/NANOAODSIM
+```
+
+**What it exercises**: Medium-size wmLHEGS workflow (6M events, 2.3k CPU-days) with a single CMSSW version (13_0_13) across all 5 steps. No filter efficiency loss. Lower multicore (4 cores, 7.9 GB) than the 8-core workflows. Uses Run3Summer23 campaign (2023 conditions). Good middle-ground test — larger than B2G but still manageable, with uniform CMSSW simplifying debugging.
+
+**Tested modes**: not yet tested
+
+---
+
+## JME
+
+**Request name**: `cmsunified_task_JME-Run3Summer22DRPremix-01052__v1_T_231208_125126_372`
+
+- **Type**: StepChain, 4-step (input data)
+- **Multicore**: 4
+- **Memory**: 8,000 MB
+- **TimePerEvent**: 37.34 s
+- **SizePerEvent**: 1,930.8 KB
+- **FilterEfficiency**: 1.0
+- **InputDataset**: `/QCD_PT-15to30_TuneCP5_13p6TeV_pythia8/Run3Summer22GS-124X_mcRun3_2022_realistic_v12_ext1-v2/GEN-SIM`
+- **TotalInputEvents**: 1,200,000 (183 files, 698 GB)
+- **CPU-days**: 2,074.4
+- **Output tiers**: AODSIM, MINIAODSIM, NANOAODSIM
+
+| Step | Name                                    | CMSSW         | Arch            | Keep | GlobalTag                              |
+|------|-----------------------------------------|---------------|-----------------|------|----------------------------------------|
+|    1 | JME-Run3Summer22DRPremix-01052_0       | CMSSW_12_4_16 | el8_amd64_gcc10 | no   | 124X_mcRun3_2022_realistic_v12         |
+|    2 | JME-Run3Summer22DRPremix-01052_1       | CMSSW_12_4_16 | el8_amd64_gcc10 | yes  | 124X_mcRun3_2022_realistic_v12         |
+|    3 | JME-Run3Summer22MiniAODv4-01038_0      | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2022_realistic_v5          |
+|    4 | JME-Run3Summer22NanoAODv12-01038_0     | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2022_realistic_v5          |
+
+**Output datasets**:
+```
+/QCD_PT-15to30_TuneCP5_13p6TeV_pythia8/Run3Summer22DRPremix-124X_mcRun3_2022_realistic_v12_ext1-v2/AODSIM
+/QCD_PT-15to30_TuneCP5_13p6TeV_pythia8/Run3Summer22MiniAODv4-130X_mcRun3_2022_realistic_v5_ext1-v2/MINIAODSIM
+/QCD_PT-15to30_TuneCP5_13p6TeV_pythia8/Run3Summer22NanoAODv12-130X_mcRun3_2022_realistic_v5_ext1-v2/NANOAODSIM
+```
+
+**What it exercises**: Input-data workflow — processes an existing GEN-SIM dataset (1.2M events, 183 files, 698 GB) through DRPremix → AOD → MiniAOD → NanoAOD. First non-GEN test workflow: uses EventAwareLumiBased splitting (771 events/job) instead of event-count generation. Two CMSSW versions (12_4_16, 13_0_13). Lower multicore (4 cores, 8 GB). Tests file-based input handling, DBS file queries, and the DRPremix → AOD pipeline without the GEN-SIM step.
+
+**Tested modes**: not yet tested
+
+---
+
 ## BPH
 
 **Request name**: `cmsunified_task_BPH-RunIISummer20UL18GEN-00292__v1_T_250801_104414_1441`
@@ -216,5 +288,7 @@ of generated events is RequestNumEvents / FilterEfficiency.
 **Adaptive execution / memory tests**: Use **DY2L** — 10% filter efficiency (18k CPU-days) stresses adaptive splitting. Lower multicore (4 cores) tests non-standard resource profiles. Extensively characterized for memory scaling.
 
 **Latest CMSSW releases**: Use **GEN-QCD** — uses CMSSW 14.x and 15.x (gcc12 arch), exercises the newest software stack.
+
+**Input-data workflows**: Use **JME** — 4-step DRPremix workflow that processes an existing GEN-SIM dataset (1.2M events). Tests file-based input handling and EventAwareLumiBased splitting, unlike the GEN workflows which generate events from scratch.
 
 **Run 2 / SLC7 / long chains**: Use **BPH** — 7-step Run 2 UltraLegacy workflow with slc7 architecture, explicit HLT step, and 16-core jobs. Tests container compatibility and multi-version CMSSW chains.

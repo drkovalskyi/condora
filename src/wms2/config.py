@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     schedd_name: str | None = None  # explicit schedd; auto-discovered if None
 
     # DAG submission
-    submit_base_dir: str = "/data/wms2/submit"
+    submit_base_dir: str = "/mnt/shared/tmp/wms2"
     target_merged_size_kb: int = 4 * 1024 * 1024  # 4 GB in KB
 
     # Pileup site filtering — restrict pileup file list to replicas at these RSEs.

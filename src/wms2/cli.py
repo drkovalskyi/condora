@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--key", default=None, help="X.509 key path (alternative to --proxy)")
     imp.add_argument("--condor-host", default="localhost:9618", help="HTCondor collector")
     imp.add_argument("--schedd-name", default=None, help="Explicit schedd name")
-    imp.add_argument("--submit-dir", default="/tmp/wms2", help="DAG file output directory")
+    imp.add_argument("--submit-dir", default="/mnt/shared/tmp/wms2", help="DAG file output directory")
     imp.add_argument("--max-files", type=int, default=0, help="Limit DBS file query (0=all)")
     imp.add_argument("--files-per-job", type=int, default=None, help="Override splitting param")
     imp.add_argument("--events-per-job", type=int, default=None, help="Override events per job (GEN workflows)")
