@@ -7,6 +7,9 @@ document.addEventListener('alpine:init', () => {
         dag: null,
         history: [],
         jobs: [],
+        nodeLog: [],
+        showNodeLog: false,
+        nodeFilter: '',
         loading: true,
         error: null,
 
@@ -19,19 +22,48 @@ document.addEventListener('alpine:init', () => {
             try {
                 this.loading = true;
                 this.error = null;
-                const [d, h, j] = await Promise.all([
+                const [d, h, j, nl] = await Promise.all([
                     WMS2_API.getDAG(this.dagId),
                     WMS2_API.getDAGHistory(this.dagId).catch(() => []),
                     WMS2_API.getDAGJobs(this.dagId).catch(() => []),
+                    WMS2_API.getDAGNodeLog(this.dagId).catch(() => []),
                 ]);
                 this.dag = d;
                 this.history = h;
                 this.jobs = j;
+                this.nodeLog = nl;
             } catch (e) {
                 this.error = e.message;
             } finally {
                 this.loading = false;
             }
+        },
+
+        get nodeLogNodes() {
+            const names = new Set(this.nodeLog.map(e => e.node));
+            return [...names].sort();
+        },
+
+        get filteredNodeLog() {
+            const log = this.nodeLog.slice().reverse();
+            if (!this.nodeFilter) return log;
+            return log.filter(e => e.node === this.nodeFilter);
+        },
+
+        eventClass(ev) {
+            const ok = { submit: true, execute: true };
+            const bad = { held: true, aborted: true, shadow_exception: true };
+            const warn = { evicted: true, released: true };
+            if (ev.event === 'terminated') {
+                return ev.detail.startsWith('exit 0') ? 'event-ok' : 'event-bad';
+            }
+            if (ev.event === 'post_script') {
+                return ev.detail === 'exit 0' ? 'event-ok' : 'event-bad';
+            }
+            if (bad[ev.event]) return 'event-bad';
+            if (warn[ev.event]) return 'event-warn';
+            if (ok[ev.event]) return 'event-ok';
+            return '';
         },
 
         fmtWallTime(secs) {

@@ -71,6 +71,11 @@ h3 { font-size: 1.0rem; }
 .badge--info      { background: #06b6d4; color: #fff; }
 .badge--secondary { background: #6b7280; color: #fff; }
 
+/* Event log badges */
+.badge.event-ok   { background: #166534; color: #dcfce7; }
+.badge.event-bad  { background: #991b1b; color: #fef2f2; }
+.badge.event-warn { background: #92400e; color: #fef3c7; }
+
 /* Status cards grid */
 .status-cards {
     display: grid;

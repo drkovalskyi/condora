@@ -115,6 +115,7 @@
                             <tr>
                                 <th>Node</th>
                                 <th>Status</th>
+                                <th>Priority</th>
                                 <th>Wall Time</th>
                                 <th>Mem (MB)</th>
                                 <th>ReqMem</th>
@@ -128,6 +129,7 @@
                                 <tr>
                                     <td x-text="j.name" style="font-family:monospace; font-size:0.8rem;"></td>
                                     <td x-html="statusBadge(j.status)"></td>
+                                    <td x-text="j.priority != null ? j.priority : '—'"></td>
                                     <td x-text="fmtWallTime(j.wall_time)"></td>
                                     <td x-text="j.memory_mb != null ? j.memory_mb : '—'"></td>
                                     <td x-text="j.request_memory || '—'"></td>
@@ -148,6 +150,64 @@
                     <p style="opacity:0.6;">DAG completed — no active HTCondor jobs in queue.</p>
                 </div>
             </template>
+
+            <!-- Node Event Log (from DAGMan node log files) -->
+            <div class="section">
+                <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                    Node Event Log
+                    <span style="font-size:0.85rem; opacity:0.6;" x-text="'(' + nodeLog.length + ' events)'"></span>
+                    <button class="btn btn-sm"
+                            @click="showNodeLog = !showNodeLog"
+                            x-text="showNodeLog ? 'Hide' : 'Show'"
+                            style="margin-left:auto; font-size:0.75rem; padding:0.15rem 0.5rem;"></button>
+                </h3>
+                <template x-if="showNodeLog">
+                    <div>
+                        <template x-if="nodeLog.length === 0">
+                            <p style="opacity:0.6;">No node log files found (log appears after DAG submission).</p>
+                        </template>
+                        <template x-if="nodeLog.length > 0">
+                            <div>
+                                <div style="margin-bottom:0.5rem;">
+                                    <label style="font-size:0.85rem;">Filter by node:
+                                        <select x-model="nodeFilter" style="font-size:0.85rem; padding:0.15rem 0.3rem;">
+                                            <option value="">All nodes</option>
+                                            <template x-for="n in nodeLogNodes" :key="n">
+                                                <option :value="n" x-text="n"></option>
+                                            </template>
+                                        </select>
+                                    </label>
+                                    <span style="font-size:0.8rem; opacity:0.6; margin-left:0.5rem;"
+                                          x-text="filteredNodeLog.length + ' events'"></span>
+                                </div>
+                                <table class="timeline-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Node</th>
+                                            <th>Event</th>
+                                            <th>Detail</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <template x-for="(ev, idx) in filteredNodeLog" :key="idx">
+                                            <tr>
+                                                <td style="white-space:nowrap; font-size:0.8rem;" x-text="fmtDateTime(ev.timestamp)"></td>
+                                                <td style="font-family:monospace; font-size:0.8rem;" x-text="ev.node"></td>
+                                                <td>
+                                                    <span class="badge" :class="eventClass(ev)" x-text="ev.event"></span>
+                                                </td>
+                                                <td style="font-size:0.8rem; max-width:400px; overflow:hidden; text-overflow:ellipsis;"
+                                                    x-text="ev.detail"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
 
             <!-- History timeline -->
             <template x-if="history.length > 0">

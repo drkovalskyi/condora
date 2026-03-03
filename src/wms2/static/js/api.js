@@ -21,6 +21,21 @@ const WMS2_API = (() => {
         });
         if (!resp.ok) {
             const data = await resp.json().catch(() => null);
+            const err = new Error(data?.detail || `${resp.status} ${resp.statusText}`);
+            err.status = resp.status;
+            throw err;
+        }
+        return resp.json();
+    }
+
+    async function patch(path, body = {}) {
+        const resp = await fetch(prefix + path, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => null);
             throw new Error(data?.detail || `${resp.status} ${resp.statusText}`);
         }
         return resp.json();
@@ -38,6 +53,7 @@ const WMS2_API = (() => {
         getRequestErrors:  (name)       => get('/requests/' + encodeURIComponent(name) + '/errors'),
 
         // Request actions
+        updatePriorityProfile: (name, body) => patch('/requests/' + encodeURIComponent(name) + '/priority-profile', body),
         stopRequest:       (name, reason) => post('/requests/' + encodeURIComponent(name) + '/stop', { reason }),
         releaseRequest:    (name)       => post('/requests/' + encodeURIComponent(name) + '/release'),
         failRequest:       (name)       => post('/requests/' + encodeURIComponent(name) + '/fail'),
@@ -54,9 +70,11 @@ const WMS2_API = (() => {
         getDAG:            (id)         => get('/dags/' + encodeURIComponent(id)),
         getDAGHistory:     (id)         => get('/dags/' + encodeURIComponent(id) + '/history'),
         getDAGJobs:        (id)         => get('/dags/' + encodeURIComponent(id) + '/jobs'),
+        getDAGNodeLog:     (id)         => get('/dags/' + encodeURIComponent(id) + '/node-log'),
 
         // Lifecycle
         getLifecycleSettings: ()        => get('/lifecycle/settings'),
+        updateSettings:    (body)       => patch('/lifecycle/settings', body),
         restartLifecycle:  ()           => post('/lifecycle/restart'),
 
         // Import
