@@ -5,16 +5,14 @@
 
 ## Objectives
 
-Main objective: make sure we can process a real workflow using WMS2 in
-a fully automated mode from scratch using default splitting. The first
-round should have only one work unit created automatically, which
-measures optimal parameters for the jobs. Next round should
-optimize. Keep track of all issues starting and running the test - we
-need to fix them.
+We are commissioning WMS2 as a service with real CMSSW requests taking
+configuration from ReqMgr2. All processing is done in a fully
+automated mode. We need to test for failures and make sure that DAG
+configuration is optimized after the first pilot round of processing.
+Keep track of all issues - we need to fix them. We need reliable
+solutions, not kludges.
 
-Workflow to use: cmsunified_task_GEN-Run3Summer23wmLHEGS-00058__v1_T_230922_115553_5657
-
-To speed things up we are using test fraction of 0.01.
+To speed things up we are using test fraction.
 
 ### Service mode
 
@@ -92,6 +90,12 @@ memory 7900 → 5672 MB, round 1 automatically planned (10 WUs, 80 jobs).
 - Multi-round adaptive optimization (8T → 4T → 2T with memory tuning)
 - **Service mode**: per-cycle DB sessions, explicit commit/rollback, CLI `--no-monitor`
 - **Multi-round service autonomy**: round 0 → adaptive optimization → round 1 planning
+- **Grid stageout**: xrdcp-based stageout via storage.json LFN→PFN resolution
+  - `WMS2_STAGEOUT_MODE=grid` — proc/merge/cleanup use XRootD (or gfal-copy/WebDAV)
+  - `WMS2_STAGEOUT_MODE=local` (default) — filesystem copy (backward compatible)
+  - Supports CMS storage.json formats: prefix, rules, chained rules
+  - Self-contained `wms2_stageout.py` utility transferred to worker nodes
+  - Local XRootD server at T2_LOCAL_DEV for integration testing
 
 ### Test commands
 

@@ -72,7 +72,10 @@ class Settings(BaseSettings):
     x509_proxy: str | None = os.environ.get("X509_USER_PROXY")
     ssl_ca_path: str = "/etc/grid-security/certificates"
 
-    # Output staging — LFN→PFN mapping: PFN = local_pfn_prefix + LFN
+    # Output staging — LFN→PFN mapping
+    # stageout_mode: "local" = filesystem copy (PFN = local_pfn_prefix + LFN)
+    #                "grid"  = resolve via storage.json (xrdcp/gfal-copy)
+    stageout_mode: str = "local"
     local_pfn_prefix: str = "/mnt/shared"
 
     # Pilot profiling (optional functional test)

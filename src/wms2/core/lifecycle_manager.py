@@ -328,13 +328,18 @@ class RequestLifecycleManager:
 
     async def main_loop(self):
         """Main loop: create fresh session per cycle, evaluate all requests."""
+        logger.info("Lifecycle manager main_loop started")
         while True:
             try:
+                logger.debug("Lifecycle cycle starting")
                 async with self.session_factory() as session:
                     repo = Repository(session)
                     self._build_workers(repo)
 
                     requests = await repo.get_non_terminal_requests()
+                    logger.info(
+                        "Lifecycle cycle: %d non-terminal request(s)", len(requests),
+                    )
                     for request in requests:
                         req_name = request.request_name  # capture before try
                         try:
@@ -348,9 +353,6 @@ class RequestLifecycleManager:
                             # trigger a lazy load that fails with
                             # MissingGreenlet. Break and restart the cycle.
                             break
-
-                    if not requests:
-                        logger.debug("No non-terminal requests")
 
                 await asyncio.sleep(self.settings.lifecycle_cycle_interval)
             except asyncio.CancelledError:
@@ -551,12 +553,14 @@ class RequestLifecycleManager:
                     )
 
             if result.status == DAGStatus.COMPLETED:
-                # Check blocks before transitioning
+                # Best-effort check on output block archival
                 if self.output_manager:
                     try:
                         if not await self.output_manager.all_blocks_archived(workflow.id):
-                            # Stay ACTIVE, retry on next cycle
-                            return
+                            logger.debug(
+                                "Blocks not yet archived for %s — proceeding anyway",
+                                request.request_name,
+                            )
                     except Exception:
                         logger.warning(
                             "Block archive check failed for %s — proceeding with completion",
@@ -593,7 +597,10 @@ class RequestLifecycleManager:
             if self.output_manager:
                 try:
                     if not await self.output_manager.all_blocks_archived(workflow.id):
-                        return
+                        logger.debug(
+                            "Blocks not yet archived for %s — proceeding anyway",
+                            request.request_name,
+                        )
                 except Exception:
                     logger.warning(
                         "Block archive check failed for %s — proceeding with completion",
@@ -1098,9 +1105,10 @@ class RequestLifecycleManager:
     async def transition(self, request, new_status: RequestStatus):
         """Record a state transition with timestamp."""
         now = datetime.now(timezone.utc)
+        old_status = request.status if isinstance(request.status, str) else request.status.value
         old_transitions = request.status_transitions or []
         new_transition = {
-            "from": request.status if isinstance(request.status, str) else request.status.value,
+            "from": old_status,
             "to": new_status.value,
             "timestamp": now.isoformat(),
         }
@@ -1112,7 +1120,5 @@ class RequestLifecycleManager:
         )
         logger.info(
             "Request %s: %s -> %s",
-            request.request_name,
-            request.status if isinstance(request.status, str) else request.status.value,
-            new_status.value,
+            request.request_name, old_status, new_status.value,
         )

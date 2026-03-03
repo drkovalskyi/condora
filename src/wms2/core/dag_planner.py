@@ -403,6 +403,7 @@ class DAGPlanner:
             pileup_files=pileup_files or None,
             job_priority=job_priority,
             extra_classads=config.get("extra_classads"),
+            stageout_mode=self.settings.stageout_mode,
         )
 
         # 8. Count totals
@@ -740,6 +741,7 @@ def _generate_dag_files(
     pileup_files: dict[str, list[str]] | None = None,
     job_priority: int = 0,
     extra_classads: dict[str, str] | None = None,
+    stageout_mode: str = "local",
 ) -> str:
     """Generate all DAG files on disk. Returns path to outer workflow.dag."""
     submit_path = Path(submit_dir)
@@ -756,6 +758,7 @@ def _generate_dag_files(
     _write_proc_script(str(submit_path / "wms2_proc.sh"))
     _write_merge_script(str(submit_path / "wms2_merge.py"))
     _write_cleanup_script(str(submit_path / "wms2_cleanup.py"))
+    _write_stageout_utility(str(submit_path / "wms2_stageout.py"))
 
     # Generate outer DAG
     outer_lines = [
@@ -795,6 +798,7 @@ def _generate_dag_files(
             pileup_files=pileup_files,
             job_priority=job_priority,
             extra_classads=extra_classads,
+            stageout_mode=stageout_mode,
         )
 
     # Category throttling for merge groups
@@ -824,6 +828,7 @@ def _generate_group_dag(
     pileup_files: dict[str, list[str]] | None = None,
     job_priority: int = 0,
     extra_classads: dict[str, str] | None = None,
+    stageout_mode: str = "local",
 ) -> None:
     """Generate a single merge group sub-DAG (group.dag) + submit files."""
     exe = executables or {}
@@ -904,6 +909,7 @@ def _generate_group_dag(
                 for d in output_datasets
             ],
             "local_pfn_prefix": local_pfn_prefix,
+            "stageout_mode": stageout_mode,
             "group_index": merge_group.group_index,
             "max_merge_size": rp.get("max_merge_size", 4 * 1024**3),
         }
@@ -913,6 +919,11 @@ def _generate_group_dag(
     # Add output_info.json to proc transfer files so proc jobs can stage out
     if output_info_path and os.path.isfile(output_info_path):
         proc_transfer_files.append(output_info_path)
+
+    # Add wms2_stageout.py to transfer files for grid mode
+    stageout_utility_path = str(submit_dir / "wms2_stageout.py")
+    if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
+        proc_transfer_files.append(stageout_utility_path)
 
     # Add pileup_files.json to proc transfer files for PSet injection
     pileup_json_path = str(group_dir / "pileup_files.json")
@@ -1002,6 +1013,8 @@ def _generate_group_dag(
     manifest_path = str(group_dir / "manifest.json")
     if os.path.isfile(manifest_path):
         merge_transfer.append(manifest_path)
+    if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
+        merge_transfer.append(stageout_utility_path)
     _write_submit_file(
         str(group_dir / "merge.sub"),
         executable=merge_exe,
@@ -1010,6 +1023,7 @@ def _generate_group_dag(
         memory_mb=memory_mb,
         disk_kb=disk_kb,
         transfer_input_files=merge_transfer or None,
+        environment=proc_env or None,
         priority=job_priority,
         extra_classads=extra_classads,
     )
@@ -1032,12 +1046,15 @@ def _generate_group_dag(
     # it exists by the time the cleanup node runs (merge → cleanup dependency).
     cleanup_manifest_path = str(group_dir / "cleanup_manifest.json")
     cleanup_transfer.append(cleanup_manifest_path)
+    if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
+        cleanup_transfer.append(stageout_utility_path)
     _write_submit_file(
         str(group_dir / "cleanup.sub"),
         executable=cleanup_exe,
         arguments=cleanup_args,
         description="cleanup node",
         transfer_input_files=cleanup_transfer or None,
+        environment=proc_env or None,
         priority=job_priority,
         extra_classads=extra_classads,
     )
@@ -1512,8 +1529,34 @@ with open('$OUTPUT_INFO') as f:
     info = json.load(f)
 
 pfn_prefix = info.get('local_pfn_prefix', '/mnt/shared')
+stageout_mode = info.get('stageout_mode', 'local')
 group_index = info['group_index']
 datasets = info.get('output_datasets', [])
+
+# Grid mode: import stageout utility and resolve write protocol
+grid_cmd = None
+siteconfig = None
+if stageout_mode == 'grid':
+    import wms2_stageout
+    siteconfig = os.environ.get('SITECONFIG_PATH', '/opt/cms/siteconf')
+    # Use _siteconf copy if available (inside container working dir)
+    if os.path.isdir('_siteconf') and os.path.isfile('_siteconf/storage.json'):
+        siteconfig = os.path.abspath('_siteconf')
+    print(f'Grid stageout via siteconfig: {siteconfig}')
+
+def stage_file(local_path, lfn):
+    \"\"\"Stage a local file to its LFN destination.\"\"\"
+    if stageout_mode == 'grid':
+        pfn, cmd = wms2_stageout.resolve_write_pfn(lfn, siteconfig)
+        pfn_dir = os.path.dirname(pfn)
+        wms2_stageout.mkdir_p(pfn_dir, cmd)
+        wms2_stageout.upload_file(local_path, pfn, cmd)
+    else:
+        pfn_dir = os.path.join(pfn_prefix, os.path.dirname(lfn).lstrip('/'))
+        os.makedirs(pfn_dir, exist_ok=True)
+        dest = os.path.join(pfn_dir, os.path.basename(lfn))
+        shutil.copy2(local_path, dest)
+        print(f'Staged: {local_path} -> {dest}')
 
 # Read output manifest to get file -> tier mapping
 manifest_file = 'proc_${NODE_INDEX}_outputs.json'
@@ -1562,34 +1605,24 @@ for filename, finfo in file_map.items():
         print(f'WARNING: No unmerged LFN for tier {tier}, skipping {filename}')
         continue
 
-    lfn_dir = f'{unmerged_base}/{group_index:06d}'
-    pfn_dir = os.path.join(pfn_prefix, lfn_dir.lstrip('/'))
-    os.makedirs(pfn_dir, exist_ok=True)
-    dest = os.path.join(pfn_dir, filename)
-    shutil.copy2(filename, dest)
-    print(f'Staged: {filename} -> {dest}')
+    lfn = f'{unmerged_base}/{group_index:06d}/{filename}'
+    stage_file(filename, lfn)
 
 # Also stage the output manifest and metrics file
 if os.path.isfile(manifest_file):
     for ds in datasets:
         unmerged_base = ds.get('unmerged_lfn_base', '')
         if unmerged_base:
-            pfn_dir = os.path.join(pfn_prefix, f'{unmerged_base}/{group_index:06d}'.lstrip('/'))
-            os.makedirs(pfn_dir, exist_ok=True)
-            dest = os.path.join(pfn_dir, 'proc_${NODE_INDEX}_outputs.json')
-            shutil.copy2(manifest_file, dest)
+            lfn_base = f'{unmerged_base}/{group_index:06d}'
+            stage_file(manifest_file, f'{lfn_base}/proc_${NODE_INDEX}_outputs.json')
             # Stage metrics file alongside manifest
             metrics_file = 'proc_${NODE_INDEX}_metrics.json'
             if os.path.isfile(metrics_file):
-                mdest = os.path.join(pfn_dir, metrics_file)
-                shutil.copy2(metrics_file, mdest)
-                print(f'Staged metrics: {metrics_file} -> {mdest}')
+                stage_file(metrics_file, f'{lfn_base}/{metrics_file}')
             # Stage cgroup metrics file
             cgroup_file = 'proc_${NODE_INDEX}_cgroup.json'
             if os.path.isfile(cgroup_file):
-                cdest = os.path.join(pfn_dir, cgroup_file)
-                shutil.copy2(cgroup_file, cdest)
-                print(f'Staged cgroup: {cgroup_file} -> {cdest}')
+                stage_file(cgroup_file, f'{lfn_base}/{cgroup_file}')
             break
 "
 }
@@ -3031,9 +3064,29 @@ with open(output_info_path) as f:
 
 group_dir = os.path.dirname(output_info_path)
 local_pfn_prefix = info.get("local_pfn_prefix", info.get("output_base_dir", "/mnt/shared"))
+stageout_mode = info.get("stageout_mode", "local")
 group_index = info["group_index"]
 datasets = info.get("output_datasets", [])
 max_merge_size = info.get("max_merge_size", 4 * 1024**3)
+
+# Grid mode: import stageout utility
+stageout = None
+siteconfig = None
+grid_write_cmd = None
+if stageout_mode == "grid":
+    try:
+        import wms2_stageout
+        stageout = wms2_stageout
+        siteconfig = os.environ.get("SITECONFIG_PATH", "/opt/cms/siteconf")
+        if os.path.isdir("_siteconf") and os.path.isfile("_siteconf/storage.json"):
+            siteconfig = os.path.abspath("_siteconf")
+        # Probe the write command once
+        _probe_lfn = datasets[0].get("unmerged_lfn_base", "/store/test") + "/probe"
+        _, grid_write_cmd = stageout.resolve_write_pfn(_probe_lfn, siteconfig)
+        print(f"Grid stageout mode: command={grid_write_cmd}, siteconfig={siteconfig}")
+    except Exception as e:
+        print(f"WARNING: Grid stageout init failed ({e}), falling back to local", file=sys.stderr)
+        stageout_mode = "local"
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -3059,13 +3112,21 @@ def cmssw_env_cmd(scram_arch, inner_cmd):
     return [CMSSW_ENV_PATH, "--cmsos", arch_os, "--"] + list(inner_cmd)
 
 
-def batch_by_size(files, max_size):
-    """Group files into batches, each <= max_size total bytes."""
+def batch_by_size(files, max_size, file_sizes=None):
+    """Group files into batches, each <= max_size total bytes.
+
+    file_sizes: optional dict mapping filename to size (for remote files).
+    """
     batches = []
     current_batch = []
     current_size = 0
     for f in files:
-        fsize = os.path.getsize(f)
+        if file_sizes and f in file_sizes:
+            fsize = file_sizes[f]
+        elif os.path.isfile(f):
+            fsize = os.path.getsize(f)
+        else:
+            fsize = 0  # Unknown size for remote files; put all in one batch
         if current_batch and current_size + fsize > max_size:
             batches.append(current_batch)
             current_batch = [f]
@@ -3086,7 +3147,8 @@ def write_merge_pset(pset_path, input_files, output_file, is_nano=False, is_dqmi
         "process = mergeProcess(",
     ]
     for f in input_files:
-        pfn = f if f.startswith("file:") else f"file:{f}"
+        # root:// URLs are passed as-is (CMSSW reads XRootD natively)
+        pfn = f if (f.startswith("file:") or f.startswith("root://")) else f"file:{f}"
         lines.append(f"    {pfn!r},")
     out_pfn = output_file if output_file.startswith("file:") else f"file:{output_file}"
     lines.append(f"    output_file={out_pfn!r},")
@@ -3305,8 +3367,13 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
         out_file = os.path.join(out_dir, f"merged_{output_tier}{suffix}.root")
 
         if len(batch) == 1:
-            # Single file — just copy, no merge needed
-            shutil.copy2(batch[0], out_file)
+            # Single file — just copy/download, no merge needed
+            src = batch[0]
+            if src.startswith("root://") or src.startswith("davs://"):
+                # Remote file: download via stageout utility
+                stageout.download_file(src, out_file, grid_write_cmd)
+            else:
+                shutil.copy2(src, out_file)
             size = os.path.getsize(out_file)
             print(f"  Batch {batch_idx}: single file copied -> {out_file} ({size} bytes)")
             merged_files.append(out_file)
@@ -3400,13 +3467,62 @@ def merge_text_files(datasets, text_files, pfn_prefix, group_index):
 
 # Read proc output manifests and ROOT files from unmerged site storage
 # Each dataset has an unmerged_lfn_base; files are at PFN = pfn_prefix + unmerged_lfn/{group:06d}/
-unmerged_root_files = []  # (pfn_path, tier_info)
+unmerged_root_files = []  # local paths or root:// URLs
 unmerged_manifests = []
 unmerged_metrics = []
 has_unmerged = any(ds.get("unmerged_lfn_base") for ds in datasets)
 
-if has_unmerged:
-    # Read from unmerged site storage
+if has_unmerged and stageout_mode == "grid" and stageout is not None:
+    # Grid mode: discover files via remote listing, download JSON, resolve ROOT file URLs
+    for ds in datasets:
+        unmerged_base = ds.get("unmerged_lfn_base", "")
+        if not unmerged_base:
+            continue
+        unmerged_lfn_dir = f"{unmerged_base}/{group_index:06d}"
+        write_pfn, write_cmd = stageout.resolve_write_pfn(unmerged_lfn_dir + "/probe", siteconfig)
+        write_pfn_dir = os.path.dirname(write_pfn)
+        print(f"Grid listing: {write_pfn_dir} (cmd={write_cmd})")
+        try:
+            entries = stageout.list_dir(write_pfn_dir, write_cmd)
+        except Exception as e:
+            print(f"WARNING: Grid list failed for {write_pfn_dir}: {e}")
+            continue
+
+        # Download JSON files (manifests, metrics) to local working dir
+        for entry in entries:
+            if entry.endswith("_outputs.json"):
+                lfn = f"{unmerged_lfn_dir}/{entry}"
+                pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
+                local = os.path.join(os.getcwd(), entry)
+                stageout.download_file(pfn, local, cmd)
+                unmerged_manifests.append(local)
+            elif entry.endswith("_metrics.json") or entry.endswith("_cgroup.json"):
+                lfn = f"{unmerged_lfn_dir}/{entry}"
+                pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
+                local = os.path.join(os.getcwd(), entry)
+                stageout.download_file(pfn, local, cmd)
+                if entry.endswith("_metrics.json"):
+                    unmerged_metrics.append(local)
+
+        # Resolve ROOT file read URLs (prefer XRootD for direct CMSSW access)
+        for entry in entries:
+            if entry.endswith(".root"):
+                lfn = f"{unmerged_lfn_dir}/{entry}"
+                try:
+                    read_pfn, is_direct = stageout.resolve_read_pfn(lfn, siteconfig)
+                    if is_direct:
+                        # CMSSW can read root:// directly — no download needed
+                        unmerged_root_files.append(read_pfn)
+                    else:
+                        # Download to local temp dir
+                        local = os.path.join(os.getcwd(), entry)
+                        stageout.download_file(read_pfn, local, grid_write_cmd)
+                        unmerged_root_files.append(local)
+                except Exception as e:
+                    print(f"WARNING: Could not resolve read PFN for {lfn}: {e}")
+
+elif has_unmerged:
+    # Local mode: read from unmerged site storage via filesystem
     for ds in datasets:
         unmerged_base = ds.get("unmerged_lfn_base", "")
         if not unmerged_base:
@@ -3529,30 +3645,63 @@ if root_files:
 
         # Merged output goes to merged site storage via LFN→PFN
         merged_lfn_dir = f"{merged_base}/{group_index:06d}"
-        out_dir = lfn_to_pfn(local_pfn_prefix, merged_lfn_dir)
 
-        print(f"Tier {ds_tier}: {len(tier_files)} files to merge (step_index={step_idx})")
-        print(f"  Output: {out_dir}")
-        os.makedirs(out_dir, exist_ok=True)
+        if stageout_mode == "grid" and stageout is not None:
+            # Grid mode: write to local temp dir, then upload
+            out_dir = os.path.join(work_dir, f"_merged_{ds_tier}")
+            os.makedirs(out_dir, exist_ok=True)
+            print(f"Tier {ds_tier}: {len(tier_files)} files to merge (step_index={step_idx})")
+            print(f"  Local output: {out_dir} (will upload to grid)")
 
-        if manifest.get("mode") in ("cmssw", "simulator"):
-            merge_root_tier(ds_tier, tier_files, step_idx, out_dir, manifest, work_dir)
+            if manifest.get("mode") in ("cmssw", "simulator"):
+                merge_root_tier(ds_tier, tier_files, step_idx, out_dir, manifest, work_dir)
+            else:
+                print(f"  Non-CMSSW mode: downloading {len(tier_files)} ROOT files to {out_dir}")
+                for rf in tier_files:
+                    dest = os.path.join(out_dir, os.path.basename(rf))
+                    if rf.startswith("root://") or rf.startswith("davs://"):
+                        stageout.download_file(rf, dest, grid_write_cmd)
+                    elif os.path.isfile(rf):
+                        shutil.copy2(rf, dest)
+                    print(f"    Fetched: {dest}")
+
+            # Upload merged files to grid
+            print(f"  Uploading merged output to grid...")
+            for fname in sorted(os.listdir(out_dir)):
+                local_file = os.path.join(out_dir, fname)
+                if os.path.isfile(local_file):
+                    lfn = f"{merged_lfn_dir}/{fname}"
+                    pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
+                    pfn_dir = os.path.dirname(pfn)
+                    stageout.mkdir_p(pfn_dir, cmd)
+                    stageout.upload_file(local_file, pfn, cmd)
         else:
-            # Synthetic mode: just copy files
-            print(f"  Non-CMSSW mode: copying {len(tier_files)} ROOT files to {out_dir}")
-            for rf in tier_files:
-                dest = os.path.join(out_dir, os.path.basename(rf))
-                shutil.copy2(rf, dest)
-                print(f"    Copied: {dest}")
+            # Local mode: write directly to local PFN path
+            out_dir = lfn_to_pfn(local_pfn_prefix, merged_lfn_dir)
+            print(f"Tier {ds_tier}: {len(tier_files)} files to merge (step_index={step_idx})")
+            print(f"  Output: {out_dir}")
+            os.makedirs(out_dir, exist_ok=True)
 
-        # Track unmerged dir for cleanup
+            if manifest.get("mode") in ("cmssw", "simulator"):
+                merge_root_tier(ds_tier, tier_files, step_idx, out_dir, manifest, work_dir)
+            else:
+                # Synthetic mode: just copy files
+                print(f"  Non-CMSSW mode: copying {len(tier_files)} ROOT files to {out_dir}")
+                for rf in tier_files:
+                    dest = os.path.join(out_dir, os.path.basename(rf))
+                    shutil.copy2(rf, dest)
+                    print(f"    Copied: {dest}")
+
+        # Track unmerged dir for cleanup (store LFN paths for portability)
         if unmerged_base:
-            unmerged_pfn_dir = lfn_to_pfn(local_pfn_prefix, f"{unmerged_base}/{group_index:06d}")
-            cleanup_dirs.add(unmerged_pfn_dir)
+            cleanup_dirs.add(f"{unmerged_base}/{group_index:06d}")
 
     # Write cleanup_manifest.json for the cleanup job (always, even if empty,
     # because cleanup.sub references it in transfer_input_files)
-    cleanup_manifest = {"unmerged_dirs": sorted(cleanup_dirs)}
+    cleanup_manifest = {
+        "unmerged_dirs": sorted(cleanup_dirs),
+        "stageout_mode": stageout_mode,
+    }
     cleanup_path = os.path.join(group_dir, "cleanup_manifest.json")
     with open(cleanup_path, "w") as f:
         json.dump(cleanup_manifest, f, indent=2)
@@ -3625,7 +3774,11 @@ if root_files:
         tier = ds.get("data_tier", "")
         merged_base = ds.get("merged_lfn_base", "")
         ds_name = ds.get("dataset_name", "")
-        merged_dir = lfn_to_pfn(local_pfn_prefix, f"{merged_base}/{group_index:06d}")
+        # In grid mode, merged files are in local temp dir; in local mode, at PFN path
+        if stageout_mode == "grid":
+            merged_dir = os.path.join(work_dir, f"_merged_{tier}")
+        else:
+            merged_dir = lfn_to_pfn(local_pfn_prefix, f"{merged_base}/{group_index:06d}")
         if os.path.isdir(merged_dir):
             files = []
             for f in sorted(os.listdir(merged_dir)):
@@ -3658,7 +3811,12 @@ def _write_cleanup_script(path: str) -> None:
 """wms2_cleanup.py — WMS2 cleanup job.
 
 Reads cleanup_manifest.json (written by the merge job) and removes
-unmerged directories from site storage.
+unmerged directories from site storage. Supports both local (filesystem)
+and grid (xrdcp/gfal-copy) modes.
+
+Cleanup manifest paths may be:
+- LFN paths (/store/...) — resolved via local_pfn_prefix or grid stageout
+- Legacy absolute PFN paths (/mnt/shared/...) — used directly (backward compat)
 """
 import json
 import os
@@ -3675,6 +3833,15 @@ while i < len(sys.argv):
         i += 2
     else:
         i += 1
+
+# Load output_info.json for stageout config
+local_pfn_prefix = "/mnt/shared"
+stageout_mode = "local"
+if output_info_path and os.path.isfile(output_info_path):
+    with open(output_info_path) as f:
+        output_info = json.load(f)
+    local_pfn_prefix = output_info.get("local_pfn_prefix", "/mnt/shared")
+    stageout_mode = output_info.get("stageout_mode", "local")
 
 # Find cleanup_manifest.json in the group dir
 cleanup_manifest_path = None
@@ -3696,19 +3863,462 @@ with open(cleanup_manifest_path) as f:
     manifest = json.load(f)
 
 unmerged_dirs = manifest.get("unmerged_dirs", [])
+# Override stageout_mode from manifest if present (written by merge)
+stageout_mode = manifest.get("stageout_mode", stageout_mode)
+
 if not unmerged_dirs:
     print("No unmerged directories to clean up")
     sys.exit(0)
 
-print(f"Cleaning up {len(unmerged_dirs)} unmerged directories...")
+# Grid mode: import stageout utility
+stageout = None
+siteconfig = None
+if stageout_mode == "grid":
+    try:
+        import wms2_stageout
+        stageout = wms2_stageout
+        siteconfig = os.environ.get("SITECONFIG_PATH", "/opt/cms/siteconf")
+        if os.path.isdir("_siteconf") and os.path.isfile("_siteconf/storage.json"):
+            siteconfig = os.path.abspath("_siteconf")
+        print(f"Grid cleanup mode: siteconfig={siteconfig}")
+    except Exception as e:
+        print(f"WARNING: Grid stageout init failed ({e}), falling back to local", file=sys.stderr)
+        stageout_mode = "local"
+
+
+def is_lfn(path):
+    """Check if path is an LFN (starts with /store/)."""
+    return path.startswith("/store/")
+
+
+print(f"Cleaning up {len(unmerged_dirs)} unmerged directories (mode={stageout_mode})...")
 for d in unmerged_dirs:
-    if os.path.isdir(d):
-        shutil.rmtree(d)
-        print(f"  Removed: {d}")
+    if stageout_mode == "grid" and stageout is not None and is_lfn(d):
+        # Grid mode: resolve LFN → PFN and remove remotely
+        try:
+            pfn, cmd = stageout.resolve_write_pfn(d + "/probe", siteconfig)
+            pfn_dir = os.path.dirname(pfn)
+            stageout.remove_path(pfn_dir, cmd, recursive=True)
+            print(f"  Removed (grid): {pfn_dir}")
+        except Exception as e:
+            print(f"  WARNING: Grid cleanup failed for {d}: {e}")
+    elif is_lfn(d):
+        # Local mode with LFN path: resolve to local PFN
+        local_dir = os.path.join(local_pfn_prefix, d.lstrip("/"))
+        if os.path.isdir(local_dir):
+            shutil.rmtree(local_dir)
+            print(f"  Removed: {local_dir}")
+        else:
+            print(f"  Already gone: {local_dir}")
     else:
-        print(f"  Already gone: {d}")
+        # Legacy absolute PFN path (backward compat)
+        if os.path.isdir(d):
+            shutil.rmtree(d)
+            print(f"  Removed: {d}")
+        else:
+            print(f"  Already gone: {d}")
 
 print("Cleanup complete")
+''')
+    os.chmod(path, 0o755)
+
+
+def _write_stageout_utility(path: str) -> None:
+    """Generate wms2_stageout.py — self-contained stageout utility for worker nodes.
+
+    This module is transferred to worker nodes and provides:
+    - CMS storage.json parsing (prefix and rules formats)
+    - site-local-config.xml <stage-out> parsing
+    - LFN→PFN resolution for read and write protocols
+    - File operations (upload/download/list/remove/mkdir) via xrdcp/gfal-copy/cp
+    """
+    _write_file(path, '''#!/usr/bin/env python3
+"""wms2_stageout.py — Self-contained stageout utility for WMS2 worker nodes.
+
+Resolves LFN→PFN using CMS storage.json and site-local-config.xml, then performs
+file operations via the appropriate protocol command (xrdcp, gfal-copy, or cp).
+
+No WMS2 imports — stdlib only. Transferred to worker nodes by DAG planner.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+
+
+# ── Storage.json parsing ──────────────────────────────────────
+
+def parse_storage_json(path):
+    """Parse CMS storage.json. Returns list of volume dicts.
+
+    Each volume has: site, volume, protocols, type, rse.
+    Each protocol has: protocol, access, prefix (and optionally rules/chain).
+    """
+    with open(path) as f:
+        return json.load(f)
+
+
+def _resolve_prefix_format(lfn, prefix):
+    """Resolve LFN using simple prefix format: PFN = prefix + LFN."""
+    # Prefix may or may not end with /; LFN starts with /store/...
+    if prefix.endswith("/"):
+        return prefix + lfn.lstrip("/")
+    return prefix + lfn
+
+
+def _resolve_rules_format(lfn, rules, all_protocols=None):
+    """Resolve LFN using regex rules format (FNAL-style).
+
+    rules is a list of {"lfn": regex, "pfn": replacement, "chain": optional} dicts.
+    Replacement uses $1, $2, etc. for capture groups (CMS convention).
+    all_protocols: full protocol list from same volume (for chain resolution).
+    """
+    for rule in rules:
+        pattern = rule.get("lfn", "")
+        replacement = rule.get("pfn", "")
+        chain_target = rule.get("chain")
+        if not pattern:
+            continue
+
+        # If this rule has a chain, first resolve through the chain target
+        input_path = lfn
+        if chain_target and all_protocols:
+            chained = _resolve_via_chain(lfn, chain_target, all_protocols)
+            if chained:
+                input_path = chained
+            else:
+                continue  # Chain resolution failed, skip this rule
+
+        m = re.match(pattern, input_path)
+        if m:
+            result = replacement
+            groups = m.groups()
+            for i, g in enumerate(groups, 1):
+                result = result.replace(f"${i}", g)
+            return result
+    return None
+
+
+def _resolve_via_chain(lfn, chain_protocol, all_protocols):
+    """Resolve LFN through a chain target protocol (e.g., 'pnfs' virtual protocol)."""
+    for proto in all_protocols:
+        if proto.get("protocol") == chain_protocol:
+            if "rules" in proto:
+                return _resolve_rules_format(lfn, proto["rules"])
+            elif "prefix" in proto:
+                return _resolve_prefix_format(lfn, proto["prefix"])
+    return None
+
+
+def resolve_lfn_to_pfn(lfn, protocol_entry, all_protocols=None):
+    """Resolve LFN→PFN using a single protocol entry from storage.json.
+
+    Handles 'prefix' format (simple concatenation), 'rules' format (regex-based),
+    and chained rules. Returns PFN string or None if no match.
+    all_protocols: full protocol list from same volume (needed for chain resolution).
+    """
+    if "prefix" in protocol_entry:
+        return _resolve_prefix_format(lfn, protocol_entry["prefix"])
+    if "rules" in protocol_entry:
+        return _resolve_rules_format(lfn, protocol_entry["rules"], all_protocols)
+    return None
+
+
+# ── Site-local-config.xml parsing ─────────────────────────────
+
+def parse_stageout_config(slc_path):
+    """Parse <stage-out> section from site-local-config.xml.
+
+    Returns list of dicts: [{volume, protocol, command}, ...]
+    """
+    try:
+        tree = ET.parse(slc_path)
+        methods = []
+        for method in tree.findall(".//stage-out/method"):
+            methods.append({
+                "volume": method.get("volume", ""),
+                "protocol": method.get("protocol", ""),
+                "command": method.get("command", "xrdcp"),
+            })
+        return methods
+    except Exception:
+        return []
+
+
+# ── High-level PFN resolution ─────────────────────────────────
+
+def _find_siteconf_files(siteconfig_path):
+    """Locate storage.json and site-local-config.xml from SITECONFIG_PATH."""
+    storage_json = os.path.join(siteconfig_path, "storage.json")
+    slc = os.path.join(siteconfig_path, "JobConfig", "site-local-config.xml")
+    return storage_json, slc
+
+
+def resolve_write_pfn(lfn, siteconfig_path):
+    """Resolve LFN to write PFN using site-local-config <stage-out> + storage.json.
+
+    Returns (pfn, command) tuple. command is one of: xrdcp, gfal-copy, cp.
+    Raises ValueError if resolution fails.
+    """
+    storage_json_path, slc_path = _find_siteconf_files(siteconfig_path)
+    volumes = parse_storage_json(storage_json_path)
+    stageout_methods = parse_stageout_config(slc_path)
+
+    if not stageout_methods:
+        raise ValueError(f"No <stage-out> methods in {slc_path}")
+
+    for method in stageout_methods:
+        target_volume = method["volume"]
+        target_protocol = method["protocol"]
+        command = method["command"]
+
+        # Find matching volume and protocol in storage.json
+        for vol in volumes:
+            if vol.get("volume") != target_volume:
+                continue
+            all_protos = vol.get("protocols", [])
+            for proto in all_protos:
+                if proto.get("protocol") != target_protocol:
+                    continue
+                # Prefer writable access levels
+                access = proto.get("access", "")
+                if "rw" in access or "write" in access or "local" in access:
+                    pfn = resolve_lfn_to_pfn(lfn, proto, all_protos)
+                    if pfn:
+                        return pfn, command
+
+        # Fallback: try any protocol in the volume matching the name
+        for vol in volumes:
+            if vol.get("volume") != target_volume:
+                continue
+            all_protos = vol.get("protocols", [])
+            for proto in all_protos:
+                if proto.get("protocol") != target_protocol:
+                    continue
+                pfn = resolve_lfn_to_pfn(lfn, proto, all_protos)
+                if pfn:
+                    return pfn, command
+
+    raise ValueError(
+        f"Could not resolve write PFN for {lfn} "
+        f"(methods={stageout_methods}, volumes={[v.get('volume') for v in volumes]})"
+    )
+
+
+def resolve_read_pfn(lfn, siteconfig_path):
+    """Resolve LFN to read PFN, preferring XRootD protocol for direct CMSSW access.
+
+    Returns (pfn, is_direct) tuple. is_direct=True means CMSSW can read it
+    natively (root:// URL) without downloading first.
+    """
+    storage_json_path, slc_path = _find_siteconf_files(siteconfig_path)
+    volumes = parse_storage_json(storage_json_path)
+    stageout_methods = parse_stageout_config(slc_path)
+
+    # Get the stageout volume name to search the right volume
+    target_volume = stageout_methods[0]["volume"] if stageout_methods else None
+
+    # Search for an XRootD protocol in the same volume (any access level)
+    for vol in volumes:
+        if target_volume and vol.get("volume") != target_volume:
+            continue
+        all_protos = vol.get("protocols", [])
+        for proto in all_protos:
+            if proto.get("protocol") == "XRootD":
+                pfn = resolve_lfn_to_pfn(lfn, proto, all_protos)
+                if pfn and pfn.startswith("root://"):
+                    return pfn, True
+
+    # Fallback: use the write protocol (will need download)
+    try:
+        pfn, _cmd = resolve_write_pfn(lfn, siteconfig_path)
+        is_direct = pfn.startswith("root://")
+        return pfn, is_direct
+    except ValueError:
+        raise ValueError(f"Could not resolve read PFN for {lfn}")
+
+
+# ── File operations ───────────────────────────────────────────
+
+def _run_cmd(cmd, retries=3, retry_delay=10, description=""):
+    """Run a shell command with retries."""
+    for attempt in range(retries):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=3600,
+            )
+            if result.returncode == 0:
+                return result
+            msg = f"{description} failed (attempt {attempt + 1}/{retries}): {result.stderr.strip()}"
+            print(msg, file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            msg = f"{description} timed out (attempt {attempt + 1}/{retries})"
+            print(msg, file=sys.stderr)
+        except Exception as e:
+            msg = f"{description} error (attempt {attempt + 1}/{retries}): {e}"
+            print(msg, file=sys.stderr)
+        if attempt < retries - 1:
+            time.sleep(retry_delay * (attempt + 1))
+    raise RuntimeError(f"{description} failed after {retries} attempts")
+
+
+def upload_file(local_path, pfn, command):
+    """Upload local file to remote PFN."""
+    if command == "cp":
+        dest_dir = os.path.dirname(pfn)
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(local_path, pfn)
+        print(f"  cp: {local_path} -> {pfn}")
+    elif command == "xrdcp":
+        _run_cmd(
+            ["xrdcp", "-f", local_path, pfn],
+            description=f"xrdcp upload {os.path.basename(local_path)}",
+        )
+        print(f"  xrdcp: {local_path} -> {pfn}")
+    elif command == "gfal-copy":
+        src = f"file://{os.path.abspath(local_path)}"
+        _run_cmd(
+            ["gfal-copy", "-f", src, pfn],
+            description=f"gfal-copy upload {os.path.basename(local_path)}",
+        )
+        print(f"  gfal-copy: {local_path} -> {pfn}")
+    else:
+        raise ValueError(f"Unknown stageout command: {command}")
+
+
+def download_file(pfn, local_path, command):
+    """Download remote PFN to local file."""
+    if command == "cp":
+        shutil.copy2(pfn, local_path)
+    elif command == "xrdcp":
+        _run_cmd(
+            ["xrdcp", "-f", pfn, local_path],
+            description=f"xrdcp download {os.path.basename(pfn)}",
+        )
+    elif command == "gfal-copy":
+        dest = f"file://{os.path.abspath(local_path)}"
+        _run_cmd(
+            ["gfal-copy", "-f", pfn, dest],
+            description=f"gfal-copy download {os.path.basename(pfn)}",
+        )
+    else:
+        raise ValueError(f"Unknown stageout command: {command}")
+
+
+def list_dir(pfn_dir, command):
+    """List files in a remote directory. Returns list of basenames."""
+    if command == "cp":
+        if os.path.isdir(pfn_dir):
+            return sorted(os.listdir(pfn_dir))
+        return []
+    elif command == "xrdcp":
+        # Extract host and path from root://host//path
+        m = re.match(r"(root://[^/]+/)(/.*)", pfn_dir)
+        if not m:
+            return []
+        host_prefix, path = m.group(1), m.group(2)
+        result = _run_cmd(
+            ["xrdfs", host_prefix.rstrip("/"), "ls", path],
+            retries=2, description=f"xrdfs ls {path}",
+        )
+        entries = []
+        for line in result.stdout.strip().split("\\n"):
+            line = line.strip()
+            if line:
+                entries.append(os.path.basename(line))
+        return sorted(entries)
+    elif command == "gfal-copy":
+        result = _run_cmd(
+            ["gfal-ls", pfn_dir],
+            retries=2, description=f"gfal-ls {pfn_dir}",
+        )
+        entries = []
+        for line in result.stdout.strip().split("\\n"):
+            line = line.strip()
+            if line:
+                entries.append(os.path.basename(line))
+        return sorted(entries)
+    return []
+
+
+def remove_path(pfn, command, recursive=False):
+    """Remove a remote file or directory."""
+    if command == "cp":
+        if recursive and os.path.isdir(pfn):
+            shutil.rmtree(pfn)
+        elif os.path.exists(pfn):
+            os.remove(pfn)
+    elif command == "xrdcp":
+        m = re.match(r"(root://[^/]+/)(/.*)", pfn)
+        if not m:
+            return
+        host, path = m.group(1).rstrip("/"), m.group(2)
+        if recursive:
+            # List and remove each file, then rmdir
+            try:
+                result = _run_cmd(
+                    ["xrdfs", host, "ls", path],
+                    retries=1, description=f"xrdfs ls {path}",
+                )
+                for line in result.stdout.strip().split("\\n"):
+                    entry = line.strip()
+                    if entry:
+                        _run_cmd(
+                            ["xrdfs", host, "rm", entry],
+                            retries=1, description=f"xrdfs rm {entry}",
+                        )
+                _run_cmd(
+                    ["xrdfs", host, "rmdir", path],
+                    retries=1, description=f"xrdfs rmdir {path}",
+                )
+            except RuntimeError:
+                pass  # Best effort
+        else:
+            _run_cmd(
+                ["xrdfs", host, "rm", path],
+                retries=2, description=f"xrdfs rm {path}",
+            )
+    elif command == "gfal-copy":
+        cmd = ["gfal-rm"]
+        if recursive:
+            cmd.append("-r")
+        cmd.append(pfn)
+        _run_cmd(cmd, retries=2, description=f"gfal-rm {pfn}")
+
+
+def mkdir_p(pfn, command):
+    """Create remote directory (including parents)."""
+    if command == "cp":
+        os.makedirs(pfn, exist_ok=True)
+    elif command == "xrdcp":
+        m = re.match(r"(root://[^/]+/)(/.*)", pfn)
+        if not m:
+            return
+        host, path = m.group(1).rstrip("/"), m.group(2)
+        _run_cmd(
+            ["xrdfs", host, "mkdir", "-p", path],
+            retries=2, description=f"xrdfs mkdir -p {path}",
+        )
+    elif command == "gfal-copy":
+        _run_cmd(
+            ["gfal-mkdir", "-p", pfn],
+            retries=2, description=f"gfal-mkdir -p {pfn}",
+        )
+
+
+if __name__ == "__main__":
+    # Simple test: resolve a write PFN
+    if len(sys.argv) >= 3:
+        lfn = sys.argv[1]
+        siteconf = sys.argv[2]
+        pfn, cmd = resolve_write_pfn(lfn, siteconf)
+        print(f"LFN:     {lfn}")
+        print(f"PFN:     {pfn}")
+        print(f"Command: {cmd}")
 ''')
     os.chmod(path, 0o755)
 
