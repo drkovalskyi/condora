@@ -83,7 +83,7 @@ document.addEventListener('alpine:init', () => {
                 if (e.status === 409) {
                     const m = e.message.match(/status:\s*(\w+)/);
                     const status = m ? m[1] : 'unknown';
-                    if (status === 'failed') {
+                    if (status === 'failed' || status === 'aborted') {
                         this.existingStatus = status;
                         this.showReplaceDialog = true;
                     } else {
