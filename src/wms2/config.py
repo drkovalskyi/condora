@@ -1,3 +1,5 @@
+import os
+
 from pydantic_settings import BaseSettings
 
 
@@ -66,9 +68,8 @@ class Settings(BaseSettings):
     # Input file limit (0 = no limit, >0 = cap DBS file query)
     max_input_files: int = 0
 
-    # X.509 certificates
-    cert_file: str | None = None
-    key_file: str | None = None
+    # X.509 proxy (for CMS grid services). Reads from X509_USER_PROXY if not set.
+    x509_proxy: str | None = os.environ.get("X509_USER_PROXY")
     ssl_ca_path: str = "/etc/grid-security/certificates"
 
     # Output staging — LFN→PFN mapping: PFN = local_pfn_prefix + LFN

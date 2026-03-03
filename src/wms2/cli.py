@@ -116,8 +116,7 @@ def _make_ssl_context(cert_file: str, key_file: str, ca_path: str) -> ssl.SSLCon
 def build_settings(args: argparse.Namespace, cert_file: str, key_file: str) -> Settings:
     """Build Settings from CLI args. Uses wrapper scripts by default."""
     overrides: dict = {
-        "cert_file": cert_file,
-        "key_file": key_file,
+        "x509_proxy": cert_file,
         "condor_host": args.condor_host,
         "submit_base_dir": args.submit_dir,
         "max_input_files": args.max_files,
@@ -142,17 +141,18 @@ def _build_adapters(settings: Settings, ssl_ctx: ssl.SSLContext):
     from wms2.adapters.reqmgr2 import ReqMgr2Client
     from wms2.adapters.rucio import RucioClient
 
+    proxy = settings.x509_proxy
     reqmgr = ReqMgr2Client(
-        settings.reqmgr2_url, settings.cert_file, settings.key_file,
+        settings.reqmgr2_url, proxy, proxy,
         verify=ssl_ctx,
     )
     dbs = DBSClient(
-        settings.dbs_url, settings.cert_file, settings.key_file,
+        settings.dbs_url, proxy, proxy,
         verify=ssl_ctx,
     )
     rucio = RucioClient(
         settings.rucio_url, settings.rucio_account,
-        settings.cert_file, settings.key_file,
+        proxy, proxy,
         verify=ssl_ctx,
     )
     condor = HTCondorAdapter(settings.condor_host, settings.schedd_name)

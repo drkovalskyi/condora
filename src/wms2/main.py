@@ -38,7 +38,8 @@ def _build_adapters(settings: Settings):
     """Build adapters: real if cert is configured, mock otherwise."""
     condor = _build_condor(settings)
 
-    if settings.cert_file and settings.key_file:
+    proxy = settings.x509_proxy
+    if proxy:
         import os
         import ssl
 
@@ -55,15 +56,15 @@ def _build_adapters(settings: Settings):
             ssl_ctx = ssl.create_default_context(cafile=ca_path)
         else:
             ssl_ctx = ssl.create_default_context()
-        ssl_ctx.load_cert_chain(settings.cert_file, settings.key_file)
+        ssl_ctx.load_cert_chain(proxy, proxy)
 
-        reqmgr = ReqMgr2Client(settings.reqmgr2_url, settings.cert_file, settings.key_file, verify=ssl_ctx)
-        dbs = DBSClient(settings.dbs_url, settings.cert_file, settings.key_file, verify=ssl_ctx)
+        reqmgr = ReqMgr2Client(settings.reqmgr2_url, proxy, proxy, verify=ssl_ctx)
+        dbs = DBSClient(settings.dbs_url, proxy, proxy, verify=ssl_ctx)
         rucio = RucioClient(
             settings.rucio_url, settings.rucio_account,
-            settings.cert_file, settings.key_file, verify=ssl_ctx,
+            proxy, proxy, verify=ssl_ctx,
         )
-        cric = CRICClient(settings.cric_url, settings.cert_file, settings.key_file, verify=ssl_ctx)
+        cric = CRICClient(settings.cric_url, proxy, proxy, verify=ssl_ctx)
     else:
         reqmgr = MockReqMgrAdapter()
         dbs = MockDBSAdapter()

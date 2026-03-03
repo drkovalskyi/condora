@@ -237,8 +237,26 @@ async def import_request(
     submit_dir = os.path.join(settings.submit_base_dir, body.request_name)
     os.makedirs(submit_dir, exist_ok=True)
     sandbox_path = os.path.join(submit_dir, "sandbox.tar.gz")
+
+    # Build SSL context for ConfigCache PSet fetch (CMSSW mode)
+    sandbox_ssl_ctx = None
+    proxy = settings.x509_proxy
+    if proxy:
+        import ssl
+        ca_path = settings.ssl_ca_path
+        if os.path.isdir(ca_path):
+            sandbox_ssl_ctx = ssl.create_default_context(capath=ca_path)
+        elif os.path.isfile(ca_path):
+            sandbox_ssl_ctx = ssl.create_default_context(cafile=ca_path)
+        else:
+            sandbox_ssl_ctx = ssl.create_default_context()
+        sandbox_ssl_ctx.load_cert_chain(proxy, proxy)
+
     try:
-        create_sandbox(sandbox_path, reqdata, mode=body.sandbox_mode)
+        create_sandbox(
+            sandbox_path, reqdata, mode=body.sandbox_mode,
+            ssl_context=sandbox_ssl_ctx, configcache_url=settings.configcache_url,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to create sandbox: {exc}")
     config_data["sandbox_path"] = sandbox_path
