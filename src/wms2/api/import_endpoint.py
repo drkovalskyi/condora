@@ -101,25 +101,26 @@ async def import_request(
 
     # Check if request already exists
     existing = await repo.get_request(body.request_name)
+    reimportable = ("failed", "aborted")
     if existing:
         if not body.replace:
-            if existing.status == "failed":
+            if existing.status in reimportable:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Request already exists in WMS2 (status: {existing.status})",
+                    detail=f"Request already exists in WMS2 (status: {existing.status}). "
+                           f"Re-run with --replace to replace it.",
                 )
             else:
                 raise HTTPException(
                     status_code=409,
                     detail=f"Request already exists in WMS2 (status: {existing.status}). "
-                           f"Only failed requests can be re-imported. "
-                           f"Use the Fail action on the request page first.",
+                           f"Only failed/aborted requests can be re-imported.",
                 )
-        if existing.status != "failed":
+        if existing.status not in reimportable:
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot replace request in {existing.status} state. "
-                       f"Only failed requests can be re-imported.",
+                       f"Only failed/aborted requests can be re-imported.",
             )
         # Clean up old request and all related rows
         workflow = await repo.get_workflow_by_request(body.request_name)
