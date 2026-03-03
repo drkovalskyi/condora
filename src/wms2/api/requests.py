@@ -254,11 +254,11 @@ async def fail_request(
     if not existing:
         raise HTTPException(status_code=404, detail="Request not found")
 
-    allowed = (RequestStatus.HELD.value, RequestStatus.PARTIAL.value)
+    allowed = (RequestStatus.HELD.value, RequestStatus.PARTIAL.value, RequestStatus.PAUSED.value)
     if existing.status not in allowed:
         raise HTTPException(
             status_code=400,
-            detail=f"Can only fail requests in held or partial state, "
+            detail=f"Can only fail requests in held, partial, or paused state, "
                    f"current status: {existing.status}",
         )
 
@@ -328,11 +328,15 @@ async def restart_request(
     if not existing:
         raise HTTPException(status_code=404, detail="Request not found")
 
-    allowed = (RequestStatus.HELD.value, RequestStatus.PARTIAL.value)
+    allowed = (
+        RequestStatus.HELD.value, RequestStatus.PARTIAL.value,
+        RequestStatus.ABORTED.value, RequestStatus.FAILED.value,
+        RequestStatus.PAUSED.value,
+    )
     if existing.status not in allowed:
         raise HTTPException(
             status_code=400,
-            detail=f"Can only restart requests in held or partial state, "
+            detail=f"Can only restart requests in held, partial, paused, aborted, or failed state, "
                    f"current status: {existing.status}",
         )
 

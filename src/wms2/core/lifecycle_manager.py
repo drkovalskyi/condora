@@ -689,12 +689,13 @@ class RequestLifecycleManager:
         await self.transition(request, RequestStatus.QUEUED)
 
     async def fail_request(self, request_name: str):
-        """Fail a HELD or PARTIAL request: kill running DAG, mark DAGs/blocks
-        as failed, transition request to FAILED."""
+        """Fail a HELD, PARTIAL, or PAUSED request: kill running DAG, mark
+        DAGs/blocks as failed, transition request to FAILED."""
         request = await self.db.get_request(request_name)
         if not request:
             raise ValueError(f"Request {request_name} not found")
-        allowed = (RequestStatus.HELD.value, RequestStatus.PARTIAL.value)
+        allowed = (RequestStatus.HELD.value, RequestStatus.PARTIAL.value,
+                   RequestStatus.PAUSED.value)
         if request.status not in allowed:
             raise ValueError(
                 f"Cannot fail request in {request.status} state; "
@@ -747,11 +748,15 @@ class RequestLifecycleManager:
         request = await self.db.get_request(request_name)
         if not request:
             raise ValueError(f"Request {request_name} not found")
-        allowed = (RequestStatus.HELD.value, RequestStatus.PARTIAL.value)
+        allowed = (
+            RequestStatus.HELD.value, RequestStatus.PARTIAL.value,
+            RequestStatus.ABORTED.value, RequestStatus.FAILED.value,
+            RequestStatus.PAUSED.value,
+        )
         if request.status not in allowed:
             raise ValueError(
                 f"Cannot restart request in {request.status} state; "
-                f"must be held or partial"
+                f"must be held, partial, paused, aborted, or failed"
             )
 
         # 1. Compute new version
@@ -790,7 +795,10 @@ class RequestLifecycleManager:
         )
 
         # 4. Fail old request (condor_rm, mark DAGs/blocks, → FAILED)
-        await self.fail_request(request_name)
+        #    Skip if already terminal (aborted/failed)
+        terminal = (RequestStatus.ABORTED.value, RequestStatus.FAILED.value)
+        if request.status not in terminal:
+            await self.fail_request(request_name)
 
         logger.info(
             "Restarted %s → %s (processing_version=%d)",

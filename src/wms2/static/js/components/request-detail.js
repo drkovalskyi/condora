@@ -87,10 +87,10 @@ document.addEventListener('alpine:init', () => {
             return this.request && ['held', 'paused'].includes(this.request.status);
         },
         get canFail() {
-            return this.request && ['held', 'partial'].includes(this.request.status);
+            return this.request && ['held', 'partial', 'paused'].includes(this.request.status);
         },
         get canRestart() {
-            return this.request && ['held', 'partial'].includes(this.request.status);
+            return this.request && ['held', 'partial', 'paused', 'aborted', 'failed'].includes(this.request.status);
         },
         get hasActions() {
             return this.canStop || this.canRelease || this.canFail || this.canRestart;
