@@ -49,6 +49,16 @@ class CondorAdapter(ABC):
         """
         return None
 
+    async def query_held_jobs(self, cluster_id: str) -> list[dict]:
+        """Query held payload jobs under a DAGMan hierarchy."""
+        return []
+
+    async def edit_job_attr(self, constraint: str, attr: str, value: str) -> None:
+        """Edit a ClassAd attribute on jobs matching constraint."""
+
+    async def release_jobs(self, constraint: str) -> None:
+        """Release held jobs matching constraint."""
+
 
 class ReqMgrAdapter(ABC):
     @abstractmethod

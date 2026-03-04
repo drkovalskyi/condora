@@ -44,6 +44,20 @@ class MockCondorAdapter(CondorAdapter):
         self.calls.append(("ping_schedd", (schedd_name,), {}))
         return True
 
+    async def query_held_jobs(self, cluster_id: str) -> list[dict]:
+        self.calls.append(("query_held_jobs", (cluster_id,), {}))
+        return getattr(self, "_held_jobs", [])
+
+    async def edit_job_attr(self, constraint: str, attr: str, value: str) -> None:
+        self.calls.append(("edit_job_attr", (constraint, attr, value), {}))
+
+    async def release_jobs(self, constraint: str) -> None:
+        self.calls.append(("release_jobs", (constraint,), {}))
+
+    async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
+        self.calls.append(("count_dag_jobs", (cluster_id,), {}))
+        return None
+
 
 class MockReqMgrAdapter(ReqMgrAdapter):
     def __init__(self, requests: dict[str, dict] | None = None):

@@ -505,7 +505,7 @@ async def run_import(args: argparse.Namespace) -> None:
 
             # 3. Monitor (with rescue loop + multi-round adaptive lifecycle)
             print(f"[3/5] Monitoring DAG (poll every {args.poll_interval}s)...")
-            dm = DAGMonitor(repo, condor)
+            dm = DAGMonitor(repo, condor, settings=settings)
             # OutputManager with mock DBS/Rucio for output lifecycle
             om = OutputManager(repo, _MockDBS(), _MockRucio())
             eh = ErrorHandler(repo, condor, settings)

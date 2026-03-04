@@ -133,6 +133,7 @@ class HTCondorAdapter(CondorAdapter):
             "CumulativeRemoteUserCpu", "CumulativeRemoteSysCpu",
             "RequestCpus", "RequestMemory", "JobStartDate", "ServerTime",
             "MATCH_GLIDEIN_CMSSite", "JobPrio",
+            "HoldReason", "HoldReasonCode",
         ]
         ads = self._schedd.query(constraint=constraint, projection=projection)
 
@@ -160,7 +161,7 @@ class HTCondorAdapter(CondorAdapter):
                     100.0 * (cpu_user + cpu_sys) / (wall_time * cpus), 1
                 )
 
-            jobs.append({
+            job = {
                 "name": ad.get("DAGNodeName", "?"),
                 "status": status,
                 "wall_time": wall_time,
@@ -172,7 +173,11 @@ class HTCondorAdapter(CondorAdapter):
                 "request_memory": int(ad.get("RequestMemory", 0)),
                 "site": ad.get("MATCH_GLIDEIN_CMSSite"),
                 "priority": int(ad.get("JobPrio", 0)),
-            })
+            }
+            if status_int == 5:
+                job["hold_reason"] = str(ad.get("HoldReason", ""))
+                job["hold_reason_code"] = int(ad.get("HoldReasonCode", 0))
+            jobs.append(job)
 
         jobs.sort(key=lambda j: j["name"])
         return jobs
@@ -230,3 +235,54 @@ class HTCondorAdapter(CondorAdapter):
 
     async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
         return await asyncio.to_thread(self._count_dag_jobs_sync, cluster_id)
+
+    def _query_held_jobs_sync(self, cluster_id: str) -> list[dict]:
+        """Query held payload jobs under a DAGMan hierarchy."""
+        sub_dagman_ads = self._schedd.query(
+            constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
+            projection=["ClusterId"],
+        )
+        if not sub_dagman_ads:
+            return []
+
+        sub_ids = [str(int(ad["ClusterId"])) for ad in sub_dagman_ads]
+        parts = " || ".join(f"DAGManJobId == {sid}" for sid in sub_ids)
+        constraint = f"({parts}) && JobUniverse =!= 7 && JobStatus == 5"
+
+        projection = [
+            "ClusterId", "ProcId", "DAGNodeName",
+            "HoldReasonCode", "HoldReason",
+            "RequestMemory", "RequestCpus", "Iwd",
+        ]
+        ads = self._schedd.query(constraint=constraint, projection=projection)
+
+        return [
+            {
+                "cluster_id": int(ad["ClusterId"]),
+                "proc_id": int(ad.get("ProcId", 0)),
+                "node_name": ad.get("DAGNodeName", ""),
+                "hold_reason_code": int(ad.get("HoldReasonCode", 0)),
+                "hold_reason": str(ad.get("HoldReason", "")),
+                "request_memory": int(ad.get("RequestMemory", 0)),
+                "request_cpus": int(ad.get("RequestCpus", 1)),
+                "iwd": str(ad.get("Iwd", "")),
+            }
+            for ad in ads
+        ]
+
+    async def query_held_jobs(self, cluster_id: str) -> list[dict]:
+        return await asyncio.to_thread(self._query_held_jobs_sync, cluster_id)
+
+    def _edit_job_attr_sync(self, constraint: str, attr: str, value: str) -> None:
+        """Edit a ClassAd attribute on jobs matching constraint."""
+        self._schedd.edit(constraint, attr, value)
+
+    async def edit_job_attr(self, constraint: str, attr: str, value: str) -> None:
+        return await asyncio.to_thread(self._edit_job_attr_sync, constraint, attr, value)
+
+    def _release_jobs_sync(self, constraint: str) -> None:
+        """Release held jobs matching constraint."""
+        self._schedd.act(htcondor2.JobAction.Release, constraint)
+
+    async def release_jobs(self, constraint: str) -> None:
+        await asyncio.to_thread(self._release_jobs_sync, constraint)

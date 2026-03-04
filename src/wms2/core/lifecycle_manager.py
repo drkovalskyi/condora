@@ -320,7 +320,7 @@ class RequestLifecycleManager:
         self.dag_planner = DAGPlanner(
             repo, self.dbs, self.rucio, self.condor, self.settings, site_manager=sm,
         )
-        self.dag_monitor = DAGMonitor(repo, self.condor)
+        self.dag_monitor = DAGMonitor(repo, self.condor, settings=self.settings)
         self.output_manager = OutputManager(repo, self.dbs, self.rucio)
         self.error_handler = ErrorHandler(repo, self.condor, self.settings, site_manager=sm)
 

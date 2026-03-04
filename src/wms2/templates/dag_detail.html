@@ -122,12 +122,16 @@
                                 <th>CPU Eff</th>
                                 <th>CPUs</th>
                                 <th>Site</th>
+                                <th>Details</th>
                             </tr>
                         </thead>
                         <tbody>
                             <template x-for="j in jobs" :key="j.name">
                                 <tr>
-                                    <td x-text="j.name" style="font-family:monospace; font-size:0.8rem;"></td>
+                                    <td style="font-family:monospace; font-size:0.8rem;">
+                                        <a href="#" @click.prevent="jumpToNodeLog(j.name)"
+                                           x-text="j.name" style="text-decoration:underline; cursor:pointer;"></a>
+                                    </td>
                                     <td x-html="statusBadge(j.status)"></td>
                                     <td x-text="j.priority != null ? j.priority : '—'"></td>
                                     <td x-text="fmtWallTime(j.wall_time)"></td>
@@ -136,6 +140,9 @@
                                     <td x-text="j.cpu_efficiency != null ? j.cpu_efficiency + '%' : '—'"></td>
                                     <td x-text="j.cpus"></td>
                                     <td x-text="j.site || '—'"></td>
+                                    <td style="font-size:0.8rem; max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                        :title="j.hold_reason || ''"
+                                        x-text="j.hold_reason || '—'"></td>
                                 </tr>
                             </template>
                         </tbody>
@@ -245,7 +252,7 @@
             </template>
 
             <!-- Node Event Log (from DAGMan node log files) -->
-            <div class="section">
+            <div class="section" data-section="node-event-log">
                 <h3 style="display:flex; align-items:center; gap:0.5rem;">
                     Node Event Log
                     <span style="font-size:0.85rem; opacity:0.6;" x-text="'(' + nodeLog.length + ' events)'"></span>

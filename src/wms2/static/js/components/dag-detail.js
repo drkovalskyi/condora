@@ -154,6 +154,15 @@ document.addEventListener('alpine:init', () => {
             return Math.min(100, 100 * this.wuCompleted / this.dag.total_work_units);
         },
 
+        jumpToNodeLog(nodeName) {
+            this.showNodeLog = true;
+            this.nodeFilter = nodeName;
+            this.$nextTick(() => {
+                const el = document.querySelector('[data-section="node-event-log"]');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+            });
+        },
+
         get nodeCountsByType() {
             if (!this.dag || !this.dag.node_counts) return [];
             const nc = this.dag.node_counts;

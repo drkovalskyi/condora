@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -42,9 +43,11 @@ class DAGPollResult:
 class DAGMonitor:
     """Monitors running DAGs by parsing .status files and querying HTCondor."""
 
-    def __init__(self, repository: Repository, condor_adapter: CondorAdapter):
+    def __init__(self, repository: Repository, condor_adapter: CondorAdapter,
+                 settings=None):
         self.db = repository
         self.condor = condor_adapter
+        self.settings = settings
 
     async def poll_dag(self, dag) -> DAGPollResult:
         """Poll a DAG's status. Main entry point called by lifecycle manager."""
@@ -90,6 +93,10 @@ class DAGMonitor:
                 wu["group_name"] for wu in newly_completed
             ]
         await self.db.update_dag(dag.id, **update_kwargs)
+
+        # Handle cgroup OOM holds (HoldReasonCode 34)
+        if inner_summary.held > 0 and dag.dagman_cluster_id:
+            await self._handle_held_oom_jobs(dag)
 
         # Update workflow node counts
         if dag.workflow_id:
@@ -333,6 +340,71 @@ class DAGMonitor:
         if ep and isinstance(ep, dict):
             return ep.get("total", 0)
         return 0
+
+    async def _handle_held_oom_jobs(self, dag) -> None:
+        """Detect jobs held for cgroup OOM (HoldReasonCode 34), bump memory, release."""
+        held_jobs = await self.condor.query_held_jobs(dag.dagman_cluster_id)
+        if not held_jobs:
+            return
+
+        max_memory_per_core = 4000  # default fallback
+        if self.settings:
+            max_memory_per_core = self.settings.max_memory_per_core
+
+        for job in held_jobs:
+            if job["hold_reason_code"] != 34:
+                continue
+
+            old_mem = job["request_memory"]
+            cpus = job["request_cpus"]
+            cap = max_memory_per_core * cpus
+            new_mem = min(old_mem * 3 // 2, cap)
+
+            if new_mem <= old_mem:
+                logger.warning(
+                    "OOM job %s.%s already at memory cap %d MB, cannot bump further",
+                    job["cluster_id"], job["proc_id"], old_mem,
+                )
+                continue
+
+            node_name = job["node_name"]
+            cluster_id = job["cluster_id"]
+            proc_id = job["proc_id"]
+            constraint = f"ClusterId == {cluster_id} && ProcId == {proc_id}"
+
+            # Edit the live job's RequestMemory
+            await self.condor.edit_job_attr(constraint, "RequestMemory", str(new_mem))
+
+            # Update the .sub file on disk so retries use the new value
+            iwd = job.get("iwd", "")
+            if iwd:
+                sub_path = os.path.join(iwd, f"{node_name}.sub")
+                self._update_sub_file_memory(sub_path, new_mem)
+
+            # Release the held job
+            await self.condor.release_jobs(constraint)
+
+            logger.info(
+                "OOM recovery: bumped %s (%d.%d) memory %d → %d MB (cap %d), released",
+                node_name, cluster_id, proc_id, old_mem, new_mem, cap,
+            )
+
+    @staticmethod
+    def _update_sub_file_memory(sub_path: str, new_mem: int) -> None:
+        """Update request_memory in a .sub file on disk."""
+        if not os.path.exists(sub_path):
+            logger.warning("Sub file not found for memory update: %s", sub_path)
+            return
+        with open(sub_path) as f:
+            content = f.read()
+        updated = re.sub(
+            r"request_memory\s*=\s*\d+",
+            f"request_memory = {new_mem}",
+            content,
+        )
+        if updated != content:
+            with open(sub_path, "w") as f:
+                f.write(updated)
 
     async def _handle_dag_completion(self, dag) -> DAGPollResult:
         """Handle a DAG whose DAGMan process has exited."""
