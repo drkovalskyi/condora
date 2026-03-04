@@ -6,6 +6,32 @@
 
 ---
 
+## 2026-03-04 — Fix rescue DAG submission (submit original DAG, not rescue file)
+
+### What was done
+
+Fixed a bug where rescue DAG submission failed because WMS2 was passing the rescue
+file path (e.g. `workflow.dag.rescue001`) to `Submit.from_dag()`. DAGMan rescue
+files are not standalone DAGs — they only contain `DONE` markers for completed
+nodes. DAGMan's `AutoRescue` mechanism expects the *original* DAG file to be
+resubmitted; it finds and applies the rescue file automatically.
+
+**Symptoms**: DAGMan exited immediately with `ERROR: Node mg_000000 not found!`
+because the rescue file referenced nodes only defined in the original `workflow.dag`.
+
+**Fix**: Both `lifecycle_manager.py` and `cli.py` now submit `dag.dag_file_path`
+(the original workflow.dag) instead of `dag.rescue_dag_path`. DAGMan's `-AutoRescue 1`
+flag (the default) handles the rest.
+
+### Verification
+
+- Rescue DAG for round 13 (DAG `7c4672c9`) submitted successfully after fix
+- DAGMan correctly applied `rescue001`, skipping 6 completed merge groups
+- proc_000073 retry succeeded through all 5 steps including DRPremix with pileup
+- Round 13 completed, lifecycle manager autonomously planned and started round 14
+
+---
+
 ## 2026-03-04 — Add configurable pileup remote read via global redirector
 
 ### What was done

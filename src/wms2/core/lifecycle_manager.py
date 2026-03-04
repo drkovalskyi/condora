@@ -424,10 +424,11 @@ class RequestLifecycleManager:
                                   DAGStatus.RUNNING.value):
                     await self.transition(request, RequestStatus.ACTIVE)
                     return
-                # Rescue DAG re-admission
+                # Rescue DAG re-admission — submit the *original* DAG file;
+                # DAGMan's AutoRescue finds and applies the rescue file automatically.
                 if dag.rescue_dag_path and dag.status == DAGStatus.READY.value:
                     cluster_id, schedd = await self.condor.submit_dag(
-                        dag.rescue_dag_path or dag.dag_file_path
+                        dag.dag_file_path
                     )
                     await self.db.update_dag(
                         dag.id,

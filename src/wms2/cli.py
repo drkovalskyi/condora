@@ -580,8 +580,10 @@ async def run_import(args: argparse.Namespace) -> None:
                             print(f"  Excluded sites from rescue: {', '.join(result.problem_sites)}")
 
                         print(f"\n  Submitting rescue DAG (attempt from {rescue_dag.rescue_dag_path})...")
+                        # Submit the *original* DAG file — DAGMan's AutoRescue
+                        # finds and applies the rescue file automatically.
                         cluster_id, schedd = await condor.submit_dag(
-                            rescue_dag.rescue_dag_path or rescue_dag.dag_file_path,
+                            rescue_dag.dag_file_path,
                             force=True,
                         )
                         await repo.update_dag(
