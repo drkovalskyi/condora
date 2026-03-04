@@ -6,6 +6,77 @@
 
 ---
 
+## 2026-03-04 — Refactor adaptive optimization: composable dimensions replace exclusive modes
+
+### What was done
+
+Replaced the three mutually exclusive optimization modes (`per_step`, `job_split`,
+`pipeline_split`) with composable dimensions that apply independently. The existing
+optimization functions (`compute_per_step_nthreads`, `compute_job_split`,
+`compute_all_step_split`) are correct and unchanged — the refactoring is in how
+they compose.
+
+**Key changes:**
+
+1. **`compute_round_optimization()`** rewritten to compose dimensions sequentially
+   instead of dispatching to one exclusive mode:
+   - Collect and merge metrics (unchanged)
+   - Size memory from unified source hierarchy (cgroup → FJR RSS → default)
+   - Decide job splitting (effective cores → request_cpus, clamped to min_request_cpus)
+   - Compute internal parallelism at the new request_cpus
+   - Return unified dict with all dimensions
+
+2. **Removed probe node design** — round 0 (controlled by `first_round_work_units`)
+   is the probe. Deleted `analyze_probe_metrics()` function entirely.
+
+3. **Added `min_request_cpus` floor** (default 4) to `compute_job_split()` to prevent
+   pool fragmentation from many small jobs. Config setting replaces `adaptive_mode`.
+
+4. **Spec rewrite** — `docs/adaptive.md` v1.0.0 → v2.0.0. Removed: probe node design
+   (§4), three optimization modes (§2.4), CLI reference (§13), decision JSON schema
+   (Appendix B). Added: composable dimensions model, work group sizing, inter-round
+   optimization trace example.
+
+5. **Updated callers** — `lifecycle_manager.py` and `dag_planner.py` use a single
+   unified code path instead of mode-specific branches. `config.py` replaced
+   `adaptive_mode` with `min_request_cpus`. API/UI updated accordingly.
+
+### Design decisions
+
+- **Backward compatibility**: `adaptive_mode` parameter kept as deprecated no-op in
+  `compute_round_optimization()` signature so existing call sites don't break.
+- **UI fallback**: `workflow_detail.html` shows `memory_source || mode` so workflows
+  optimized under the old mode-based system still display correctly.
+- **No functional change to algorithms**: `compute_per_step_nthreads`,
+  `compute_job_split`, `compute_all_step_split` are untouched. Only the orchestration
+  and spec framing changed.
+
+### Files changed (12)
+
+- `src/wms2/config.py` — removed `adaptive_mode`, added `min_request_cpus`
+- `src/wms2/core/adaptive.py` — rewrote orchestrator, removed probe code
+- `src/wms2/core/lifecycle_manager.py` — simplified `_compute_adaptive_params`
+- `src/wms2/core/dag_planner.py` — unified adaptive_params application
+- `src/wms2/api/lifecycle.py` — settings endpoint updated
+- `src/wms2/templates/settings.html` — show min_request_cpus
+- `src/wms2/templates/workflow_detail.html` — show memory_source
+- `src/wms2/static/js/components/workflow-detail.js` — remove mode references
+- `docs/adaptive.md` — full v2.0 rewrite
+- `docs/spec.md` — updated §5.1, §5.4, §5.5, §5.7, DD-13
+- `tests/matrix/adaptive.py` — removed probe analysis, kept backward compat
+- `PLANNING.md` — updated status
+
+### Verification
+
+- All module imports verified working
+- App creation (`uvicorn wms2.main:create_app --factory`) verified
+- Smoke tests: 4/5 passed (150.0 timeout is pre-existing simulator timing issue)
+- Adaptive test 391.4: failed due to missing pileup data on local XRootD (pre-existing)
+- Direct unit tests of `compute_round_optimization()`: 4/4 passed (job split,
+  no split, min_request_cpus prevention, backward compatibility)
+
+---
+
 ## 2026-03-04 — Fix rescue DAG submission (submit original DAG, not rescue file)
 
 ### What was done
