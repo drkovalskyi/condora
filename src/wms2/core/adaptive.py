@@ -1199,6 +1199,7 @@ def compute_round_optimization(
     min_request_cpus: int = 4,
     # Deprecated — ignored, kept for call-site compatibility
     adaptive_mode: str = "",
+    historical_peak_rss_mb: float = 0.0,
 ) -> dict:
     """Orchestrate inter-round adaptive optimization.
 
@@ -1222,6 +1223,8 @@ def compute_round_optimization(
         events_per_job: Current events per job (for job splitting)
         jobs_per_wu: Jobs per work unit (for job splitting)
         min_request_cpus: Floor for request_cpus to avoid pool fragmentation
+        historical_peak_rss_mb: Max peak RSS observed across all previous rounds.
+            Memory sizing uses max(current, historical) to prevent regression.
 
     Returns:
         Dict with tuning results including:
@@ -1284,11 +1287,24 @@ def compute_round_optimization(
     }
 
     # ── 2. Size memory from unified source hierarchy ──
+    # Spec: "Peak value is tracked for all rounds, not only the latest."
+    # Use max(current round peak, historical peak) to prevent regression.
     MIN_MEMORY_MB = 4000
     peak_rss = merged["peak_rss_mb"]
+    if historical_peak_rss_mb > 0 and historical_peak_rss_mb > peak_rss:
+        logger.info(
+            "Historical peak RSS %.0f MB > current %.0f MB — using historical",
+            historical_peak_rss_mb, peak_rss,
+        )
+        peak_rss = historical_peak_rss_mb
+
     if cgroup and cgroup.get("peak_nonreclaim_mb", 0) > 0:
-        measured_memory_mb = round(cgroup["peak_nonreclaim_mb"])
-        measured_mem = int(cgroup["peak_nonreclaim_mb"] * (1.0 + safety_margin))
+        cgroup_peak = cgroup["peak_nonreclaim_mb"]
+        # Also enforce historical floor on cgroup measurement
+        if historical_peak_rss_mb > cgroup_peak:
+            cgroup_peak = historical_peak_rss_mb
+        measured_memory_mb = round(cgroup_peak)
+        measured_mem = int(cgroup_peak * (1.0 + safety_margin))
         memory_source = "cgroup"
     elif peak_rss > 0:
         measured_memory_mb = round(peak_rss)

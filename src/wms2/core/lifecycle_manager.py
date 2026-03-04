@@ -96,6 +96,23 @@ def _compute_adaptive_params(config, dag, workflow, new_metrics, settings):
     events_per_job = (params.get("events_per_job")
                       or params.get("eventsPerJob") or 0)
 
+    # ── Compute historical peak RSS across all previous rounds ──
+    # Spec requires: "Peak value is tracked for all rounds, not only the latest"
+    historical_peak_rss_mb = 0.0
+    sm = workflow.step_metrics or {}
+    for _rk, rd in (sm.get("rounds") or {}).items():
+        for wu in rd.get("wu_metrics") or []:
+            for _sn, sd in (wu.get("per_step") or {}).items():
+                prss = sd.get("peak_rss_mb")
+                if isinstance(prss, dict):
+                    val = prss.get("max", 0) or 0
+                elif isinstance(prss, (int, float)):
+                    val = prss
+                else:
+                    val = 0
+                if val > historical_peak_rss_mb:
+                    historical_peak_rss_mb = val
+
     try:
         return compute_round_optimization(
             submit_dir=dag.submit_dir,
@@ -108,6 +125,7 @@ def _compute_adaptive_params(config, dag, workflow, new_metrics, settings):
             events_per_job=events_per_job,
             jobs_per_wu=settings.jobs_per_work_unit,
             min_request_cpus=settings.min_request_cpus,
+            historical_peak_rss_mb=historical_peak_rss_mb,
         )
     except Exception:
         logger.exception("Adaptive optimization failed — using defaults")

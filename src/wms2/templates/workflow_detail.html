@@ -233,8 +233,7 @@
                                 <th>Round</th>
                                 <th>Status</th>
                                 <th>WUs</th>
-                                <th>Done</th>
-                                <th>Failed</th>
+                                <th>Nodes Total/Done/Failed</th>
                                 <th>Memory (MB)</th>
                                 <th>Threads</th>
                                 <th>Avg CPU Eff</th>
@@ -259,8 +258,7 @@
                                         </template>
                                     </td>
                                     <td x-text="r.work_units"></td>
-                                    <td x-text="r.nodes_done"></td>
-                                    <td x-text="r.nodes_failed"></td>
+                                    <td x-text="r.nodes_total + '/' + r.nodes_done + '/' + r.nodes_failed"></td>
                                     <td x-text="fmtNum(r.memory_used)"></td>
                                     <td x-text="r.threads_used"></td>
                                     <td x-text="r.cpu_eff != null ? fmtPct(r.cpu_eff * 100) : '—'"></td>

@@ -156,7 +156,7 @@ document.addEventListener('alpine:init', () => {
             const allRounds = new Set();
             for (const rk of Object.keys(rounds)) allRounds.add(Number(rk));
             for (const rk of Object.keys(dagsByRound)) allRounds.add(Number(rk));
-            const sortedRounds = [...allRounds].sort((a, b) => a - b);
+            const sortedRounds = [...allRounds].sort((a, b) => b - a);
 
             const history = [];
             for (const roundNum of sortedRounds) {
@@ -168,17 +168,25 @@ document.addEventListener('alpine:init', () => {
                 // Resources used for this round
                 let memUsed, threadsUsed;
                 if (rd?.resource_params) {
+                    // Stored at round-completion time — authoritative
                     memUsed = rd.resource_params.memory_mb;
                     threadsUsed = rd.resource_params.nthreads;
                 } else if (roundNum === 0) {
                     memUsed = origMem;
                     threadsUsed = origThreads;
                 } else {
-                    const prevRd = rounds[String(roundNum - 1)];
-                    const prevAp = prevRd?.adaptive_params || sm?.adaptive_params;
-                    if (prevAp && roundNum > 0) {
-                        memUsed = prevAp.tuned_memory_mb || origMem;
-                        threadsUsed = prevAp.tuned_nthreads || origThreads;
+                    // Walk backwards to find the adaptive_params that determined
+                    // this round's resources (from the previous round that has them).
+                    // Do NOT fall back to sm.adaptive_params — that's the latest
+                    // global value, not what was used for this specific round.
+                    let ap = null;
+                    for (let prev = roundNum - 1; prev >= 0; prev--) {
+                        const prevRd = rounds[String(prev)];
+                        if (prevRd?.adaptive_params) { ap = prevRd.adaptive_params; break; }
+                    }
+                    if (ap) {
+                        memUsed = ap.tuned_memory_mb || origMem;
+                        threadsUsed = ap.tuned_nthreads || origThreads;
                     } else {
                         memUsed = origMem;
                         threadsUsed = origThreads;
@@ -207,12 +215,17 @@ document.addEventListener('alpine:init', () => {
                     if (maxMem > 0) peakMem = Math.round(maxMem);
                 }
 
+                const nodesDone = rd?.nodes_done || latestDag?.nodes_done || 0;
+                const nodesFailed = rd?.nodes_failed || latestDag?.nodes_failed || 0;
+                const nodesTotal = latestDag?.total_nodes || (nodesDone + nodesFailed);
+
                 history.push({
                     round: roundNum,
                     status: latestDag?.status || null,
                     work_units: rd?.work_units || latestDag?.total_work_units || 0,
-                    nodes_done: rd?.nodes_done || latestDag?.nodes_done || 0,
-                    nodes_failed: rd?.nodes_failed || latestDag?.nodes_failed || 0,
+                    nodes_total: nodesTotal,
+                    nodes_done: nodesDone,
+                    nodes_failed: nodesFailed,
                     memory_used: memUsed,
                     threads_used: threadsUsed,
                     cpu_eff: cpuEff,
