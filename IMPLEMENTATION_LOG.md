@@ -6,6 +6,34 @@
 
 ---
 
+## 2026-03-04 — Fix adaptive memory using max cgroup peak across all WUs
+
+### What was done
+
+Debugged why DAG `ae80b35e` (round 13) had a job held for cgroup OOM despite
+adaptive memory sizing. The held job needed 5738 MB but was only given 5635 MB.
+
+**Root cause**: `merge_round_metrics()` propagated the cgroup data from the last
+entry in the `round_metrics` list — whichever work unit happened to finish last.
+Since completion order is arbitrary, this selected a random WU's cgroup peak
+instead of the worst-case across all WUs.
+
+Concrete numbers from round 12 (7 WUs):
+- mg_000002 (finished last): cgroup peak = 4696 → `4696 × 1.2 = 5635 MB` (used)
+- mg_000004 (true worst):    cgroup peak = 4721 → `4721 × 1.2 = 5665 MB` (should have been used)
+- Round 13 actual peak: 5738 MB (still exceeds both, but the fix reduces the gap)
+
+**Fix**: `merge_round_metrics()` now iterates all entries and selects the cgroup
+dict with the highest `peak_nonreclaim_mb`, ensuring the worst-case WU is always
+used for memory sizing.
+
+### Verification
+
+- Reproduced the computation: before fix → 5635 MB, after fix → 5665 MB
+- All 5 smoke tests pass
+
+---
+
 ## 2026-03-04 — OOM recovery for cgroup-held jobs + UI hold reason display
 
 ### What was done
