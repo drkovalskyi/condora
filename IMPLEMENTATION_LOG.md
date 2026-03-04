@@ -6,6 +6,55 @@
 
 ---
 
+## 2026-03-04 — Fix adaptive memory to use historical peak across all rounds, improve Round History UI
+
+### What was done
+
+**Bug fix — historical peak RSS enforcement:**
+
+The adaptive optimization was only considering the current round's peak RSS when
+sizing memory for the next round. The spec explicitly requires: "Peak value is
+tracked for all rounds, not only the latest" (`docs/adaptive.md` line 84) and
+"previous round metrics are merged" (`docs/spec.md` line 2454). If a later round
+happened to have lower peak RSS than an earlier one, the tuned memory could drop
+below what was actually needed, risking OOM.
+
+Fix: `_compute_adaptive_params()` now scans all previous rounds' `wu_metrics` in
+`step_metrics` to find the historical max peak RSS, and passes it as
+`historical_peak_rss_mb` to `compute_round_optimization()`. Memory sizing uses
+`max(current_peak, historical_peak)` before applying the safety margin.
+
+**Round History UI improvements:**
+
+1. Merged "Done" and "Failed" columns into "Nodes Total/Done/Failed" (e.g. `11/11/0`)
+2. Reversed sort order to show newest round first (reverse chronological)
+3. Fixed memory display fallback — the old code fell back to the global
+   `sm.adaptive_params` (the latest tuning result) for rounds without stored
+   `resource_params`, showing the wrong memory for all historical rounds. Now
+   walks backwards through per-round `adaptive_params` instead.
+
+**Data backfill:** Backfilled `resource_params` for rounds 0–16 of the active
+workflow by reading actual `request_memory` from HTCondor submit files on disk.
+Each round now shows the memory that was actually used (values range 5,454–7,900 MB
+across rounds, vs the incorrect 5,604 shown previously for all).
+
+### Files changed (4)
+
+- `src/wms2/core/adaptive.py` — added `historical_peak_rss_mb` parameter to
+  `compute_round_optimization()`, enforced as floor in memory sizing
+- `src/wms2/core/lifecycle_manager.py` — scan all previous rounds' wu_metrics
+  for historical peak RSS, pass to optimization
+- `src/wms2/static/js/components/workflow-detail.js` — reverse sort, merged
+  nodes column, fixed memory fallback logic
+- `src/wms2/templates/workflow_detail.html` — merged Done/Failed into single column
+
+### Verification
+
+- Smoke tests: 4/5 passed (150.0 simulator timeout is pre-existing)
+- Adaptive test 391.4: failed (pre-existing — rescue DAG issue unrelated to this change)
+
+---
+
 ## 2026-03-04 — Refactor adaptive optimization: composable dimensions replace exclusive modes
 
 ### What was done
