@@ -237,7 +237,8 @@
                                 <th>Memory (MB)</th>
                                 <th>Threads</th>
                                 <th>Avg CPU Eff</th>
-                                <th>Peak Memory (MB)</th>
+                                <th>FJR RSS (MB)</th>
+                                <th>Cgroup (MB)</th>
                                 <th>Started</th>
                                 <th></th>
                             </tr>
@@ -263,6 +264,7 @@
                                     <td x-text="r.threads_used"></td>
                                     <td x-text="r.cpu_eff != null ? fmtPct(r.cpu_eff * 100) : '—'"></td>
                                     <td x-text="r.peak_memory ? fmtNum(r.peak_memory) : '—'"></td>
+                                    <td x-text="r.cgroup_memory ? fmtNum(r.cgroup_memory) : '—'"></td>
                                     <td x-text="r.created_at ? fmtDateTime(r.created_at) : '—'"></td>
                                     <td>
                                         <template x-if="r.dag_id">

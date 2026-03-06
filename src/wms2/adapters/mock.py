@@ -16,8 +16,10 @@ class MockCondorAdapter(CondorAdapter):
         self._next_cluster_id += 1
         return (cluster_id, "schedd.example.com")
 
-    async def submit_dag(self, dag_file: str, force: bool = False) -> tuple[str, str]:
-        self.calls.append(("submit_dag", (dag_file,), {"force": force}))
+    async def submit_dag(self, dag_file: str, force: bool = False,
+                         spool: bool = False,
+                         schedd_name: str | None = None) -> tuple[str, str]:
+        self.calls.append(("submit_dag", (dag_file,), {"force": force, "spool": spool, "schedd_name": schedd_name}))
         cluster_id = str(self._next_cluster_id)
         self._next_cluster_id += 1
         return (cluster_id, "schedd.example.com")
@@ -36,7 +38,8 @@ class MockCondorAdapter(CondorAdapter):
         self.calls.append(("remove_job", (schedd_name, cluster_id), {}))
         self.removed_jobs.add(cluster_id)
 
-    async def query_dag_jobs(self, cluster_id: str) -> list[dict] | None:
+    async def query_dag_jobs(self, cluster_id: str,
+                             schedd_name: str | None = None) -> list[dict] | None:
         self.calls.append(("query_dag_jobs", (cluster_id,), {}))
         return []
 
@@ -44,18 +47,27 @@ class MockCondorAdapter(CondorAdapter):
         self.calls.append(("ping_schedd", (schedd_name,), {}))
         return True
 
-    async def query_held_jobs(self, cluster_id: str) -> list[dict]:
+    async def query_held_jobs(self, cluster_id: str,
+                              schedd_name: str | None = None) -> list[dict]:
         self.calls.append(("query_held_jobs", (cluster_id,), {}))
         return getattr(self, "_held_jobs", [])
 
-    async def edit_job_attr(self, constraint: str, attr: str, value: str) -> None:
+    async def edit_job_attr(self, constraint: str, attr: str, value: str,
+                            schedd_name: str | None = None) -> None:
         self.calls.append(("edit_job_attr", (constraint, attr, value), {}))
 
-    async def release_jobs(self, constraint: str) -> None:
+    async def release_jobs(self, constraint: str,
+                           schedd_name: str | None = None) -> None:
         self.calls.append(("release_jobs", (constraint,), {}))
 
-    async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
+    async def count_dag_jobs(self, cluster_id: str,
+                             schedd_name: str | None = None) -> dict[str, int] | None:
         self.calls.append(("count_dag_jobs", (cluster_id,), {}))
+        return None
+
+    async def get_job_iwd(self, cluster_id: str,
+                          schedd_name: str | None = None) -> str | None:
+        self.calls.append(("get_job_iwd", (cluster_id,), {}))
         return None
 
 

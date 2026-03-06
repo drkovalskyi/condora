@@ -33,7 +33,7 @@
         <div>
             <label for="campaign-filter">Search</label>
             <input id="campaign-filter" type="text" x-model="filterCampaign"
-                   placeholder="Filter by name or campaign..." style="min-width:250px;">
+                   placeholder="Filter by name or pool..." style="min-width:250px;">
         </div>
     </div>
 
@@ -48,8 +48,8 @@
                 <th class="sortable" @click="sort('status')">
                     Status<span x-text="sortIcon('status')"></span>
                 </th>
-                <th class="sortable" @click="sort('campaign')">
-                    Campaign<span x-text="sortIcon('campaign')"></span>
+                <th class="sortable" @click="sort('pool')">
+                    Pool<span x-text="sortIcon('pool')"></span>
                 </th>
                 <th>Job Priority</th>
                 <th class="sortable" @click="sort('created_at')">
@@ -68,7 +68,7 @@
                            x-text="r.request_name"></a>
                     </td>
                     <td x-html="statusBadge(r.status)"></td>
-                    <td x-text="r.campaign || '—'"></td>
+                    <td x-text="r.pool || '—'"></td>
                     <td x-text="(r.request_data && r.request_data._current_job_priority != null) ? r.request_data._current_job_priority : '—'"></td>
                     <td x-text="fmtAge(r.created_at)"></td>
                     <td x-text="fmtAge(r.updated_at)"></td>

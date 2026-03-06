@@ -8,12 +8,17 @@ class CondorAdapter(ABC):
         """Submit a job. Returns (cluster_id, schedd_name)."""
 
     @abstractmethod
-    async def submit_dag(self, dag_file: str, force: bool = False) -> tuple[str, str]:
+    async def submit_dag(self, dag_file: str, force: bool = False,
+                         spool: bool = False,
+                         schedd_name: str | None = None) -> tuple[str, str]:
         """Submit a DAG. Returns (dagman_cluster_id, schedd_name).
 
         Args:
             force: If True, pass Force option to from_dag() to allow
                    resubmission over existing lock/output files (rescue DAGs).
+            spool: If True, spool all DAG files to the schedd (required
+                   for remote schedd submission).
+            schedd_name: Target schedd (None = default).
         """
 
     @abstractmethod
@@ -32,7 +37,8 @@ class CondorAdapter(ABC):
     async def ping_schedd(self, schedd_name: str) -> bool:
         """Check if a schedd is reachable."""
 
-    async def query_dag_jobs(self, cluster_id: str) -> list[dict] | None:
+    async def query_dag_jobs(self, cluster_id: str,
+                             schedd_name: str | None = None) -> list[dict] | None:
         """Query per-job details for all payload jobs under a DAGMan hierarchy.
 
         Returns list of dicts with keys: name, status, wall_time, memory_mb,
@@ -41,7 +47,8 @@ class CondorAdapter(ABC):
         """
         return None
 
-    async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
+    async def count_dag_jobs(self, cluster_id: str,
+                             schedd_name: str | None = None) -> dict[str, int] | None:
         """Count jobs by status for all payload jobs under a DAGMan hierarchy.
 
         Returns dict with keys: idle, running, done, held, failed, total.
@@ -49,15 +56,23 @@ class CondorAdapter(ABC):
         """
         return None
 
-    async def query_held_jobs(self, cluster_id: str) -> list[dict]:
+    async def query_held_jobs(self, cluster_id: str,
+                              schedd_name: str | None = None) -> list[dict]:
         """Query held payload jobs under a DAGMan hierarchy."""
         return []
 
-    async def edit_job_attr(self, constraint: str, attr: str, value: str) -> None:
+    async def edit_job_attr(self, constraint: str, attr: str, value: str,
+                            schedd_name: str | None = None) -> None:
         """Edit a ClassAd attribute on jobs matching constraint."""
 
-    async def release_jobs(self, constraint: str) -> None:
+    async def release_jobs(self, constraint: str,
+                           schedd_name: str | None = None) -> None:
         """Release held jobs matching constraint."""
+
+    async def get_job_iwd(self, cluster_id: str,
+                          schedd_name: str | None = None) -> str | None:
+        """Query a job's initial working directory (Iwd classad)."""
+        return None
 
 
 class ReqMgrAdapter(ABC):

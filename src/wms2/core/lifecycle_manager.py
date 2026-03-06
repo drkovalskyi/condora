@@ -382,19 +382,23 @@ class RequestLifecycleManager:
                     logger.info(
                         "Lifecycle cycle: %d non-terminal request(s)", len(requests),
                     )
-                    for request in requests:
-                        req_name = request.request_name  # capture before try
+                    failed_names: set[str] = set()
+                    while requests:
+                        request = requests.pop(0)
+                        req_name = request.request_name
                         try:
                             await self.evaluate_request(request)
                             await session.commit()
                         except Exception:
                             logger.exception("Error evaluating %s", req_name)
                             await session.rollback()
-                            # After rollback, ORM objects in the requests list
-                            # are expired. Accessing their attributes would
-                            # trigger a lazy load that fails with
-                            # MissingGreenlet. Break and restart the cycle.
-                            break
+                            failed_names.add(req_name)
+                            # After rollback, ORM objects are expired — re-fetch
+                            # remaining requests so the loop can continue.
+                            requests = [
+                                r for r in await repo.get_non_terminal_requests()
+                                if r.request_name not in failed_names
+                            ]
 
                 await asyncio.sleep(self.settings.lifecycle_cycle_interval)
             except asyncio.CancelledError:

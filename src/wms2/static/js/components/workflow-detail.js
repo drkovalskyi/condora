@@ -215,6 +215,9 @@ document.addEventListener('alpine:init', () => {
                     if (maxMem > 0) peakMem = Math.round(maxMem);
                 }
 
+                // Cgroup measured memory from adaptive_params
+                const cgroupMem = rd?.adaptive_params?.measured_memory_mb || null;
+
                 const nodesDone = rd?.nodes_done || latestDag?.nodes_done || 0;
                 const nodesFailed = rd?.nodes_failed || latestDag?.nodes_failed || 0;
                 const nodesTotal = latestDag?.total_nodes || (nodesDone + nodesFailed);
@@ -230,6 +233,7 @@ document.addEventListener('alpine:init', () => {
                     threads_used: threadsUsed,
                     cpu_eff: cpuEff,
                     peak_memory: peakMem,
+                    cgroup_memory: cgroupMem,
                     created_at: latestDag?.created_at || null,
                     dag_id: latestDag?.id || null,
                     num_dags: dags.length,

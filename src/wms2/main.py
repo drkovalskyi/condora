@@ -30,7 +30,12 @@ def _build_condor(settings: Settings):
     if settings.condor_host:
         from wms2.adapters.condor import HTCondorAdapter
 
-        return HTCondorAdapter(settings.condor_host, settings.schedd_name)
+        extra = [c.strip() for c in settings.extra_collectors.split(",") if c.strip()]
+        return HTCondorAdapter(
+            settings.condor_host, settings.schedd_name,
+            sec_token_directory=settings.sec_token_directory,
+            extra_collectors=extra or None,
+        )
     return MockCondorAdapter()
 
 

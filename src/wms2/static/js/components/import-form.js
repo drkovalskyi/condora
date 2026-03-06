@@ -10,6 +10,8 @@ document.addEventListener('alpine:init', () => {
         filesPerJob: '',
         maxFiles: '',
         processingVersion: '',
+        condorPool: 'local',
+        allowedSites: '',
         highPriority: 5,
         nominalPriority: 3,
         prioritySwitchFraction: 0.5,
@@ -62,6 +64,10 @@ document.addEventListener('alpine:init', () => {
             if (this.filesPerJob) body.files_per_job = parseInt(this.filesPerJob);
             if (this.maxFiles) body.max_files = parseInt(this.maxFiles);
             if (this.processingVersion) body.processing_version = parseInt(this.processingVersion);
+            body.condor_pool = this.condorPool;
+            if (this.condorPool === 'global' && this.allowedSites.trim()) {
+                body.allowed_sites = this.allowedSites.trim();
+            }
             body.high_priority = parseInt(this.highPriority);
             body.nominal_priority = parseInt(this.nominalPriority);
             body.priority_switch_fraction = parseFloat(this.prioritySwitchFraction);

@@ -54,6 +54,7 @@ async def lifecycle_settings(request: Request):
         "target_merged_size_kb": s.target_merged_size_kb,
         "condor_host": s.condor_host or "(not set)",
         "schedd_name": s.schedd_name or "(auto)",
+        "spool_mount": s.spool_mount or "(none)",
         "submit_base_dir": s.submit_base_dir,
         "local_pfn_prefix": s.local_pfn_prefix,
         "stageout_mode": s.stageout_mode,

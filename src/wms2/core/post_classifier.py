@@ -465,7 +465,7 @@ def read_err_tail(err_path, max_lines=200):
 
 def main():
     if len(sys.argv) < 5:
-        print("Usage: wms2_post_collect.py <node_name> <exit_code> <retry_num> <max_retries>",
+        print("Usage: wms2_post_collect.py <node_name> <exit_code> <retry_num> <max_retries> [group_dir]",
               file=sys.stderr)
         sys.exit(1)
 
@@ -482,10 +482,19 @@ def main():
         max_retries = int(sys.argv[4])
     except ValueError:
         max_retries = 3
+    # group_dir: optional prefix for file paths (spool mode without DIR).
+    # When "." or empty, files are in CWD (local mode).
+    group_dir = sys.argv[5] if len(sys.argv) > 5 else "."
+    if not group_dir:
+        group_dir = "."
+    fp = f"{group_dir}/" if group_dir != "." else ""
 
     # Parse FJR — look for report_step*.xml or FrameworkJobReport*.xml
     cmssw_data = None
-    fjr_files = sorted(glob.glob("report_step*.xml") + glob.glob("FrameworkJobReport*.xml"))
+    fjr_files = sorted(
+        glob.glob(f"{fp}report_step*.xml") +
+        glob.glob(f"{fp}FrameworkJobReport*.xml")
+    )
     for fjr_path in fjr_files:
         parsed = parse_fjr(fjr_path)
         if parsed is not None:
@@ -497,10 +506,10 @@ def main():
         cmssw_exit_code = cmssw_data.get("exit_code", 0)
 
     # Parse HTCondor log
-    condor_log = parse_condor_log(f"{node_name}.log")
+    condor_log = parse_condor_log(f"{fp}{node_name}.log")
 
     # Read stderr tail
-    log_tail = read_err_tail(f"{node_name}.err")
+    log_tail = read_err_tail(f"{fp}{node_name}.err")
 
     # Classify
     error_message = cmssw_data.get("error_message", "") if cmssw_data else ""
@@ -547,7 +556,7 @@ def main():
     }
 
     # Write post.json
-    post_json_path = f"{node_name}.post.json"
+    post_json_path = f"{fp}{node_name}.post.json"
     try:
         with open(post_json_path, "w") as f:
             json.dump(post_data, f, indent=2)

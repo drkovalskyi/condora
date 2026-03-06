@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Override MergedLFNBase (e.g. /store/mc or /store/data). "
                           "Auto-determined from input dataset if not specified.")
     imp.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+
+    # ── delete subcommand ──
+    dele = sub.add_parser("delete", help="Delete a request and all its data from the DB")
+    dele.add_argument("request_name", help="Request name to delete")
+    dele.add_argument("--db-url", default=None, help="Override database URL")
+    dele.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
     imp.add_argument("--high-priority", type=int, default=5,
                      help="HTCondor job priority for early production rounds (default: 5)")
     imp.add_argument("--nominal-priority", type=int, default=3,
@@ -155,7 +161,10 @@ def _build_adapters(settings: Settings, ssl_ctx: ssl.SSLContext):
         proxy, proxy,
         verify=ssl_ctx,
     )
-    condor = HTCondorAdapter(settings.condor_host, settings.schedd_name)
+    condor = HTCondorAdapter(
+        settings.condor_host, settings.schedd_name,
+        sec_token_directory=settings.sec_token_directory,
+    )
     return reqmgr, dbs, rucio, condor
 
 
@@ -679,6 +688,56 @@ async def run_import(args: argparse.Namespace) -> None:
         await engine.dispose()
 
 
+async def run_delete(args: argparse.Namespace) -> None:
+    """Delete a request and all associated data (workflow, DAGs, blocks)."""
+    overrides = {}
+    if args.db_url:
+        overrides["database_url"] = args.db_url
+    settings = Settings(**overrides)
+    engine = create_engine(settings)
+    session_factory = create_session_factory(engine)
+
+    try:
+        async with session_factory() as session:
+            repo = Repository(session)
+            existing = await repo.get_request(args.request_name)
+            if not existing:
+                print(f"Request not found: {args.request_name}")
+                sys.exit(1)
+
+            # Show what will be deleted
+            workflow = await repo.get_workflow_by_request(args.request_name)
+            dag_count = 0
+            if workflow:
+                dags = await repo.list_dags(workflow_id=workflow.id)
+                dag_count = len(dags)
+            print(f"Request:  {existing.request_name}")
+            print(f"Status:   {existing.status}")
+            if workflow:
+                print(f"Workflow: {workflow.id} (round {workflow.current_round})")
+            print(f"DAGs:     {dag_count}")
+
+            if not args.yes:
+                answer = input("\nDelete this request and all its data? [y/N] ")
+                if answer.lower() not in ("y", "yes"):
+                    print("Cancelled.")
+                    return
+
+            # Cascading delete
+            if workflow:
+                for dag in await repo.list_dags(workflow_id=workflow.id):
+                    await repo.delete_dag_history(dag.id)
+                    await repo.delete_dag(dag.id)
+                for block in await repo.get_processing_blocks(workflow.id):
+                    await repo.delete_processing_block(block.id)
+                await repo.delete_workflow(workflow.id)
+            await repo.delete_request(args.request_name)
+            await session.commit()
+            print(f"Deleted request {args.request_name}")
+    finally:
+        await engine.dispose()
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -689,6 +748,8 @@ def main():
 
     if args.command == "import":
         asyncio.run(run_import(args))
+    elif args.command == "delete":
+        asyncio.run(run_delete(args))
     else:
         parser.print_help()
         sys.exit(1)

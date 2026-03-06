@@ -5,14 +5,18 @@
 
 ## Objectives
 
-We are commissioning WMS2 as a service with real CMSSW requests taking
-configuration from ReqMgr2. All processing is done in a fully
-automated mode. We need to test for failures and make sure that DAG
-configuration is optimized after the first pilot round of processing.
-Keep track of all issues - we need to fix them. We need reliable
-solutions, not kludges.
+We are commissioning WMS2 as a service with real CMSSW requests using
+ReqMgr2 as the configuration source. All processing is
+done in a fully automated mode. We need to test for failures and make
+sure that DAG configuration is optimized after the first pilot round
+of processing.  Keep track of all issues - we need to fix
+them. Solutions need to be reliable, not workarounds unless confirmed
+to be acceptable.
 
-To speed things up we are using test fraction.
+### Immediate Goal
+
+Make sure that running in the global pool works reliably. Focus on
+debugging.
 
 ### Service mode
 
@@ -38,13 +42,14 @@ Build observability for WMS2:
 
 ## Develop Next
 
-- Add configuration control to enable tmpfs for gridpacks in UI.
-- Make sure that work group size is optimized once after the pilot round to
-  get optimal merged output size.
+- Comission execution at other sites. We should follow closely
+  CRABServer implementation since they use DAGMan and more modern solutions.
 - Add support for TaskChain. Same approach as for StepChain, i.e. build work
   units representing one merge group. The only difference is that the dagman
   will now have instead of single layer of processing nodes, a chain of nodes
   representing each task.
+- Add configuration control to enable tmpfs for gridpacks in UI.
+- We hardcoded some site restrictions. This needs to be revised and handled properly
 
 ## Future improvements (not fixing now)
 
@@ -53,6 +58,9 @@ Build observability for WMS2:
 - **Intra-DAG replan nodes** — replan between WU0 and WU1 within a single DAG
 - **Probe nodes** — modified last proc node in WU0 for memory measurement
 - **Pipeline split mode** — code moved but not wired in yet
+- **Remote schedd rescue DAG** — copy `.rescue001` from sshfs mount into local
+  submit_dir, apply site exclusions locally, then re-spool. Currently rescue
+  resubmission doesn't use spool mode.
 
 ## After every failure
 

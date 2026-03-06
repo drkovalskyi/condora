@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from functools import partial
+import os
+from pathlib import Path
 from typing import Any
 
 import htcondor2
@@ -15,95 +16,259 @@ logger = logging.getLogger(__name__)
 
 
 class HTCondorAdapter(CondorAdapter):
-    """HTCondor adapter that wraps synchronous htcondor2 calls in asyncio.to_thread()."""
+    """HTCondor adapter that wraps synchronous htcondor2 calls in asyncio.to_thread().
 
-    def __init__(self, condor_host: str, schedd_name: str | None = None):
-        collector = htcondor2.Collector(condor_host)
+    Supports multiple schedds: the default schedd is located at init time,
+    additional schedds are connected lazily when queried by name.
+    """
+
+    def __init__(self, condor_host: str, schedd_name: str | None = None,
+                 sec_token_directory: str = "",
+                 extra_collectors: list[str] | None = None):
+        # Set IDTOKEN directory before any connections (for remote schedd auth)
+        if sec_token_directory:
+            htcondor2.param["SEC_TOKEN_DIRECTORY"] = sec_token_directory
+
+        self._collector = htcondor2.Collector(condor_host)
+        self._extra_collectors: list[htcondor2.Collector] = [
+            htcondor2.Collector(addr) for addr in (extra_collectors or [])
+        ]
+
+        # Locate and cache the default schedd
         if schedd_name:
-            schedd_ad = collector.locate(
+            schedd_ad = self._collector.locate(
                 htcondor2.DaemonType.Schedd, schedd_name
             )
         else:
-            schedd_ad = collector.locate(htcondor2.DaemonType.Schedd)
-        self._schedd = htcondor2.Schedd(schedd_ad)
-        self._schedd_name = schedd_ad.get("Name", schedd_name or "")
-        logger.info("Connected to schedd %s via %s", self._schedd_name, condor_host)
+            schedd_ad = self._collector.locate(htcondor2.DaemonType.Schedd)
+        if schedd_ad is None:
+            raise RuntimeError(
+                f"Default schedd not found via collector {condor_host}"
+            )
+        default_name = schedd_ad.get("Name", schedd_name or "")
+        self._default_schedd_name = default_name
+        self._schedds: dict[str, htcondor2.Schedd] = {
+            default_name: htcondor2.Schedd(schedd_ad)
+        }
+        logger.info("Default schedd: %s via %s", default_name, condor_host)
+
+        # Full proxy delegation (following CRABServer approach)
+        htcondor2.param["DELEGATE_FULL_JOB_GSI_CREDENTIALS"] = "true"
+        htcondor2.param["DELEGATE_JOB_GSI_CREDENTIALS_LIFETIME"] = "0"
+
+    def _get_schedd(self, name: str | None = None) -> htcondor2.Schedd:
+        """Get a cached schedd connection, connecting lazily if needed.
+
+        Tries the configured collector first; falls back to extra collectors
+        so that DAGs on different pools (e.g. local + remote) can coexist.
+        Note: htcondor2 Collector.locate() returns None (not an exception)
+        when a daemon is not found, and Schedd(None) silently connects to
+        the local schedd. We must check for None explicitly.
+        """
+        name = name or self._default_schedd_name
+        if name not in self._schedds:
+            schedd_ad = None
+            try:
+                schedd_ad = self._collector.locate(
+                    htcondor2.DaemonType.Schedd, name
+                )
+            except Exception:
+                pass
+            if schedd_ad is None:
+                # Schedd not in primary collector — try extra collectors
+                for coll in self._extra_collectors:
+                    try:
+                        schedd_ad = coll.locate(
+                            htcondor2.DaemonType.Schedd, name
+                        )
+                    except Exception:
+                        continue
+                    if schedd_ad is not None:
+                        break
+            if schedd_ad is None:
+                raise RuntimeError(f"Schedd {name!r} not found in any collector")
+            self._schedds[name] = htcondor2.Schedd(schedd_ad)
+            logger.info("Connected to schedd %s", name)
+        return self._schedds[name]
+
+    @staticmethod
+    def _set_proxy(sub: htcondor2.Submit) -> None:
+        """Set x509userproxy on a Submit object if a proxy file exists.
+
+        This is where the local proxy path (e.g. /mnt/creds/x509up) is
+        resolved — at submit time on the submit machine. HTCondor reads
+        the proxy and delegates it to the schedd/execute node. The path
+        never appears in .sub files that DAGMan reads on the schedd.
+        """
+        proxy = os.environ.get("X509_USER_PROXY", "")
+        if proxy and os.path.isfile(proxy):
+            sub["x509userproxy"] = proxy
 
     def _submit_job_sync(self, submit_file: str) -> tuple[str, str]:
+        schedd = self._get_schedd()
         with open(submit_file) as f:
             text = f.read()
         sub = htcondor2.Submit(text)
-        result = self._schedd.submit(sub)
+        self._set_proxy(sub)
+        result = schedd.submit(sub)
         cluster_id = str(result.cluster())
-        return (cluster_id, self._schedd_name)
+        return (cluster_id, self._default_schedd_name)
 
     async def submit_job(self, submit_file: str) -> tuple[str, str]:
         return await asyncio.to_thread(self._submit_job_sync, submit_file)
 
-    def _submit_dag_sync(self, dag_file: str, force: bool = False) -> tuple[str, str]:
+    @staticmethod
+    def _collect_dag_files(dag_file: str) -> list[str]:
+        """Collect all files under the DAG's submit directory.
+
+        Returns paths relative to submit_dir for use with
+        preserve_relative_paths + transfer_input_files when spooling.
+        """
+        submit_dir = Path(dag_file).parent
+        files = []
+        for f in submit_dir.rglob("*"):
+            if f.is_file():
+                files.append(str(f.relative_to(submit_dir)))
+        return files
+
+    def _submit_dag_sync(self, dag_file: str, force: bool = False,
+                         spool: bool = False,
+                         schedd_name: str | None = None) -> tuple[str, str]:
+        schedd = self._get_schedd(schedd_name)
         options = {"Force": True} if force else {}
-        dag_submit = htcondor2.Submit.from_dag(str(dag_file), options=options)
-        result = self._schedd.submit(dag_submit)
+        submit_dir = Path(dag_file).parent
+        dag_basename = Path(dag_file).name
+
+        prev_cwd = os.getcwd()
+        try:
+            os.chdir(str(submit_dir))
+
+            if spool:
+                # Spool mode: use relative DAG path so from_dag() generates
+                # relative arguments. DAGMan's CWD = spool subdir on schedd.
+                dag_submit = htcondor2.Submit.from_dag(dag_basename, options=options)
+                self._set_proxy(dag_submit)
+
+                # Don't transfer our condor_dagman binary — use the
+                # remote schedd's own /usr/bin/condor_dagman.
+                dag_submit["transfer_executable"] = "false"
+
+                # from_dag() copies our local env via getenv, which exports
+                # PATH/HOME from the submit machine. Disable getenv so the
+                # scheduler universe job inherits the schedd's environment.
+                dag_submit["getenv"] = "false"
+
+                # from_dag() embeds our local condor version in -CsdVersion.
+                # If the remote schedd runs a different version, DAGMan
+                # refuses to start. Add -AllowVersionMismatch.
+                # The arguments value is double-quoted: "-f ... -force",
+                # so insert before the closing quote.
+                args = dag_submit.get("arguments", "")
+                if "-AllowVersionMismatch" not in args:
+                    if args.endswith('"'):
+                        args = args[:-1] + ' -AllowVersionMismatch"'
+                    else:
+                        args = args + " -AllowVersionMismatch"
+                    dag_submit["arguments"] = args
+
+                # Merge dagman config env vars with those from_dag() already
+                # set (e.g. _CONDOR_DAGMAN_LOG, _CONDOR_MAX_DAGMAN_LOG).
+                # DAGMAN_GENERATE_SUBDAG_SUBMITS=false: we pre-generate
+                # .condor.sub files for sub-DAGs (the remote schedd's
+                # condor_submit_dag may not work in the spool context).
+                existing_env = dag_submit.get("environment", "").strip('"')
+                extra_env = (
+                    "_CONDOR_DAGMAN_USE_STRICT=0 "
+                    "_CONDOR_DAGMAN_MAX_RESCUE_NUM=10 "
+                    "_CONDOR_DAGMAN_USER_LOG_SCAN_INTERVAL=5 "
+                    "_CONDOR_DAGMAN_GENERATE_SUBDAG_SUBMITS=false"
+                )
+                merged = f"{existing_env} {extra_env}".strip()
+                dag_submit["environment"] = f'"{merged}"'
+
+                transfer_files = self._collect_dag_files(dag_file)
+                dag_submit["transfer_input_files"] = ", ".join(transfer_files)
+                dag_submit["preserve_relative_paths"] = "true"
+                result = schedd.submit(dag_submit, spool=True)
+                schedd.spool(result)
+            else:
+                # Local mode: absolute DAG path so DAGMan (scheduler universe,
+                # forked by schedd with schedd's CWD) can find everything.
+                abs_dag = str(submit_dir.resolve() / dag_basename)
+                dag_submit = htcondor2.Submit.from_dag(abs_dag, options=options)
+                self._set_proxy(dag_submit)
+                result = schedd.submit(dag_submit)
+        finally:
+            os.chdir(prev_cwd)
+
         cluster_id = str(result.cluster())
-        return (cluster_id, self._schedd_name)
+        actual_name = schedd_name or self._default_schedd_name
+        return (cluster_id, actual_name)
 
-    async def submit_dag(self, dag_file: str, force: bool = False) -> tuple[str, str]:
-        return await asyncio.to_thread(self._submit_dag_sync, dag_file, force)
+    async def submit_dag(self, dag_file: str, force: bool = False,
+                         spool: bool = False,
+                         schedd_name: str | None = None) -> tuple[str, str]:
+        return await asyncio.to_thread(
+            self._submit_dag_sync, dag_file, force, spool, schedd_name
+        )
 
-    def _query_job_sync(self, cluster_id: str) -> dict[str, Any] | None:
+    def _query_job_sync(self, cluster_id: str,
+                        schedd_name: str | None = None) -> dict[str, Any] | None:
+        schedd = self._get_schedd(schedd_name)
         constraint = f"ClusterId == {cluster_id}"
         projection = [
             "ClusterId", "ProcId", "JobStatus", "DAG_NodesTotal",
             "DAG_NodesDone", "DAG_NodesFailed", "DAG_NodesQueued",
             "DAG_NodesReady", "DAG_NodesUnready", "DAG_Status",
         ]
-        ads = self._schedd.query(constraint=constraint, projection=projection)
+        ads = schedd.query(constraint=constraint, projection=projection)
         if not ads:
             return None
         ad = ads[0]
         return {k: ad[k] for k in ad.keys()}
 
     async def query_job(self, schedd_name: str, cluster_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._query_job_sync, cluster_id)
+        return await asyncio.to_thread(self._query_job_sync, cluster_id, schedd_name)
 
-    def _check_job_completed_sync(self, cluster_id: str) -> bool:
-        # First check if still in the queue
+    def _check_job_completed_sync(self, cluster_id: str,
+                                  schedd_name: str | None = None) -> bool:
+        schedd = self._get_schedd(schedd_name)
         constraint = f"ClusterId == {cluster_id}"
-        ads = self._schedd.query(constraint=constraint, projection=["JobStatus"])
+        ads = schedd.query(constraint=constraint, projection=["JobStatus"])
         if ads:
-            # Job still in queue — not completed yet
             return False
-        # Not in queue — check history for completed status (JobStatus==4)
-        for ad in self._schedd.history(
+        for ad in schedd.history(
             constraint=constraint,
             projection=["JobStatus"],
             match=1,
         ):
             return int(ad["JobStatus"]) == 4
-        # Not in queue or history — treat as completed (dagman exited)
         return True
 
     async def check_job_completed(self, cluster_id: str, schedd_name: str) -> bool:
-        return await asyncio.to_thread(self._check_job_completed_sync, cluster_id)
+        return await asyncio.to_thread(self._check_job_completed_sync, cluster_id, schedd_name)
 
-    def _remove_job_sync(self, cluster_id: str) -> None:
-        self._schedd.act(
+    def _remove_job_sync(self, cluster_id: str,
+                         schedd_name: str | None = None) -> None:
+        schedd = self._get_schedd(schedd_name)
+        schedd.act(
             htcondor2.JobAction.Remove,
             f"ClusterId == {cluster_id}",
         )
 
     async def remove_job(self, schedd_name: str, cluster_id: str) -> None:
-        await asyncio.to_thread(self._remove_job_sync, cluster_id)
+        await asyncio.to_thread(self._remove_job_sync, cluster_id, schedd_name)
 
-    def _ping_schedd_sync(self) -> bool:
+    def _ping_schedd_sync(self, schedd_name: str | None = None) -> bool:
         try:
-            self._schedd.query(constraint="false", projection=["ClusterId"], limit=1)
+            schedd = self._get_schedd(schedd_name)
+            schedd.query(constraint="false", projection=["ClusterId"], limit=1)
             return True
         except Exception:
             return False
 
     async def ping_schedd(self, schedd_name: str) -> bool:
-        return await asyncio.to_thread(self._ping_schedd_sync)
+        return await asyncio.to_thread(self._ping_schedd_sync, schedd_name)
 
     _JOB_STATUS_MAP = {
         1: "idle",
@@ -113,17 +278,17 @@ class HTCondorAdapter(CondorAdapter):
         5: "held",
     }
 
-    def _query_dag_jobs_sync(self, cluster_id: str) -> list[dict]:
+    def _query_dag_jobs_sync(self, cluster_id: str,
+                             schedd_name: str | None = None) -> list[dict]:
         """Query per-job details for payload jobs under a DAGMan hierarchy."""
-        # Find sub-DAGMan cluster IDs (inner DAGs)
-        sub_dagman_ads = self._schedd.query(
+        schedd = self._get_schedd(schedd_name)
+        sub_dagman_ads = schedd.query(
             constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
             projection=["ClusterId"],
         )
         if not sub_dagman_ads:
             return []
 
-        # Build constraint for payload jobs under all inner DAGMans
         sub_ids = [str(int(ad["ClusterId"])) for ad in sub_dagman_ads]
         parts = " || ".join(f"DAGManJobId == {sid}" for sid in sub_ids)
         constraint = f"({parts}) && JobUniverse =!= 7"
@@ -135,7 +300,7 @@ class HTCondorAdapter(CondorAdapter):
             "MATCH_GLIDEIN_CMSSite", "JobPrio",
             "HoldReason", "HoldReasonCode",
         ]
-        ads = self._schedd.query(constraint=constraint, projection=projection)
+        ads = schedd.query(constraint=constraint, projection=projection)
 
         jobs = []
         for ad in ads:
@@ -182,18 +347,15 @@ class HTCondorAdapter(CondorAdapter):
         jobs.sort(key=lambda j: j["name"])
         return jobs
 
-    async def query_dag_jobs(self, cluster_id: str) -> list[dict] | None:
-        return await asyncio.to_thread(self._query_dag_jobs_sync, cluster_id)
+    async def query_dag_jobs(self, cluster_id: str,
+                             schedd_name: str | None = None) -> list[dict] | None:
+        return await asyncio.to_thread(self._query_dag_jobs_sync, cluster_id, schedd_name)
 
-    def _count_dag_jobs_sync(self, cluster_id: str) -> dict[str, int]:
-        """Count nodes by status across all inner sub-DAGMans.
-
-        Uses DAGMan ClassAds for done/failed/total (authoritative) and
-        queries actual payload job statuses for the running/idle/held
-        breakdown of in-queue nodes.
-        """
-        # Find sub-DAGMan jobs (inner DAGs) under the outer DAGMan
-        sub_dagman_ads = self._schedd.query(
+    def _count_dag_jobs_sync(self, cluster_id: str,
+                             schedd_name: str | None = None) -> dict[str, int]:
+        """Count nodes by status across all inner sub-DAGMans."""
+        schedd = self._get_schedd(schedd_name)
+        sub_dagman_ads = schedd.query(
             constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
             projection=[
                 "ClusterId", "DAG_NodesTotal", "DAG_NodesDone",
@@ -204,23 +366,20 @@ class HTCondorAdapter(CondorAdapter):
         if not sub_dagman_ads:
             return {"idle": 0, "running": 0, "done": 0, "held": 0, "failed": 0, "total": 0}
 
-        # done/failed/total from DAGMan ClassAds (authoritative for these)
         counts = {"idle": 0, "running": 0, "done": 0, "held": 0, "failed": 0, "total": 0}
         for ad in sub_dagman_ads:
             counts["done"] += int(ad.get("DAG_NodesDone", 0))
             counts["failed"] += int(ad.get("DAG_NodesFailed", 0))
             counts["total"] += int(ad.get("DAG_NodesTotal", 0))
-            # Nodes not yet submitted to schedd count as idle
             counts["idle"] += (
                 int(ad.get("DAG_NodesReady", 0))
                 + int(ad.get("DAG_NodesUnready", 0))
             )
 
-        # Query actual payload job statuses for in-queue breakdown
         sub_ids = [str(int(ad["ClusterId"])) for ad in sub_dagman_ads]
         parts = " || ".join(f"DAGManJobId == {sid}" for sid in sub_ids)
         constraint = f"({parts}) && JobUniverse =!= 7"
-        job_ads = self._schedd.query(
+        job_ads = schedd.query(
             constraint=constraint, projection=["JobStatus"],
         )
         for ad in job_ads:
@@ -233,12 +392,15 @@ class HTCondorAdapter(CondorAdapter):
                 counts["held"] += 1
         return counts
 
-    async def count_dag_jobs(self, cluster_id: str) -> dict[str, int] | None:
-        return await asyncio.to_thread(self._count_dag_jobs_sync, cluster_id)
+    async def count_dag_jobs(self, cluster_id: str,
+                             schedd_name: str | None = None) -> dict[str, int] | None:
+        return await asyncio.to_thread(self._count_dag_jobs_sync, cluster_id, schedd_name)
 
-    def _query_held_jobs_sync(self, cluster_id: str) -> list[dict]:
+    def _query_held_jobs_sync(self, cluster_id: str,
+                              schedd_name: str | None = None) -> list[dict]:
         """Query held payload jobs under a DAGMan hierarchy."""
-        sub_dagman_ads = self._schedd.query(
+        schedd = self._get_schedd(schedd_name)
+        sub_dagman_ads = schedd.query(
             constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
             projection=["ClusterId"],
         )
@@ -254,7 +416,7 @@ class HTCondorAdapter(CondorAdapter):
             "HoldReasonCode", "HoldReason",
             "RequestMemory", "RequestCpus", "Iwd",
         ]
-        ads = self._schedd.query(constraint=constraint, projection=projection)
+        ads = schedd.query(constraint=constraint, projection=projection)
 
         return [
             {
@@ -270,19 +432,38 @@ class HTCondorAdapter(CondorAdapter):
             for ad in ads
         ]
 
-    async def query_held_jobs(self, cluster_id: str) -> list[dict]:
-        return await asyncio.to_thread(self._query_held_jobs_sync, cluster_id)
+    async def query_held_jobs(self, cluster_id: str,
+                              schedd_name: str | None = None) -> list[dict]:
+        return await asyncio.to_thread(self._query_held_jobs_sync, cluster_id, schedd_name)
 
-    def _edit_job_attr_sync(self, constraint: str, attr: str, value: str) -> None:
-        """Edit a ClassAd attribute on jobs matching constraint."""
-        self._schedd.edit(constraint, attr, value)
+    def _edit_job_attr_sync(self, constraint: str, attr: str, value: str,
+                            schedd_name: str | None = None) -> None:
+        schedd = self._get_schedd(schedd_name)
+        schedd.edit(constraint, attr, value)
 
-    async def edit_job_attr(self, constraint: str, attr: str, value: str) -> None:
-        return await asyncio.to_thread(self._edit_job_attr_sync, constraint, attr, value)
+    async def edit_job_attr(self, constraint: str, attr: str, value: str,
+                            schedd_name: str | None = None) -> None:
+        return await asyncio.to_thread(self._edit_job_attr_sync, constraint, attr, value, schedd_name)
 
-    def _release_jobs_sync(self, constraint: str) -> None:
-        """Release held jobs matching constraint."""
-        self._schedd.act(htcondor2.JobAction.Release, constraint)
+    def _release_jobs_sync(self, constraint: str,
+                           schedd_name: str | None = None) -> None:
+        schedd = self._get_schedd(schedd_name)
+        schedd.act(htcondor2.JobAction.Release, constraint)
 
-    async def release_jobs(self, constraint: str) -> None:
-        await asyncio.to_thread(self._release_jobs_sync, constraint)
+    async def release_jobs(self, constraint: str,
+                           schedd_name: str | None = None) -> None:
+        await asyncio.to_thread(self._release_jobs_sync, constraint, schedd_name)
+
+    def _get_job_iwd_sync(self, cluster_id: str,
+                          schedd_name: str | None = None) -> str | None:
+        """Query a job's Iwd (initial working directory) classad."""
+        schedd = self._get_schedd(schedd_name)
+        constraint = f"ClusterId == {cluster_id}"
+        ads = schedd.query(constraint=constraint, projection=["Iwd"])
+        if not ads:
+            return None
+        return str(ads[0].get("Iwd", ""))
+
+    async def get_job_iwd(self, cluster_id: str,
+                          schedd_name: str | None = None) -> str | None:
+        return await asyncio.to_thread(self._get_job_iwd_sync, cluster_id, schedd_name)

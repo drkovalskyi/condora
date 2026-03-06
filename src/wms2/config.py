@@ -43,6 +43,24 @@ class Settings(BaseSettings):
     # HTCondor
     condor_host: str = ""  # collector address (e.g. "localhost:9618")
     schedd_name: str | None = None  # explicit schedd; auto-discovered if None
+    sec_token_directory: str = ""  # IDTOKEN dir for remote schedd auth
+    extra_collectors: str = ""    # additional collector(s) for multi-pool, comma-separated
+
+    # Remote schedd for global pool submission
+    remote_schedd: str = ""         # e.g. "vocms047.cern.ch"
+
+    # Remote schedd spool access (for monitoring DAGs on a remote schedd)
+    # spool_mount: local sshfs mount of remote schedd's spool dir (read-only)
+    # remote_spool_prefix: schedd's SPOOL path (for path translation)
+    # When both are set, submit uses spool mode and monitoring reads via mount.
+    spool_mount: str = ""           # e.g. "/mnt/remote_spool"
+    remote_spool_prefix: str = ""   # e.g. "/data/srv/glidecondor/condor_local/spool"
+
+    # Site whitelist — restrict job execution to these CMS sites.
+    # Comma-separated. When non-empty, all jobs get a Requirements expression
+    # allowing only listed sites. When empty (default), no restriction.
+    # Example: "T2_CH_CERN"
+    allowed_sites: str = ""
 
     # DAG submission
     submit_base_dir: str = "/mnt/shared/tmp/wms2"

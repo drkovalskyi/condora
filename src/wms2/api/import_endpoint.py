@@ -35,6 +35,8 @@ class ImportBody(BaseModel):
     nominal_priority: int = 3
     priority_switch_fraction: float = 0.5
     replace: bool = False
+    condor_pool: str = "local"  # "local" or "global"
+    allowed_sites: str = ""    # comma-separated CMS site names (for global pool)
 
 
 def _normalize_request(reqdata: dict) -> dict:
@@ -177,7 +179,8 @@ async def import_request(
         logger.info("Overriding ProcessingVersion to %d for %s",
                      body.processing_version, body.request_name)
 
-    # Store priority profile in request_data for UI display
+    # Store pool and priority profile in request_data for UI display
+    reqdata["_condor_pool"] = body.condor_pool
     reqdata["_priority_profile"] = {
         "pilot": settings.default_pilot_priority,
         "high": body.high_priority,
@@ -199,8 +202,14 @@ async def import_request(
     await session.flush()
 
     # 3. Determine MergedLFNBase and build config_data
-    merged_lfn_base = await determine_merged_lfn_base(reqdata, dbs_adapter=dbs)
-    reqdata["MergedLFNBase"] = merged_lfn_base
+    # Global pool uses dedicated LFN prefixes for stageout to site-local SE.
+    if body.condor_pool == "global":
+        merged_lfn_base = "/store/temp/user/dmytro.wms2.merged"
+        reqdata["MergedLFNBase"] = merged_lfn_base
+        reqdata["UnmergedLFNBase"] = "/store/temp/user/dmytro.wms2.unmerged"
+    else:
+        merged_lfn_base = await determine_merged_lfn_base(reqdata, dbs_adapter=dbs)
+        reqdata["MergedLFNBase"] = merged_lfn_base
     output_datasets_info = derive_merged_lfn_bases(reqdata)
     config_data = {
         "campaign": reqdata.get("Campaign"),
@@ -224,6 +233,15 @@ async def import_request(
         config_data["request_num_events"] = reqdata.get("RequestNumEvents", 0)
     if body.test_fraction is not None:
         config_data["test_fraction"] = body.test_fraction
+
+    # Condor pool, stageout mode, and site restriction
+    config_data["condor_pool"] = body.condor_pool
+    if body.condor_pool == "global":
+        config_data["stageout_mode"] = "grid"
+    else:
+        config_data["stageout_mode"] = settings.stageout_mode
+    if body.allowed_sites:
+        config_data["allowed_sites"] = body.allowed_sites
 
     # Priority profile
     config_data["priority_profile"] = {

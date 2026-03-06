@@ -71,6 +71,7 @@ class DAGMonitor:
         if inner_summary is summary:
             # No inner status files found — try condor_q
             condor_counts = await self._count_jobs_from_condor(dag)
+
             if condor_counts is not None:
                 inner_summary = condor_counts
 
@@ -97,6 +98,7 @@ class DAGMonitor:
         # Handle cgroup OOM holds (HoldReasonCode 34)
         if inner_summary.held > 0 and dag.dagman_cluster_id:
             await self._handle_held_oom_jobs(dag)
+
 
         # Update workflow node counts
         if dag.workflow_id:
@@ -182,13 +184,18 @@ class DAGMonitor:
         if dag_block:
             done = int(dag_block.get("NodesDone", 0))
             failed = int(dag_block.get("NodesFailed", 0))
-            running = int(dag_block.get("NodesQueued", 0)) + int(dag_block.get("NodesPost", 0))
+            held = int(dag_block.get("JobProcsHeld", 0))
+            # NodesQueued = nodes submitted to HTCondor (includes idle + running + held).
+            # Use JobProcsIdle to split correctly.
+            nodes_submitted = int(dag_block.get("NodesQueued", 0))
+            job_procs_idle = int(dag_block.get("JobProcsIdle", 0))
+            running = max(0, nodes_submitted - job_procs_idle - held) + int(dag_block.get("NodesPost", 0))
             idle = (
-                int(dag_block.get("NodesReady", 0))
+                job_procs_idle
+                + int(dag_block.get("NodesReady", 0))
                 + int(dag_block.get("NodesUnready", 0))
                 + int(dag_block.get("NodesPre", 0))
             )
-            held = int(dag_block.get("JobProcsHeld", 0))
         else:
             done = sum(1 for s in node_statuses.values() if s == "done")
             failed = sum(1 for s in node_statuses.values() if s in ("error", "futile"))
@@ -245,7 +252,9 @@ class DAGMonitor:
         """
         if not dag.dagman_cluster_id:
             return None
-        counts = await self.condor.count_dag_jobs(dag.dagman_cluster_id)
+        counts = await self.condor.count_dag_jobs(
+            dag.dagman_cluster_id, schedd_name=dag.schedd_name,
+        )
         if counts is None or counts["total"] == 0:
             return None
         return NodeSummary(
@@ -343,7 +352,9 @@ class DAGMonitor:
 
     async def _handle_held_oom_jobs(self, dag) -> None:
         """Detect jobs held for cgroup OOM (HoldReasonCode 34), bump memory, release."""
-        held_jobs = await self.condor.query_held_jobs(dag.dagman_cluster_id)
+        held_jobs = await self.condor.query_held_jobs(
+            dag.dagman_cluster_id, schedd_name=dag.schedd_name,
+        )
         if not held_jobs:
             return
 
@@ -373,16 +384,23 @@ class DAGMonitor:
             constraint = f"ClusterId == {cluster_id} && ProcId == {proc_id}"
 
             # Edit the live job's RequestMemory
-            await self.condor.edit_job_attr(constraint, "RequestMemory", str(new_mem))
+            await self.condor.edit_job_attr(
+                constraint, "RequestMemory", str(new_mem),
+                schedd_name=dag.schedd_name,
+            )
 
-            # Update the .sub file on disk so retries use the new value
+            # Update the .sub file on disk so retries use the new value.
+            # May fail on read-only mounts (remote spool via sshfs) — that's
+            # acceptable, the live job is already updated.
             iwd = job.get("iwd", "")
             if iwd:
                 sub_path = os.path.join(iwd, f"{node_name}.sub")
                 self._update_sub_file_memory(sub_path, new_mem)
 
             # Release the held job
-            await self.condor.release_jobs(constraint)
+            await self.condor.release_jobs(
+                constraint, schedd_name=dag.schedd_name,
+            )
 
             logger.info(
                 "OOM recovery: bumped %s (%d.%d) memory %d → %d MB (cap %d), released",
@@ -395,16 +413,19 @@ class DAGMonitor:
         if not os.path.exists(sub_path):
             logger.warning("Sub file not found for memory update: %s", sub_path)
             return
-        with open(sub_path) as f:
-            content = f.read()
-        updated = re.sub(
-            r"request_memory\s*=\s*\d+",
-            f"request_memory = {new_mem}",
-            content,
-        )
-        if updated != content:
-            with open(sub_path, "w") as f:
-                f.write(updated)
+        try:
+            with open(sub_path) as f:
+                content = f.read()
+            updated = re.sub(
+                r"request_memory\s*=\s*\d+",
+                f"request_memory = {new_mem}",
+                content,
+            )
+            if updated != content:
+                with open(sub_path, "w") as f:
+                    f.write(updated)
+        except OSError:
+            logger.debug("Cannot update sub file (read-only?): %s", sub_path)
 
     async def _handle_dag_completion(self, dag) -> DAGPollResult:
         """Handle a DAG whose DAGMan process has exited."""

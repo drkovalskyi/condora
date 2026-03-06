@@ -23,7 +23,12 @@ document.addEventListener('alpine:init', () => {
                 const params = new URLSearchParams();
                 if (this.filterStatus) params.set('status', this.filterStatus);
                 params.set('limit', '500');
-                this.requests = await WMS2_API.listRequests(params.toString());
+                const raw = await WMS2_API.listRequests(params.toString());
+                // Enrich with pool from request_data
+                this.requests = raw.map(r => ({
+                    ...r,
+                    pool: (r.request_data && r.request_data._condor_pool) || 'local',
+                }));
             } catch (e) {
                 this.error = e.message;
             } finally {
@@ -35,8 +40,9 @@ document.addEventListener('alpine:init', () => {
             let list = this.requests;
             if (this.filterCampaign) {
                 const q = this.filterCampaign.toLowerCase();
-                list = list.filter(r => (r.campaign || '').toLowerCase().includes(q)
-                    || (r.request_name || '').toLowerCase().includes(q));
+                list = list.filter(r => (r.request_name || '').toLowerCase().includes(q)
+                    || (r.pool || '').toLowerCase().includes(q)
+                    || (r.campaign || '').toLowerCase().includes(q));
             }
             list = [...list].sort((a, b) => {
                 let va = a[this.sortCol], vb = b[this.sortCol];

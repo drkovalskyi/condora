@@ -68,6 +68,24 @@
                 <div class="form-help">Override the processing version (affects output dataset paths). Leave empty to use the version from ReqMgr2.</div>
             </div>
 
+            <div class="form-group">
+                <label for="condor-pool">Condor Pool</label>
+                <select id="condor-pool" x-model="condorPool">
+                    <option value="local">Local (dev pool)</option>
+                    <option value="global">Global (CMS GlideinWMS)</option>
+                </select>
+                <div class="form-help">Submit jobs to the local HTCondor pool or the CMS global pool via remote schedd.</div>
+            </div>
+
+            <template x-if="condorPool === 'global'">
+                <div class="form-group">
+                    <label for="allowed-sites">Allowed Sites</label>
+                    <input id="allowed-sites" type="text" x-model="allowedSites"
+                           placeholder="e.g. T2_CH_CERN,T2_US_Purdue">
+                    <div class="form-help">Restrict execution to these CMS sites (comma-separated). Empty = any site.</div>
+                </div>
+            </template>
+
             <h3 style="margin-top:1.5rem; font-size:1rem;">Priority Profile</h3>
 
             <div class="form-group">

@@ -301,6 +301,11 @@ class DAGPlanner:
                         self.settings.jobs_per_work_unit * multiplier
                     )
 
+                # Per-step tuning (n_parallel, per-step nthreads)
+                per_step = adaptive_params.get("per_step")
+                if isinstance(per_step, dict):
+                    resource_params["_per_step_tuning"] = per_step
+
         # Plan merge groups (after resource_params is fully built)
         jobs_per_wu = resource_params.pop("_jobs_per_wu_override", None)
 
@@ -382,6 +387,23 @@ class DAGPlanner:
         except Exception:
             logger.debug("Could not store job priority on request row", exc_info=True)
 
+        # Determine if we should use spool mode (remote schedd).
+        # Per-request condor_pool overrides the global setting.
+        condor_pool = config.get("condor_pool", "local")
+        has_spool_config = bool(self.settings.spool_mount and self.settings.remote_spool_prefix)
+        use_spool = condor_pool == "global" and has_spool_config
+
+        # Fetch all CMS site names for DESIRED_Sites (required by GlideinWMS).
+        # When allowed_sites is configured, only those are used; otherwise
+        # all CRIC sites are listed so glideins at any site can match.
+        all_site_names: list[str] = []
+        if use_spool:
+            try:
+                site_rows = await self.db.list_sites()
+                all_site_names = [s.name for s in site_rows]
+            except Exception:
+                logger.warning("Could not fetch site list for DESIRED_Sites")
+
         dag_file_path = _generate_dag_files(
             submit_dir=submit_dir,
             workflow_id=str(workflow.id),
@@ -399,18 +421,32 @@ class DAGPlanner:
             pileup_files=pileup_files or None,
             job_priority=job_priority,
             extra_classads=config.get("extra_classads"),
-            stageout_mode=self.settings.stageout_mode,
+            stageout_mode=config.get("stageout_mode", self.settings.stageout_mode),
             pileup_remote_read=self.settings.pileup_remote_read,
+            spool_mode=use_spool,
+            allowed_sites=(
+                [s.strip() for s in config.get("allowed_sites", "").split(",") if s.strip()]
+                or [s.strip() for s in self.settings.allowed_sites.split(",") if s.strip()]
+                or None
+            ),
+            all_sites=all_site_names or None,
         )
 
         # 8. Count totals
         total_proc = sum(len(mg.processing_nodes) for mg in merge_groups)
-        # Each group: 1 landing + N proc + 1 merge + 1 cleanup = N + 3
-        total_nodes = sum(len(mg.processing_nodes) + 3 for mg in merge_groups)
-        # Edges: landing→all_proc + all_proc→merge + merge→cleanup = N + N + 1 = 2N + 1 per group
-        total_edges = sum(2 * len(mg.processing_nodes) + 1 for mg in merge_groups)
+        if use_spool:
+            # Spool mode: no landing node. proc_000000 is landing.
+            # N proc + 1 merge + 1 cleanup = N + 2
+            total_nodes = sum(len(mg.processing_nodes) + 2 for mg in merge_groups)
+            # proc_000000→rest_proc + all_proc→merge + merge→cleanup
+            total_edges = sum(2 * len(mg.processing_nodes) for mg in merge_groups)
+        else:
+            # Each group: 1 landing + N proc + 1 merge + 1 cleanup = N + 3
+            total_nodes = sum(len(mg.processing_nodes) + 3 for mg in merge_groups)
+            # landing→all_proc + all_proc→merge + merge→cleanup = N + N + 1 = 2N + 1
+            total_edges = sum(2 * len(mg.processing_nodes) + 1 for mg in merge_groups)
 
-        # 9. Create DAG row
+        # 9. Create DAG row (paths may be updated after spool submission)
         dag = await self.db.create_dag(
             workflow_id=workflow.id,
             dag_file_path=dag_file_path,
@@ -461,8 +497,29 @@ class DAGPlanner:
                 await self.db.update_workflow(workflow.id, **target_kwargs)
 
         # 11. Submit DAG to HTCondor
-        cluster_id, schedd = await self.condor.submit_dag(dag_file_path)
+        remote_schedd = self.settings.remote_schedd if use_spool else None
+        cluster_id, schedd = await self.condor.submit_dag(
+            dag_file_path, force=True, spool=use_spool,
+            schedd_name=remote_schedd,
+        )
         now = datetime.now(timezone.utc)
+
+        # For spool mode, map the remote spool Iwd to local sshfs mount
+        # so monitoring can read status files, metrics, manifests.
+        if use_spool:
+            iwd = await self.condor.get_job_iwd(cluster_id, schedd)
+            if iwd:
+                mapped_dir = iwd.replace(
+                    self.settings.remote_spool_prefix,
+                    self.settings.spool_mount, 1,
+                )
+                submit_dir = mapped_dir
+                dag_file_path = os.path.join(mapped_dir, "workflow.dag")
+                await self.db.update_dag(
+                    dag.id, submit_dir=submit_dir, dag_file_path=dag_file_path,
+                )
+                logger.info("Spool mode: mapped submit_dir=%s", submit_dir)
+
         await self.db.update_dag(
             dag.id,
             dagman_cluster_id=cluster_id,
@@ -480,8 +537,9 @@ class DAGPlanner:
 
         logger.info(
             "Production DAG planned for workflow %s (round %d): "
-            "%d groups, %d proc nodes, path=%s",
-            workflow.id, current_round, len(merge_groups), total_proc, dag_file_path,
+            "%d groups, %d proc nodes, path=%s, spool=%s",
+            workflow.id, current_round, len(merge_groups), total_proc,
+            dag_file_path, use_spool,
         )
         return dag
 
@@ -740,6 +798,9 @@ def _generate_dag_files(
     extra_classads: dict[str, str] | None = None,
     stageout_mode: str = "local",
     pileup_remote_read: bool = True,
+    spool_mode: bool = False,
+    allowed_sites: list[str] | None = None,
+    all_sites: list[str] | None = None,
 ) -> str:
     """Generate all DAG files on disk. Returns path to outer workflow.dag."""
     submit_path = Path(submit_dir)
@@ -752,26 +813,65 @@ def _generate_dag_files(
     _write_elect_site_script(str(submit_path / "elect_site.sh"))
     _write_pin_site_script(str(submit_path / "pin_site.sh"))
     _write_post_script(str(submit_path / "post_script.sh"))
+    _write_landing_post_script(str(submit_path / "landing_post.sh"))
     _write_post_collector(str(submit_path / "wms2_post_collect.py"))
     _write_proc_script(str(submit_path / "wms2_proc.sh"))
     _write_merge_script(str(submit_path / "wms2_merge.py"))
     _write_cleanup_script(str(submit_path / "wms2_cleanup.py"))
     _write_stageout_utility(str(submit_path / "wms2_stageout.py"))
 
-    # Generate outer DAG
-    outer_lines = [
-        f"# WMS2-generated DAG for workflow {workflow_id}",
-        f"CONFIG {submit_path / 'dagman.config'}",
-        f"NODE_STATUS_FILE {submit_path / 'workflow.dag.status'}",
-        "",
-    ]
+    # Symlink X509 proxy into submit_dir so .sub files can reference it
+    # with a relative path (../x509_proxy from group_dir). The proxy's
+    # actual location is irrelevant — only the symlink needs to be here.
+    x509_proxy = os.environ.get("X509_USER_PROXY", "")
+    if x509_proxy and os.path.isfile(x509_proxy):
+        proxy_link = submit_path / "x509_proxy"
+        if not proxy_link.exists():
+            os.symlink(os.path.abspath(x509_proxy), str(proxy_link))
+
+    # Generate outer DAG.
+    # Local mode: absolute paths (scheduler universe inherits schedd's CWD).
+    # Spool mode: relative paths (DAGMan CWD = spool subdir on remote schedd).
+    if spool_mode:
+        outer_lines = [
+            f"# WMS2-generated DAG for workflow {workflow_id}",
+            "NODE_STATUS_FILE workflow.dag.status",
+            "",
+        ]
+    else:
+        abs_submit = str(submit_path.resolve())
+        outer_lines = [
+            f"# WMS2-generated DAG for workflow {workflow_id}",
+            f"CONFIG {abs_submit}/dagman.config",
+            f"NODE_STATUS_FILE {abs_submit}/workflow.dag.status",
+            "",
+        ]
 
     for mg in merge_groups:
         mg_name = f"mg_{mg.group_index:06d}"
         mg_dir = submit_path / mg_name
         mg_dir.mkdir(parents=True, exist_ok=True)
 
-        outer_lines.append(f"SUBDAG EXTERNAL {mg_name} {mg_dir / 'group.dag'} DIR {mg_dir}")
+        if spool_mode:
+            # Spool mode: no DIR keyword — the inner DAGMan inherits the
+            # outer DAG's CWD (spool root) and references files via
+            # mg_name/ prefix.  No symlinks (they don't transfer in spool).
+            outer_lines.append(
+                f"SUBDAG EXTERNAL {mg_name} {mg_name}/group.dag"
+            )
+        else:
+            # Local mode: symlink shared scripts into mg_dir so inner DAG
+            # can reference them as ./script.sh (DIR sets IWD to mg_dir).
+            for script in ("elect_site.sh", "pin_site.sh", "post_script.sh",
+                            "landing_post.sh", "wms2_post_collect.py"):
+                link = mg_dir / script
+                if not link.exists():
+                    os.symlink(f"../{script}", str(link))
+
+            abs_mg = f"{abs_submit}/{mg_name}"
+            outer_lines.append(
+                f"SUBDAG EXTERNAL {mg_name} {abs_mg}/group.dag DIR {abs_mg}"
+            )
 
         # Write pileup_files.json if pileup datasets were resolved
         if pileup_files:
@@ -798,7 +898,21 @@ def _generate_dag_files(
             extra_classads=extra_classads,
             stageout_mode=stageout_mode,
             pileup_remote_read=pileup_remote_read,
+            allowed_sites=allowed_sites,
+            spool_mode=spool_mode,
+            all_sites=all_sites,
         )
+
+        if spool_mode:
+            # Pre-generate .condor.sub for the sub-DAG so the remote
+            # schedd doesn't need to run condor_submit_dag.
+            import subprocess
+            subprocess.run(
+                ["condor_submit_dag", "-no_submit", "-force",
+                 f"{mg_name}/group.dag"],
+                cwd=str(submit_path),
+                capture_output=True,
+            )
 
     # Category throttling for merge groups
     outer_lines.append("")
@@ -829,6 +943,9 @@ def _generate_group_dag(
     extra_classads: dict[str, str] | None = None,
     stageout_mode: str = "local",
     pileup_remote_read: bool = True,
+    allowed_sites: list[str] | None = None,
+    spool_mode: bool = False,
+    all_sites: list[str] | None = None,
 ) -> None:
     """Generate a single merge group sub-DAG (group.dag) + submit files."""
     exe = executables or {}
@@ -836,12 +953,24 @@ def _generate_group_dag(
     merge_exe = exe.get("merge", "run_merge.sh")
     cleanup_exe = exe.get("cleanup", "run_cleanup.sh")
 
-    # Always use the generated wrapper scripts (absolute paths).
-    # The Settings executable names are placeholders — the real wrappers
-    # are written by the planner to submit_dir.
-    proc_exe = str(submit_dir / "wms2_proc.sh")
-    merge_exe = str(submit_dir / "wms2_merge.py")
-    cleanup_exe = str(submit_dir / "wms2_cleanup.py")
+    # In spool mode (no DIR), inner DAGMan CWD = spool root, so:
+    #   - per-group files use mg_name/ prefix
+    #   - shared scripts/executables are in the root (no ../ prefix)
+    # In local mode (DIR sets CWD to group_dir):
+    #   - per-group files are referenced directly (landing.sub)
+    #   - shared scripts/executables use ../ prefix
+    mg_name = group_dir.name  # e.g. "mg_000000"
+    if spool_mode:
+        # File prefix for per-group files in the DAG
+        fp = f"{mg_name}/"
+        proc_exe = "wms2_proc.sh"
+        merge_exe = "wms2_merge.py"
+        cleanup_exe = "wms2_cleanup.py"
+    else:
+        fp = ""
+        proc_exe = "../wms2_proc.sh"
+        merge_exe = "../wms2_merge.py"
+        cleanup_exe = "../wms2_cleanup.py"
 
     # Resource parameters
     rp = resource_params or {}
@@ -849,10 +978,19 @@ def _generate_group_dag(
     disk_kb = rp.get("disk_kb", 0)
     ncpus = rp.get("ncpus", 0)
 
-    # Build transfer_input_files list for processing nodes
+    # Build transfer_input_files list for processing nodes.
+    # In local mode paths are relative to group_dir (../ prefix for parent).
+    # In spool mode paths are relative to spool root (no ../ prefix).
     proc_transfer_files: list[str] = []
     if sandbox_path and os.path.isfile(sandbox_path):
-        proc_transfer_files.append(sandbox_path)
+        # Symlink sandbox into submit_dir so it's co-located with DAG files
+        sandbox_link = submit_dir / os.path.basename(sandbox_path)
+        if not sandbox_link.exists():
+            os.symlink(os.path.abspath(sandbox_path), str(sandbox_link))
+        if spool_mode:
+            proc_transfer_files.append(sandbox_link.name)
+        else:
+            proc_transfer_files.append(f"../{sandbox_link.name}")
         # Extract manifest.json to group dir so merge job can find CMSSW info
         import tarfile
         try:
@@ -865,16 +1003,28 @@ def _generate_group_dag(
         except Exception:
             pass  # merge will fall back to copy mode without hadd
 
-        # Override per-step multicore in manifest if ncpus differs from sandbox default
+        # Override per-step multicore and n_parallel in manifest
         manifest_path = group_dir / "manifest.json"
-        if ncpus and manifest_path.is_file():
+        per_step_tuning = rp.get("_per_step_tuning")
+        if manifest_path.is_file() and (ncpus or per_step_tuning):
             try:
                 import json as _json
                 with open(manifest_path) as _f:
                     _manifest = _json.load(_f)
                 changed = False
-                for step in _manifest.get("steps", []):
-                    if step.get("multicore", 0) != ncpus:
+                for i, step in enumerate(_manifest.get("steps", [])):
+                    step_key = str(i)
+                    st = per_step_tuning.get(step_key) if per_step_tuning else None
+                    if st:
+                        tuned_nt = st.get("tuned_nthreads")
+                        n_par = st.get("n_parallel", 1)
+                        if tuned_nt and tuned_nt != step.get("multicore"):
+                            step["multicore"] = tuned_nt
+                            changed = True
+                        if n_par > 1 and step.get("n_parallel", 1) != n_par:
+                            step["n_parallel"] = n_par
+                            changed = True
+                    elif ncpus and step.get("multicore", 0) != ncpus:
                         step["multicore"] = ncpus
                         changed = True
                 if changed:
@@ -883,17 +1033,15 @@ def _generate_group_dag(
             except Exception:
                 pass
 
-    # Pass X509 proxy to jobs if available
+    # Job environment — X509 proxy is delegated by HTCondor via
+    # use_x509userproxy (set in _write_submit_file), not passed via
+    # environment. SITECONFIG_PATH is not set here: at remote sites the
+    # glidein provides it; locally the worker scripts fall back to
+    # /opt/cms/siteconf.
     proc_env: dict[str, str] = {}
-    x509_proxy = os.environ.get("X509_USER_PROXY", "")
-    if x509_proxy and os.path.isfile(x509_proxy):
-        proc_env["X509_USER_PROXY"] = x509_proxy
     x509_cert_dir = os.environ.get("X509_CERT_DIR", "")
     if x509_cert_dir:
         proc_env["X509_CERT_DIR"] = x509_cert_dir
-    siteconfig = os.environ.get("SITECONFIG_PATH", "")
-    if siteconfig and os.path.isdir(siteconfig):
-        proc_env["SITECONFIG_PATH"] = siteconfig
 
     # Write output_info.json — shared by proc (stage-out) and merge (read input/write output)
     output_info_path = None
@@ -918,49 +1066,81 @@ def _generate_group_dag(
 
     # Add output_info.json to proc transfer files so proc jobs can stage out
     if output_info_path and os.path.isfile(output_info_path):
-        proc_transfer_files.append(output_info_path)
+        proc_transfer_files.append(f"{fp}output_info.json")
 
     # Add wms2_stageout.py to transfer files for grid mode
     stageout_utility_path = str(submit_dir / "wms2_stageout.py")
     if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
-        proc_transfer_files.append(stageout_utility_path)
+        if spool_mode:
+            proc_transfer_files.append("wms2_stageout.py")
+        else:
+            proc_transfer_files.append("../wms2_stageout.py")
 
     # Add pileup_files.json to proc transfer files for PSet injection
     pileup_json_path = str(group_dir / "pileup_files.json")
     if pileup_files and os.path.isfile(pileup_json_path):
-        proc_transfer_files.append(pileup_json_path)
+        proc_transfer_files.append(f"{fp}pileup_files.json")
 
     proc_nodes = merge_group.processing_nodes
+
+    # In spool mode, elected_site needs a per-group name to avoid clashes
+    # between merge groups sharing the same CWD (spool root).
+    elected_site = f"{mg_name}_elected_site" if spool_mode else "elected_site"
+
     lines: list[str] = [
         f"# Merge group {merge_group.group_index}",
-        f"NODE_STATUS_FILE {group_dir / 'group.dag.status'}",
+        f"NODE_STATUS_FILE {fp}group.dag.status",
         "",
     ]
 
-    # Landing node — always marked as quick job so it can use overflow slots
-    # even when the pool is fully loaded with proc jobs.
-    landing_priority = max(job_priority, 5) + 10
-    landing_classads = dict(extra_classads or {})
-    landing_classads["WMS2_QuickJob"] = "True"
-    _write_submit_file(
-        str(group_dir / "landing.sub"),
-        executable="/bin/true",
-        arguments="",
-        description="landing node",
-        banned_sites=banned_sites,
-        priority=landing_priority,
-        extra_classads=landing_classads,
-    )
-    lines.append("JOB landing landing.sub")
-    lines.append(
-        f"SCRIPT POST landing {submit_dir / 'elect_site.sh'} elected_site"
-    )
-    lines.append("")
+    # DESIRED_Sites tells GlideinWMS which sites this job can run at.
+    # GlideinWMS START expression requires DESIRED_Sites to be defined;
+    # if allowed_sites is set use those, otherwise list all CRIC sites.
+    if allowed_sites:
+        landing_desired = ",".join(allowed_sites)
+    elif all_sites:
+        landing_desired = ",".join(all_sites)
+    else:
+        landing_desired = ""
+    out_dir = mg_name if spool_mode else ""
+
+    # In spool mode (global pool), proc_000000 acts as the landing node:
+    # it runs as a real proc job with free site selection, and its POST
+    # script elects the site for the remaining pinned proc/merge/cleanup.
+    # In local mode, a trivial /bin/true landing node is used (no site
+    # election needed).
+    use_proc_landing = spool_mode
+
+    if not use_proc_landing:
+        # Trivial landing node for local pool
+        landing_priority = max(job_priority, 5) + 10
+        landing_classads = dict(extra_classads or {})
+        landing_classads["WMS2_QuickJob"] = "True"
+        _write_submit_file(
+            str(group_dir / "landing.sub"),
+            executable="/bin/true",
+            arguments="",
+            description="landing node",
+            desired_sites=landing_desired,
+            banned_sites=banned_sites,
+            allowed_sites=allowed_sites,
+            priority=landing_priority,
+            extra_classads=landing_classads,
+            output_dir=out_dir,
+        )
+        lines.append(f"JOB landing {fp}landing.sub")
+        landing_log = f"{fp}landing.log"
+        lines.append(
+            f"SCRIPT POST landing elect_site.sh {elected_site} {landing_log}"
+        )
+        lines.append("")
 
     # Processing nodes
     sandbox_ref = os.path.basename(sandbox_path) if sandbox_path else sandbox_url
+    post_args = f"$JOB $RETURN $RETRY $MAX_RETRIES {mg_name}" if spool_mode else "$JOB $RETURN $RETRY $MAX_RETRIES"
     for node in proc_nodes:
         node_name = f"proc_{node.node_index:06d}"
+        is_landing_proc = use_proc_landing and node.node_index == proc_nodes[0].node_index
         input_lfns = ",".join(f.lfn for f in node.input_files)
 
         # Build arguments with event range info
@@ -983,27 +1163,57 @@ def _generate_group_dag(
         if pileup_remote_read:
             proc_args += " --pileup-remote-read"
 
-        _write_submit_file(
-            str(group_dir / f"{node_name}.sub"),
-            executable=proc_exe,
-            arguments=proc_args,
-            description=f"processing node {node.node_index}",
-            desired_sites=node.primary_location,
-            memory_mb=memory_mb,
-            disk_kb=disk_kb,
-            ncpus=ncpus,
-            transfer_input_files=proc_transfer_files or None,
-            environment=proc_env or None,
-            priority=job_priority,
-            extra_classads=extra_classads,
-        )
-        lines.append(f"JOB {node_name} {node_name}.sub")
-        lines.append(
-            f"SCRIPT PRE {node_name} {submit_dir / 'pin_site.sh'} {node_name}.sub elected_site"
-        )
-        lines.append(
-            f"SCRIPT POST {node_name} {submit_dir / 'post_script.sh'} $JOB $RETURN $RETRY $MAX_RETRIES"
-        )
+        if is_landing_proc:
+            # proc_000000 acts as the landing node: free site selection
+            # (DESIRED_Sites from policy, no GLIDEIN_CMSSite pinning).
+            # POST script elects the site for remaining nodes.
+            _write_submit_file(
+                str(group_dir / f"{node_name}.sub"),
+                executable=proc_exe,
+                arguments=proc_args,
+                description=f"processing node {node.node_index} (landing)",
+                desired_sites=landing_desired,
+                banned_sites=banned_sites,
+                allowed_sites=allowed_sites,
+                memory_mb=memory_mb,
+                disk_kb=disk_kb,
+                ncpus=ncpus,
+                transfer_input_files=proc_transfer_files or None,
+                environment=proc_env or None,
+                priority=job_priority,
+                extra_classads=extra_classads,
+                output_dir=out_dir,
+            )
+            lines.append(f"JOB {node_name} {fp}{node_name}.sub")
+            landing_log = f"{fp}{node_name}.log"
+            # Combined POST: runs post_script.sh, then elect_site.sh on success
+            landing_post_args = f"$JOB $RETURN $RETRY $MAX_RETRIES {mg_name} {elected_site} {landing_log}" if spool_mode else f"$JOB $RETURN $RETRY $MAX_RETRIES . {elected_site} {landing_log}"
+            lines.append(
+                f"SCRIPT POST {node_name} landing_post.sh {landing_post_args}"
+            )
+        else:
+            _write_submit_file(
+                str(group_dir / f"{node_name}.sub"),
+                executable=proc_exe,
+                arguments=proc_args,
+                description=f"processing node {node.node_index}",
+                desired_sites=node.primary_location or "",
+                memory_mb=memory_mb,
+                disk_kb=disk_kb,
+                ncpus=ncpus,
+                transfer_input_files=proc_transfer_files or None,
+                environment=proc_env or None,
+                priority=job_priority,
+                extra_classads=extra_classads,
+                output_dir=out_dir,
+            )
+            lines.append(f"JOB {node_name} {fp}{node_name}.sub")
+            lines.append(
+                f"SCRIPT PRE {node_name} pin_site.sh {fp}{node_name}.sub {elected_site}"
+            )
+            lines.append(
+                f"SCRIPT POST {node_name} post_script.sh {post_args}"
+            )
         lines.append("")
 
     # Merge node
@@ -1011,12 +1221,15 @@ def _generate_group_dag(
     merge_transfer: list[str] = []
     if output_info_path:
         merge_args += f" --output-info {os.path.basename(output_info_path)}"
-        merge_transfer.append(output_info_path)
+        merge_transfer.append(f"{fp}output_info.json")
     manifest_path = str(group_dir / "manifest.json")
     if os.path.isfile(manifest_path):
-        merge_transfer.append(manifest_path)
+        merge_transfer.append(f"{fp}manifest.json")
     if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
-        merge_transfer.append(stageout_utility_path)
+        if spool_mode:
+            merge_transfer.append("wms2_stageout.py")
+        else:
+            merge_transfer.append("../wms2_stageout.py")
     _write_submit_file(
         str(group_dir / "merge.sub"),
         executable=merge_exe,
@@ -1028,13 +1241,14 @@ def _generate_group_dag(
         environment=proc_env or None,
         priority=job_priority,
         extra_classads=extra_classads,
+        output_dir=out_dir,
     )
-    lines.append("JOB merge merge.sub")
+    lines.append(f"JOB merge {fp}merge.sub")
     lines.append(
-        f"SCRIPT PRE merge {submit_dir / 'pin_site.sh'} merge.sub elected_site"
+        f"SCRIPT PRE merge pin_site.sh {fp}merge.sub {elected_site}"
     )
     lines.append(
-        f"SCRIPT POST merge {submit_dir / 'post_script.sh'} $JOB $RETURN $RETRY $MAX_RETRIES"
+        f"SCRIPT POST merge post_script.sh {post_args}"
     )
     lines.append("")
 
@@ -1043,13 +1257,15 @@ def _generate_group_dag(
     cleanup_transfer: list[str] = []
     if output_info_path:
         cleanup_args = f"--output-info {os.path.basename(output_info_path)}"
-        cleanup_transfer.append(output_info_path)
+        cleanup_transfer.append(f"{fp}output_info.json")
     # cleanup_manifest.json is written by the merge job into the group dir;
     # it exists by the time the cleanup node runs (merge → cleanup dependency).
-    cleanup_manifest_path = str(group_dir / "cleanup_manifest.json")
-    cleanup_transfer.append(cleanup_manifest_path)
+    cleanup_transfer.append(f"{fp}cleanup_manifest.json")
     if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
-        cleanup_transfer.append(stageout_utility_path)
+        if spool_mode:
+            cleanup_transfer.append("wms2_stageout.py")
+        else:
+            cleanup_transfer.append("../wms2_stageout.py")
     _write_submit_file(
         str(group_dir / "cleanup.sub"),
         executable=cleanup_exe,
@@ -1059,10 +1275,11 @@ def _generate_group_dag(
         environment=proc_env or None,
         priority=job_priority,
         extra_classads=extra_classads,
+        output_dir=out_dir,
     )
-    lines.append("JOB cleanup cleanup.sub")
+    lines.append(f"JOB cleanup {fp}cleanup.sub")
     lines.append(
-        f"SCRIPT PRE cleanup {submit_dir / 'pin_site.sh'} cleanup.sub elected_site"
+        f"SCRIPT PRE cleanup pin_site.sh {fp}cleanup.sub {elected_site}"
     )
     lines.append("")
 
@@ -1083,8 +1300,18 @@ def _generate_group_dag(
 
     # Dependencies
     proc_names = " ".join(f"proc_{n.node_index:06d}" for n in proc_nodes)
-    lines.append(f"PARENT landing CHILD {proc_names}")
-    lines.append(f"PARENT {proc_names} CHILD merge")
+    if use_proc_landing:
+        # proc_000000 is the landing: remaining proc nodes depend on it
+        landing_name = f"proc_{proc_nodes[0].node_index:06d}"
+        rest_names = " ".join(
+            f"proc_{n.node_index:06d}" for n in proc_nodes[1:]
+        )
+        if rest_names:
+            lines.append(f"PARENT {landing_name} CHILD {rest_names}")
+        lines.append(f"PARENT {proc_names} CHILD merge")
+    else:
+        lines.append(f"PARENT landing CHILD {proc_names}")
+        lines.append(f"PARENT {proc_names} CHILD merge")
     lines.append("PARENT merge CHILD cleanup")
     lines.append("")
 
@@ -1115,17 +1342,21 @@ def _write_submit_file(
     transfer_input_files: list[str] | None = None,
     environment: dict[str, str] | None = None,
     banned_sites: list[str] | None = None,
+    allowed_sites: list[str] | None = None,
     priority: int = 0,
     extra_classads: dict[str, str] | None = None,
+    output_dir: str = "",
 ) -> None:
+    stem = Path(path).stem
+    out_prefix = f"{output_dir}/" if output_dir else ""
     lines = [
         f"# {description}",
         "universe = vanilla",
         f"executable = {executable}",
         f"arguments = {arguments}",
-        f"output = {Path(path).stem}.out",
-        f"error = {Path(path).stem}.err",
-        f"log = {Path(path).stem}.log",
+        f"output = {out_prefix}{stem}.out",
+        f"error = {out_prefix}{stem}.err",
+        f"log = {out_prefix}{stem}.log",
     ]
     if ncpus > 0:
         lines.append(f"request_cpus = {ncpus}")
@@ -1138,15 +1369,37 @@ def _write_submit_file(
         lines.append(f'environment = "{env_str}"')
     lines.append("should_transfer_files = YES")
     lines.append("when_to_transfer_output = ON_EXIT")
+    # X509 proxy delegation (following CRABServer approach):
+    # use_x509userproxy tells HTCondor to delegate the proxy to each job
+    # and set X509_USER_PROXY in the job environment. The proxy file is
+    # symlinked into submit_dir at planning time (see _generate_dag_files).
+    # In local mode (inner DAG with DIR), proxy is at ../x509_proxy.
+    # In spool mode (no DIR), proxy is at x509_proxy (spool root).
+    x509_proxy = os.environ.get("X509_USER_PROXY", "")
+    if x509_proxy and os.path.isfile(x509_proxy):
+        lines.append("use_x509userproxy = true")
+        proxy_ref = "x509_proxy" if output_dir else "../x509_proxy"
+        lines.append(f"x509userproxy = {proxy_ref}")
     if transfer_input_files:
         lines.append(f"transfer_input_files = {','.join(transfer_input_files)}")
     if desired_sites:
         lines.append(f'+DESIRED_Sites = "{desired_sites}"')
-    if banned_sites:
-        neg = " && ".join(
-            f'(TARGET.GLIDEIN_CMSSite =!= "{s}")' for s in banned_sites
+    # CMS GlideinWMS classads — required for glidein provisioning and matching.
+    # MaxWallTimeMins: glidein START checks remaining lifetime against this.
+    # Without it, the default (16h) rejects many short-lived glideins.
+    lines.append("+MaxWallTimeMins = 1440")
+    lines.append('+CMS_Type = "Production"')
+    req_parts = []
+    if allowed_sites:
+        pos = " || ".join(
+            f'(TARGET.GLIDEIN_CMSSite == "{s}")' for s in allowed_sites
         )
-        lines.append(f"Requirements = {neg}")
+        req_parts.append(f"({pos})")
+    if banned_sites:
+        for s in banned_sites:
+            req_parts.append(f'(TARGET.GLIDEIN_CMSSite =!= "{s}")')
+    if req_parts:
+        lines.append(f"Requirements = {' && '.join(req_parts)}")
     if priority:
         lines.append(f"priority = {priority}")
     if extra_classads:
@@ -1188,9 +1441,16 @@ def _generate_pilot_submit(
     memory_mb = pc.get("memory_mb", 0)
     if memory_mb > 0:
         lines.append(f"request_memory = {memory_mb}")
+    x509_proxy = os.environ.get("X509_USER_PROXY", "")
     lines.extend([
         "should_transfer_files = YES",
         "when_to_transfer_output = ON_EXIT",
+    ])
+    # Proxy delegation: the condor adapter sets x509userproxy on the
+    # Submit object at submit time (from the local X509_USER_PROXY path).
+    if x509_proxy and os.path.isfile(x509_proxy):
+        lines.append("use_x509userproxy = true")
+    lines.extend([
         f"transfer_input_files = {','.join(transfer_inputs)}",
         "transfer_output_files = pilot_metrics.json",
         "queue 1",
@@ -1205,9 +1465,13 @@ def _write_elect_site_script(path: str) -> None:
 # Extracts GLIDEIN_CMSSite from the completed landing job.
 # Falls back to "local" for dev environments without glidein infrastructure.
 ELECTED_SITE_FILE=$1
-CLUSTER_ID=$(condor_q -format "%d.0" ClusterId \\
-    -constraint 'DAGNodeName=="landing"' 2>/dev/null)
-SITE=$(condor_history $CLUSTER_ID -limit 1 -af MATCH_GLIDEIN_CMSSite 2>/dev/null)
+LOG_FILE=$2
+# Extract the cluster ID from the landing node's HTCondor log.
+# The log contains "Job submitted from host" with (cluster.proc.subproc) pattern.
+CLUSTER_ID=$(grep -o '([0-9]*\\.' "$LOG_FILE" 2>/dev/null | head -1 | tr -d '(.')
+if [ -n "$CLUSTER_ID" ]; then
+    SITE=$(condor_history "${CLUSTER_ID}.0" -limit 1 -af MATCH_GLIDEIN_CMSSite 2>/dev/null)
+fi
 if [ -n "$SITE" ] && [ "$SITE" != "undefined" ]; then
     echo "$SITE" > "$ELECTED_SITE_FILE"
 else
@@ -1222,9 +1486,23 @@ def _write_pin_site_script(path: str) -> None:
     _write_file(path, """\
 #!/bin/bash
 # pin_site.sh — PRE script for processing/merge/cleanup nodes
+# Pins the job to the elected site by setting Requirements and DESIRED_Sites.
+# Skips pinning when site is "local" (dev environments without glidein).
 SUBMIT_FILE=$1
 SITE=$(cat "$2")
-sed -i "s/+DESIRED_Sites = .*/+DESIRED_Sites = \\"${SITE}\\"/" "$SUBMIT_FILE"
+if [ "$SITE" = "local" ]; then
+    exit 0
+fi
+if grep -q '+DESIRED_Sites' "$SUBMIT_FILE"; then
+    sed -i "s/+DESIRED_Sites = .*/+DESIRED_Sites = \\"${SITE}\\"/" "$SUBMIT_FILE"
+else
+    sed -i "/^queue/i +DESIRED_Sites = \\"${SITE}\\"" "$SUBMIT_FILE"
+fi
+if grep -q '^Requirements' "$SUBMIT_FILE"; then
+    sed -i "s/^Requirements = .*/Requirements = (TARGET.GLIDEIN_CMSSite == \\"${SITE}\\")/" "$SUBMIT_FILE"
+else
+    sed -i "/^queue/i Requirements = (TARGET.GLIDEIN_CMSSite == \\"${SITE}\\")" "$SUBMIT_FILE"
+fi
 exit 0
 """)
     os.chmod(path, 0o755)
@@ -1234,8 +1512,9 @@ def _write_post_script(path: str) -> None:
     _write_file(path, """\
 #!/bin/bash
 # post_script.sh — POST script for processing/merge nodes
-# Called by DAGMan: SCRIPT POST <node> post_script.sh $JOB $RETURN $RETRY $MAX_RETRIES
-NODE_NAME=$1; EXIT_CODE=$2; RETRY_NUM=${3:-0}; MAX_RETRIES=${4:-3}
+# Called by DAGMan: SCRIPT POST <node> post_script.sh $JOB $RETURN $RETRY $MAX_RETRIES [group_dir]
+# group_dir: optional prefix for file paths (spool mode without DIR).
+NODE_NAME=$1; EXIT_CODE=$2; RETRY_NUM=${3:-0}; MAX_RETRIES=${4:-3}; GROUP_DIR=${5:-.}
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 UNLESS_EXIT=42
@@ -1243,7 +1522,7 @@ ABORT_EXIT=43
 
 # Run collector — writes post.json, prints classification category to stdout
 CLASSIFICATION=$(python3 "$SCRIPT_DIR/wms2_post_collect.py" \
-    "$NODE_NAME" "$EXIT_CODE" "$RETRY_NUM" "$MAX_RETRIES" 2>/dev/null || echo "transient")
+    "$NODE_NAME" "$EXIT_CODE" "$RETRY_NUM" "$MAX_RETRIES" "$GROUP_DIR" 2>/dev/null || echo "transient")
 
 if [ "$EXIT_CODE" -eq 0 ]; then
     exit 0
@@ -1251,7 +1530,7 @@ fi
 
 # Memory adjustment: if OOM, bump request_memory by 50%
 if [ "$CLASSIFICATION" = "infrastructure_memory" ]; then
-    SUB_FILE="${NODE_NAME}.sub"
+    SUB_FILE="${GROUP_DIR}/${NODE_NAME}.sub"
     if [ -f "$SUB_FILE" ]; then
         current_mem=$(grep -oP 'request_memory\\s*=\\s*\\K\\d+' "$SUB_FILE")
         if [ -n "$current_mem" ]; then
@@ -1266,11 +1545,11 @@ fi
 # Abort the sub-DAG instead of burning through all retries on remaining nodes.
 # Threshold scales to group size: min(proc_count, 3) so a 2-node group
 # aborts after 2 matching failures instead of never reaching 3.
-PROC_COUNT=$(ls proc_*.sub 2>/dev/null | wc -l)
+PROC_COUNT=$(ls "${GROUP_DIR}"/proc_*.sub 2>/dev/null | wc -l)
 IDENTICAL_THRESHOLD=$((PROC_COUNT < 3 ? PROC_COUNT : 3))
 CURRENT_EXIT="$EXIT_CODE"
 match_count=0
-for pj in proc_*.post.json; do
+for pj in "${GROUP_DIR}"/proc_*.post.json; do
     [ -f "$pj" ] || continue
     pj_exit=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('job',{}).get('exit_code',''))" "$pj" 2>/dev/null)
     if [ "$pj_exit" = "$CURRENT_EXIT" ]; then
@@ -1305,6 +1584,35 @@ case "$CLASSIFICATION" in
     *)
         exit 1 ;;
 esac
+""")
+    os.chmod(path, 0o755)
+
+
+def _write_landing_post_script(path: str) -> None:
+    """Combined POST script for the landing proc node (spool/global pool mode).
+
+    Runs post_script.sh first.  If the job succeeded (exit 0), also runs
+    elect_site.sh to lock the remaining nodes to the elected site.
+    Propagates the exit code from post_script.sh in all cases.
+    """
+    _write_file(path, """\
+#!/bin/bash
+# landing_post.sh — combined POST script for landing proc node
+# Args: $JOB $RETURN $RETRY $MAX_RETRIES group_dir elected_site_file log_file
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+JOB=$1; RETURN=$2; RETRY=$3; MAX_RETRIES=$4; GROUP_DIR=$5
+ELECTED_SITE_FILE=$6; LOG_FILE=$7
+
+# Run standard post_script first
+"$SCRIPT_DIR/post_script.sh" "$JOB" "$RETURN" "$RETRY" "$MAX_RETRIES" "$GROUP_DIR"
+POST_RC=$?
+
+# If the job succeeded, elect the site for remaining nodes
+if [ "$RETURN" -eq 0 ]; then
+    "$SCRIPT_DIR/elect_site.sh" "$ELECTED_SITE_FILE" "$LOG_FILE"
+fi
+
+exit $POST_RC
 """)
     os.chmod(path, 0o755)
 
