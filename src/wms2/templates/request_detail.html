@@ -34,6 +34,10 @@
                     <template x-if="canRestart">
                         <button class="outline" @click="showRestartDialog = true" :disabled="actionLoading">Restart</button>
                     </template>
+                    <template x-if="canDelete">
+                        <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444;"
+                                @click="showDeleteDialog = true" :disabled="actionLoading">Delete</button>
+                    </template>
                 </div>
             </template>
 
@@ -64,6 +68,21 @@
                             @click="doFail()" :disabled="actionLoading">
                         <span x-show="!actionLoading">Confirm Fail</span>
                         <span x-show="actionLoading">Failing...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Delete dialog -->
+            <dialog x-ref="deleteDialog" :open="showDeleteDialog || undefined">
+                <h3>Delete Request</h3>
+                <p>This will permanently delete the request and all related data (workflow, DAGs, processing blocks, history).
+                   You can re-import it afterwards.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showDeleteDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
+                            @click="doDelete()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Delete</span>
+                        <span x-show="actionLoading">Deleting...</span>
                     </button>
                 </div>
             </dialog>
@@ -109,6 +128,26 @@
                         <div style="display:contents;">
                             <dt>Input Dataset</dt>
                             <dd x-text="request.input_dataset" style="word-break:break-all;"></dd>
+                        </div>
+                    </template>
+                    <template x-if="stageoutMode">
+                        <div style="display:contents;">
+                            <dt>Stageout Mode</dt>
+                            <dd x-text="stageoutMode"></dd>
+                        </div>
+                    </template>
+                    <template x-if="processingVersion != null">
+                        <div style="display:contents;">
+                            <dt>Processing Version</dt>
+                            <dd x-text="'v' + processingVersion"></dd>
+                        </div>
+                    </template>
+                    <dt>Work Units</dt>
+                    <dd x-text="'Round 0: 1, Round 1+: ' + (workUnitsPerRound || '—')"></dd>
+                    <template x-if="consolidationRse">
+                        <div style="display:contents;">
+                            <dt>Consolidation RSE</dt>
+                            <dd x-text="consolidationRse"></dd>
                         </div>
                     </template>
                     <dt>Created</dt>

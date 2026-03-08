@@ -4,9 +4,9 @@
 
 | Field | Value |
 |---|---|
-| **Spec Version** | 2.11.0 |
+| **Spec Version** | 2.12.0 |
 | **Status** | DRAFT |
-| **Date** | 2026-03-02 |
+| **Date** | 2026-03-07 |
 | **Authors** | CMS Computing |
 | **Supersedes** | WMCore / WMAgent |
 
@@ -38,7 +38,7 @@ WMS2 delegates all job-level concerns to HTCondor. Where HTCondor lacks needed c
 
 - Full feature parity with WMCore (incremental migration).
 - Monte Carlo generation workflows (focus on data processing first).
-- Data management beyond output registration (full Rucio integration comes later).
+- Full Rucio integration (DBS dataset creation → block management → tape archival). Intermediate Rucio support (DID registration, consolidation rules) is implemented — see §4.5.1 and §4.7.
 - Per-job tracking or state management in WMS2 (delegated to DAGMan).
 - Accounting and resource usage reporting (handled by existing external systems).
 
@@ -538,6 +538,9 @@ class ProcessingBlock(BaseModel):
     # Rucio tape archival (created when block completes)
     tape_rule_id: Optional[str]              # Rucio rule ID for tape archival
 
+    # Rucio consolidation (moves all files to a single target RSE)
+    consolidation_rule_id: Optional[str]     # Rucio rule ID for consolidation
+
     # Retry tracking for Rucio failures
     last_rucio_attempt: Optional[datetime]
     rucio_attempt_count: int = 0
@@ -692,6 +695,8 @@ CREATE TABLE processing_blocks (
     source_rule_ids JSONB DEFAULT '{}',
     -- Rucio tape archival
     tape_rule_id VARCHAR(100),
+    -- Rucio consolidation
+    consolidation_rule_id VARCHAR(100),
     -- Retry tracking for Rucio failures
     last_rucio_attempt TIMESTAMPTZ,
     rucio_attempt_count INTEGER DEFAULT 0,
@@ -1482,18 +1487,24 @@ class MergeGroup(BaseModel):
     # ── Pileup File Resolution ────────────────────────────────────
 
     async def _resolve_pileup(self, workflow) -> dict[str, list[str]]:
-        """Query Rucio for on-disk pileup files.
+        """Query Rucio for on-disk pileup files, with 24-hour caching.
 
         Steps with MCPileup or DataPileup reference pileup datasets whose
         files may be only partially available on disk (many replicas are
-        tape-only). Before each DAG submission round, the DAG Planner queries
-        Rucio for files with on-disk replicas and writes the available list
-        to pileup_files.json in each merge group directory. At runtime the
-        processing wrapper injects this list into the CMSSW PSet
-        (process.mixData.input.fileNames or process.mix.input.fileNames),
-        replacing the ConfigCache defaults. This ensures jobs only attempt
-        to read accessible files. The query repeats each round to reflect
-        changes in replica availability.
+        tape-only). The DAG Planner queries Rucio for files with on-disk
+        replicas and writes the available list to pileup_files.json in each
+        merge group directory. At runtime the processing wrapper injects
+        this list into the CMSSW PSet (process.mixData.input.fileNames or
+        process.mix.input.fileNames), replacing the ConfigCache defaults.
+        This ensures jobs only attempt to read accessible files.
+
+        Results are cached in-memory for 24 hours (module-level dict keyed
+        by dataset name). Pileup datasets are large and stable — replica
+        availability changes slowly, while the Rucio list_replicas query
+        can take minutes due to dataset size and server load. The 24-hour
+        TTL balances freshness against the cost of repeated queries across
+        rounds and re-imports. The cache is per-process and resets on
+        service restart.
         """
         pileup_files: dict[str, list[str]] = {}
         for step in workflow.manifest_steps:
@@ -1717,7 +1728,32 @@ queue 1
         )
 ```
 
-#### 4.5.1 Splitting Algorithms
+#### 4.5.1 Stageout Modes
+
+WMS2 supports three stageout modes, selected at import time (`stageout_mode` in the request's `config_data`). The mode determines how output files move from worker nodes to persistent storage, what LFN prefixes are used, and how outputs are registered in Rucio.
+
+| | **local** | **test** | **production** |
+|---|---|---|---|
+| **Transport** | Filesystem copy (`shutil`) | XRootD via `storage.json` | XRootD via `storage.json` |
+| **LFN prefix** | N/A (local paths) | `/store/temp/user/<user>.wms2.*` | Auto from ReqMgr2 (`/store/mc/...`) |
+| **Rucio scope** | N/A | `user.<username>` | `cms` |
+| **RSE mapping** | N/A | site → `<site>_Temp` | site → as-is |
+| **DID naming** | N/A | `/<Primary>/<Processing>-<Tier>/USER#block_NNN` | `/<Primary>/<Processing>/<Tier>#block_NNN` |
+| **Consolidation RSE** | N/A | `T2_CH_CERN_Temp` | Target site RSE |
+| **Rucio account** | N/A | User account | Service account (admin) |
+| **HTCondor pool** | Local | Global (remote schedd) | Global (remote schedd) |
+
+**Local mode** is for development on a single-machine HTCondor pool. Output files are written directly to the local filesystem via `shutil.copy2`. No grid services are involved.
+
+**Test mode** is for commissioning in the CMS global pool with user-level permissions. Files are staged out via XRootD using CMS `storage.json` for LFN→PFN resolution. The `/store/temp/` LFN prefix and `_Temp` RSE suffix allow registration and rule creation without production-level Rucio privileges. DID names use the `/USER` tier convention required by CMS Rucio policy for non-`cms` scope accounts.
+
+**Production mode** uses real CMS dataset paths (`/store/mc/...`), `cms` scope, and standard RSE names. Requires a service account with the `admin` attribute for `add_replicas` at non-`_Temp` RSEs.
+
+**LFN→PFN resolution**: Each CMS site publishes a `storage.json` file (fetched from SITECONF via CVMFS) that maps logical file names to physical locations. The resolution supports three formats: prefix (simple concatenation, used by CERN), rules (regex-based rewriting, used by FNAL), and chained rules (virtual protocol resolution followed by rules, used by KIT/DESY). The `wms2_stageout.py` utility, transferred to worker nodes alongside the sandbox, implements all three formats.
+
+**Merge output metadata**: The merge job writes `merge_output.json` containing per-dataset file lists with LFN, size, adler32 checksum, and the execution site (`GLIDEIN_CMSSite`). This bridges the DAG execution layer to the Output Manager for Rucio registration.
+
+#### 4.5.2 Splitting Algorithms
 
 ```python
 class FileBasedSplitter:
@@ -2000,21 +2036,37 @@ class DAGMonitor:
 
 ### 4.7 Output Manager
 
-The Output Manager handles the post-compute data pipeline: DBS file registration, Rucio source protection, DBS block closure, and tape archival rule creation. It operates at the **processing block** level — groups of work units that map 1:1 to DBS blocks and tape archival units.
+The Output Manager handles the post-compute data pipeline: Rucio DID registration, consolidation rule creation, DBS file registration, source protection, DBS block closure, and tape archival. It operates at the **processing block** level — groups of work units that map 1:1 to DBS blocks and tape archival units.
 
 The design is fire-and-forget: WMS2 creates Rucio rules and moves on. It does not poll transfer status, manage source protection lifecycle, or track tape completion. Once a rule is created, Rucio owns the outcome. WMS2's only follow-up responsibility is retry with backoff if a Rucio call fails.
+
+**Rucio DID registration** happens incrementally as work units complete. Each merged output file is registered as a Rucio DID at the site where it was produced. The registration flow:
+
+1. `add_replicas(rse, files)` — creates file DIDs and registers physical replicas at the execution site's RSE. For non-deterministic RSEs (e.g. `_Temp`), explicit PFN is provided. File metadata includes LFN, size, and adler32 checksum.
+2. `add_did(scope, container, "CONTAINER")` — creates the container DID (idempotent on 409).
+3. `add_did(scope, block, "DATASET")` — creates the block/dataset DID.
+4. `attach_dids(scope, container, [block])` — attaches the block to the container.
+5. `attach_dids(scope, block, [files])` — attaches file DIDs to the block.
+
+DID registration is non-fatal — failures are logged but do not block processing. The consolidation rule (step 6) depends on DIDs being registered, so a registration failure delays consolidation but not production.
+
+**Consolidation rule** is created when a processing block completes, if `consolidation_rse` is configured (per-request via `config_data` or globally via `WMS2_CONSOLIDATION_RSE`). This creates a Rucio replication rule that moves all block files to the target RSE. For files already at the target site, the rule is immediately satisfied.
+
+DID naming and scope are determined by the stageout mode (see §4.5.1). In test mode, CMS Rucio policy requires `_Temp` RSEs for user-account replica registration and `/USER` in dataset names for non-`cms` scope.
 
 ```python
 class OutputManager:
     """
     Handles the post-compute data pipeline at the processing block level.
 
-    Three interactions per work unit completion:
+    Per work unit completion:
       1. Register files in DBS (open block if first work unit)
-      2. Create Rucio source protection rule
+      2. Register files as Rucio DIDs at the execution site RSE
+      3. Create Rucio source protection rule
 
-    One interaction per block completion:
-      3. Close DBS block, create tape archival rule
+    Per block completion:
+      4. Close DBS block, create tape archival rule
+      5. Create consolidation rule (if consolidation_rse configured)
 
     Called by the Request Lifecycle Manager — not an independent loop.
     """
@@ -2024,10 +2076,10 @@ class OutputManager:
     RUCIO_BACKOFF_SCHEDULE = [60, 300, 1800, 7200, 14400, 28800]  # seconds: 1m, 5m, 30m, 2h, 4h, 8h
 
     async def handle_work_unit_completion(self, workflow_id: UUID, block_id: UUID,
-                                          merge_info: dict):
+                                          merge_info: dict, config_data: dict = None):
         """
         Called when a work unit completes. Registers output files in DBS
-        and creates a Rucio source protection rule.
+        and Rucio, creates source protection rule.
         """
         block = await self.db.get_processing_block(block_id)
 
@@ -2045,7 +2097,14 @@ class OutputManager:
             files=merge_info["output_files"],
         )
 
-        # 2. Create Rucio source protection rule
+        # 2. Register files as Rucio DIDs (non-fatal on failure)
+        site = merge_info.get("site", "local")
+        if merge_info["output_files"] and site != "local":
+            await self._register_files_in_rucio(
+                block, merge_info["output_files"], site, config_data,
+            )
+
+        # 3. Create Rucio source protection rule
         rule_id = await self._rucio_call_with_retry(
             block, "create_rule",
             self.rucio_adapter.create_rule,
@@ -2054,7 +2113,7 @@ class OutputManager:
             lifetime=None,
         )
 
-        # 3. Update block state
+        # 4. Update block state
         node_name = merge_info["node_name"]
         source_rules = dict(block.source_rule_ids)
         source_rules[node_name] = rule_id
@@ -2065,14 +2124,53 @@ class OutputManager:
             source_rule_ids=source_rules,
         )
 
-        # 4. Check if block is now complete
+        # 5. Check if block is now complete
         if len(completed) >= block.total_work_units:
-            await self._complete_block(block)
+            await self._complete_block(block, config_data)
 
-    async def _complete_block(self, block: ProcessingBlock):
+    async def _register_files_in_rucio(self, block, output_files, site, config_data):
+        """Register merged output files as Rucio DIDs at the execution site RSE.
+
+        Stageout mode (from config_data) determines naming:
+          test:       scope=user.<name>, RSE=<site>_Temp, /USER DID tier
+          production: scope=cms, RSE=<site>, standard CMS DID naming
         """
-        All work units in the block are done. Close the DBS block
-        and create a tape archival rule for the entire block.
+        stageout_mode = (config_data or {}).get("stageout_mode", "local")
+        if stageout_mode == "local":
+            return
+        if stageout_mode == "test":
+            scope = "user.<username>"  # configured per deployment
+            rse = f"{site}_Temp"
+        else:
+            scope = "cms"
+            rse = site
+
+        # Build Rucio DID names from CMS dataset name
+        primary, processing, tier = block.dataset_name.strip("/").split("/")
+        if stageout_mode == "test":
+            container = f"/{primary}/{processing}-{tier}/USER"
+            block_did = f"{container}#block_{block.block_index:03d}"
+        else:
+            block_did = f"{block.dataset_name}#block_{block.block_index:03d}"
+            container = None
+
+        replicas = [{"scope": scope, "name": f["lfn"], "bytes": f["size"],
+                      "adler32": f.get("adler32", ""), "pfn": pfn_prefix + f["lfn"]}
+                     for f in output_files if f.get("lfn")]
+        file_dids = [{"scope": scope, "name": r["name"]} for r in replicas]
+
+        await self.rucio.register_replicas(rse, replicas)
+        if container:
+            await self.rucio.add_did(scope, container, "CONTAINER")
+        await self.rucio.add_did(scope, block_did, "DATASET")
+        if container:
+            await self.rucio.attach_dids(scope, container, [{"scope": scope, "name": block_did}])
+        await self.rucio.attach_dids(scope, block_did, file_dids)
+
+    async def _complete_block(self, block, config_data=None):
+        """
+        All work units in the block are done. Close the DBS block,
+        create tape archival rule, and create consolidation rule.
         """
         # Close DBS block
         await self.dbs_adapter.close_block(block.dbs_block_name)
@@ -2085,12 +2183,23 @@ class OutputManager:
             block, "create_tape_rule",
             self.rucio_adapter.create_rule,
             dataset=block.dataset_name,
-            rse_expression="tier=1&type=TAPE",  # Tape RSE expression
+            rse_expression="tier=1&type=TAPE",
         )
 
         await self.db.update_processing_block(block.id,
             tape_rule_id=tape_rule_id, status=BlockStatus.ARCHIVED,
         )
+
+        # Create consolidation rule (if configured)
+        consolidation_rse = (config_data or {}).get("consolidation_rse", "")
+        if consolidation_rse:
+            rule_id = await self.rucio.create_rule(
+                dataset=self._rucio_did_name(block, config_data),
+                destination=consolidation_rse,
+            )
+            await self.db.update_processing_block(
+                block.id, consolidation_rule_id=rule_id,
+            )
 
     async def process_blocks_for_workflow(self, workflow_id: UUID):
         """
@@ -3282,9 +3391,9 @@ This section captures significant design decisions and the reasoning behind them
 
 ### DD-9: Fire-and-forget Rucio interaction
 
-**Decision**: WMS2 creates Rucio rules (source protection per work unit, tape archival per block) and does not track their progress. Once a rule is created, Rucio owns the outcome — transfers, source cleanup, tape writes, and subscription-driven distribution are all Rucio's responsibility. WMS2's only follow-up is retry with backoff if a rule creation call fails.
+**Decision**: WMS2 creates Rucio rules (source protection per work unit, tape archival per block, consolidation per block) and does not track their progress. Once a rule is created, Rucio owns the outcome — transfers, source cleanup, tape writes, and subscription-driven distribution are all Rucio's responsibility. WMS2's only follow-up is retry with backoff if a rule creation call fails.
 
-**Why**: WMS2 is an orchestrator, not a data management system. Rucio already handles transfer scheduling, status tracking, subscription-driven placement, and cleanup. Duplicating any of this in WMS2 (polling transfer status, managing source protection lifecycle, determining placement destinations) would create a fragile shadow of Rucio's own state machine. The previous design had WMS2 polling Rucio transfer status every 5 minutes across hundreds of workflows, managing an 8-state output lifecycle, and querying subscriptions to determine destinations — all of which is Rucio's job. The simplified design reduces WMS2's Rucio interaction to two API calls: `create_rule()` for source protection (per work unit) and `create_rule()` for tape archival (per block).
+**Why**: WMS2 is an orchestrator, not a data management system. Rucio already handles transfer scheduling, status tracking, subscription-driven placement, and cleanup. Duplicating any of this in WMS2 (polling transfer status, managing source protection lifecycle, determining placement destinations) would create a fragile shadow of Rucio's own state machine. The previous design had WMS2 polling Rucio transfer status every 5 minutes across hundreds of workflows, managing an 8-state output lifecycle, and querying subscriptions to determine destinations — all of which is Rucio's job. The simplified design reduces WMS2's Rucio interaction to a small number of `create_rule()` calls: source protection (per work unit), tape archival (per block), and consolidation (per block, optional).
 
 **Rejected alternative**: WMS2 tracks transfer completion, manages source protection lifecycle, queries Rucio subscriptions for placement. Over-engineered — WMS2 was doing Rucio's job.
 
@@ -3350,7 +3459,17 @@ measured data for the bulk of its processing.
 - *Three-tier thresholds (5%/30%)*: Two operator-attention states with no meaningful difference in available actions. Added complexity for no benefit.
 - *Automatic FAILED on high failure ratio*: Dangerous — transient infrastructure issues could trigger automatic failure and output invalidation on requests that would succeed after the issue resolves.
 
-### DD-15: ConfigCache for PSet retrieval (short-term), McM-based generation (long-term)
+### DD-15: Three stageout modes (local / test / production)
+
+**Decision**: Stageout mode is a required import-time parameter that determines how output files move from worker nodes to storage, what LFN prefixes are used, and how outputs are registered in Rucio. Three modes: `local` (filesystem copy for dev), `test` (grid stageout with user-level Rucio permissions), `production` (grid stageout with full CMS Rucio privileges).
+
+**Why**: CMS Rucio enforces a strict permission model — `add_replicas` requires either the `admin` account attribute or a `_Temp` RSE suffix, and non-`cms` scope DIDs must use `/USER` in the dataset name. A single "grid" mode would need production credentials (service account with admin attribute) even for testing, making commissioning impossible with a user account. The three-mode design lets us iterate on the full pipeline (stageout → Rucio DID registration → consolidation rules) using user-level permissions at `_Temp` RSEs, with `/store/temp/` LFN paths, before requiring production infrastructure. The `local` mode preserves single-machine development velocity with no external dependencies.
+
+**Rejected alternatives**:
+- *Single "grid" mode with credential-based behavior*: Mixing permission logic into runtime made the code harder to reason about and test. The mode should be explicit and visible at import time.
+- *No Rucio registration in WMS2*: Files scattered across multiple sites with no catalog would require manual aggregation. Even an intermediate solution (DID registration + consolidation rules without full DBS integration) provides significant operational value.
+
+### DD-16: ConfigCache for PSet retrieval (short-term), McM-based generation (long-term)
 
 **Decision**: Fetch pre-generated PSets from CMS ConfigCache (CouchDB) using the `ConfigCacheID` present in each step of a StepChain request. One HTTP GET per step (`{configcache_url}/{ConfigCacheID}/configFile`), no CMSSW environment needed. Falls back to generated test stubs if ConfigCache is unreachable or no `ConfigCacheID` is present.
 
@@ -3361,6 +3480,14 @@ measured data for the bulk of its processing.
 **Rejected alternatives**:
 - *Run cmsDriver.py at sandbox creation time*: Requires a full CMSSW environment on the WMS2 host. Heavyweight and slow for a step that only needs to produce a Python config file.
 - *Embed PSets in the request spec*: PSets can be hundreds of KB. ReqMgr2 request documents are not designed for large binary payloads.
+
+### DD-17: In-memory pileup file cache with 24-hour TTL
+
+**Decision**: Cache the results of Rucio `list_replicas` queries for pileup datasets in a module-level dict, keyed by dataset name, with a 24-hour time-to-live. Subsequent DAG planning rounds and re-imports reuse cached results instead of re-querying Rucio.
+
+**Why**: Pileup datasets (e.g., PREMIX with millions of files) are large and stable — replica availability changes slowly (hours to days), but the Rucio `list_replicas` query can take 30–120+ seconds per dataset, and sometimes hits 502 errors with exponential backoff retries in the native Rucio client. A single request with 3751 work units goes through hundreds of rounds, each re-querying the same pileup dataset. The 24-hour TTL eliminates this repeated cost while still picking up significant replica changes within a day.
+
+**Trade-offs**: If a major pileup redistribution happens mid-request, jobs may see a stale file list for up to 24 hours. This is acceptable because CMSSW pileup mixing uses random file selection from the list — a slightly outdated list only means occasional AAA remote reads for files that moved, not job failures. The cache resets on service restart for immediate freshness if needed.
 
 ---
 

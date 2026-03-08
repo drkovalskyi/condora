@@ -81,6 +81,9 @@ async def list_requests(
         d["events_produced"] = ep
         d["target_events"] = te
         d["progress_pct"] = (ep / te * 100) if te > 0 else None
+        cd = item.get("config_data") or {}
+        d["condor_pool"] = cd.get("condor_pool", "local")
+        d["stageout_mode"] = cd.get("stageout_mode", "local")
         result.append(d)
     return result
 
@@ -167,10 +170,23 @@ async def stop_request(
 
     previous_status = existing.status
 
-    # Mark current DAG as stop-requested
+    # Mark current DAG as stop-requested and remove from condor
     workflow = await repo.get_workflow_by_request(request_name)
     if workflow and workflow.dag_id:
         now = datetime.now(timezone.utc)
+        dag = await repo.get_dag(workflow.dag_id)
+        if dag and dag.status in (DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value):
+            try:
+                condor = raw_request.app.state.condor
+                await condor.remove_job(
+                    schedd_name=dag.schedd_name,
+                    cluster_id=dag.dagman_cluster_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to condor_rm DAG %s for %s — lifecycle manager will retry",
+                    dag.dagman_cluster_id, request_name, exc_info=True,
+                )
         await repo.update_dag(
             workflow.dag_id,
             stop_requested_at=now,
@@ -326,6 +342,41 @@ async def fail_request(
         "status": "failed",
         "previous_status": previous_status,
         "message": f"Request {request_name} marked as failed",
+    }
+
+
+@router.delete("/{request_name}", response_model=dict)
+async def delete_request(
+    request_name: str,
+    repo: Repository = Depends(get_repository),
+):
+    """Delete a failed or aborted request and all related rows."""
+    existing = await repo.get_request(request_name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    deletable = ("failed", "aborted")
+    if existing.status not in deletable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only delete requests in failed/aborted state, "
+                   f"current status: {existing.status}",
+        )
+
+    workflow = await repo.get_workflow_by_request(request_name)
+    if workflow:
+        for dag in await repo.list_dags(workflow_id=workflow.id):
+            await repo.delete_dag_history(dag.id)
+            await repo.delete_dag(dag.id)
+        for block in await repo.get_processing_blocks(workflow.id):
+            await repo.delete_processing_block(block.id)
+        await repo.delete_workflow(workflow.id)
+    await repo.delete_request(request_name)
+    logger.info("Deleted request %s (was %s)", request_name, existing.status)
+
+    return {
+        "request_name": request_name,
+        "message": f"Request {request_name} deleted",
     }
 
 

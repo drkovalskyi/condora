@@ -4832,6 +4832,105 @@ Mock implementations in `adapters/mock.py` with call history tracking for test a
 4. For integration tests: `docker compose -f docker-compose.test.yml up -d` then `pytest tests/integration/ -v`
 5. For full app: `docker compose up -d db` then `alembic upgrade head` then `uvicorn wms2.main:create_app --factory`
 
+## Rucio Pipeline, Import Hardening, and Observability (2026-03-08)
+
+### Rucio DID Registration Pipeline (test mode)
+
+Implemented end-to-end Rucio DID registration for test stageout mode. When
+`stageout_mode=test`, the OutputManager registers merged output files as Rucio
+DIDs at `_Temp` RSEs (e.g. `T2_CH_CERN_Temp`) with scope `user.dmytro`.
+
+**Key changes:**
+- **RucioClient refactored to native client** (`adapters/rucio.py`): All write
+  operations (register_replicas, add_did, attach_dids, create_rule, delete_rule,
+  get_rule_status) now use the native `rucio.client.Client` via
+  `asyncio.to_thread()`. The httpx-based adapter couldn't authenticate to CMS
+  Rucio (X.509 proxy → token exchange). The native client handles auth correctly.
+- **Scope parameter added to create_rule**: `scope` kwarg (default `"cms"`)
+  passed through base adapter, mock, and real client. Test mode uses
+  `user.dmytro`.
+- **Fatal Rucio errors** (`RucioRegistrationError`): Rucio failures now
+  propagate as exceptions to the lifecycle manager, which holds the request.
+  Previously failures were silently logged and ignored.
+- **Per-file site annotation**: Files in `output_files` JSONB carry a `"site"`
+  field, enabling correct RSE selection during retry for multi-site workflows.
+- **_Temp RSE guard**: Sites without a known `_Temp` RSE mapping are skipped
+  for registration (files exist on grid but not tracked by Rucio in test mode).
+- **Idempotent attach_dids**: Catches "already exists", "duplicate", and
+  "already added" error messages from Rucio.
+- **Source protection and tape archival skipped for test mode**: Only fire in
+  production mode (user account lacks admin privileges for these operations).
+
+**DB migration 006**: Added `output_files` (JSONB) and `site` (VARCHAR) columns
+to `processing_blocks` table. Block state (files + site) is saved before Rucio
+calls so data persists even if Rucio fails.
+
+**Lifecycle manager integration**: `OutputManager` now receives the real
+`self.rucio` adapter instead of `MockRucioAdapter`. `RucioRegistrationError`
+is caught and transitions the request to HELD.
+
+**Consolidation RSE**: Auto-set to `T2_CH_CERN_Temp` for test-mode imports.
+
+### Import Endpoint Hardening
+
+- **Detailed import logging**: Every step now logs with wall-clock timing:
+  clear old data, ReqMgr2 fetch, sandbox creation, workflow creation, DAG
+  planning, HTCondor submission, and total elapsed time. Previously the import
+  had almost no logging — if it hung or failed partway through, there was no
+  way to diagnose where.
+- **Non-blocking sandbox creation**: `create_sandbox()` is now called via
+  `asyncio.to_thread()` so synchronous ConfigCache HTTPS calls don't freeze
+  the entire event loop. Previously a slow ConfigCache fetch would block all
+  API requests and lifecycle cycles.
+- **Import replace flow**: Server returns 409 when request exists in
+  failed/aborted state; UI shows confirmation dialog; user confirms; second
+  POST with `replace=true` clears old data and re-imports.
+
+### DAG Planner Observability
+
+Added fine-grained timing to `plan_production_dag()`:
+- Node planning (splitting) time
+- Per-dataset pileup resolution time
+- DAG file generation time
+- HTCondor submission time
+
+Each sub-step logs independently so bottlenecks are immediately visible.
+
+### Pileup File Caching (DD-17)
+
+Module-level in-memory cache for Rucio `list_replicas` results on pileup
+datasets. 24-hour TTL. Pileup datasets are large (millions of files) and
+stable — the Rucio query can take 30–120+ seconds and sometimes hits 502
+errors with exponential backoff. The cache eliminates repeated queries across
+rounds and re-imports. Resets on service restart.
+
+### Request Delete Endpoint
+
+Added `DELETE /api/v1/requests/{name}` for explicit cleanup of failed/aborted
+requests. Removes all related rows (workflow, DAGs, processing blocks, history).
+Delete button added to request detail page UI for failed/aborted requests.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `adapters/rucio.py` | Native client refactor, scope param, retry with backoff |
+| `adapters/base.py` | scope kwarg on create_rule ABC |
+| `adapters/mock.py` | scope kwarg on mock create_rule |
+| `core/output_manager.py` | Fatal errors, per-file site, _Temp RSE guard, test mode skip |
+| `core/lifecycle_manager.py` | RucioRegistrationError handling, real Rucio adapter |
+| `core/dag_planner.py` | Detailed timing, pileup cache (24h TTL) |
+| `api/import_endpoint.py` | Detailed logging, asyncio.to_thread for sandbox |
+| `api/requests.py` | DELETE endpoint for failed/aborted requests |
+| `db/tables.py` | output_files, site columns on ProcessingBlockRow |
+| `db/migrations/versions/006_*` | Migration for output_files + site columns |
+| `static/js/api.js` | DELETE method, deleteRequest API |
+| `static/js/components/import-form.js` | Fixed replace dialog, progress messages |
+| `static/js/components/request-detail.js` | Delete button, canDelete, doDelete |
+| `templates/import.html` | Replace dialog |
+| `templates/request_detail.html` | Delete dialog |
+| `docs/spec.md` | DD-17 pileup caching, updated pileup resolution docs |
+
 ## Design Decisions
 
 - **Repository pattern**: Single class with AsyncSession injection rather than per-entity repositories. Simpler for Phase 1; can split later if needed.

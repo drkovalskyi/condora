@@ -63,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--merged-lfn-base", default=None,
                      help="Override MergedLFNBase (e.g. /store/mc or /store/data). "
                           "Auto-determined from input dataset if not specified.")
+    imp.add_argument("--stageout-mode", required=True, choices=["local", "test", "production"],
+                     help="Stageout mode: local (filesystem copy), test (grid, /store/temp/, _Temp RSEs), "
+                          "production (grid, /store/, real RSEs)")
+    imp.add_argument("--processing-version", type=int, default=None,
+                     help="Override ProcessingVersion (changes -vN in output dataset paths)")
+    imp.add_argument("--work-units-per-round", type=int, default=None,
+                     help="Work units per production round (round 1+). Default: global setting.")
     imp.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     # ── delete subcommand ──
@@ -348,6 +355,12 @@ async def run_import(args: argparse.Namespace) -> None:
             reqdata = await reqmgr.get_request(request_name)
             reqdata = _normalize_request(reqdata)
 
+            # Override processing version if requested
+            if args.processing_version is not None:
+                from wms2.api.import_endpoint import _apply_processing_version
+                _apply_processing_version(reqdata, args.processing_version)
+                print(f"      proc_ver:    v{args.processing_version} (CLI override)")
+
             print(f"      type:        {reqdata.get('RequestType')}")
             print(f"      dataset:     {reqdata.get('InputDataset')}")
             print(f"      splitting:   {reqdata.get('SplittingAlgo')}")
@@ -368,10 +381,15 @@ async def run_import(args: argparse.Namespace) -> None:
             # But WorkflowManager.import_request calls reqmgr.get_request again,
             # which is fine — it's idempotent. However, it won't have our normalization.
             # So create the workflow row directly instead.
-            # Determine MergedLFNBase: CLI override > auto-determination > default
+            # Determine MergedLFNBase based on stageout mode
+            stageout_mode = args.stageout_mode
             if args.merged_lfn_base:
                 merged_lfn_base = args.merged_lfn_base
                 print(f"      lfn_base:    {merged_lfn_base} (CLI override)")
+            elif stageout_mode == "test":
+                merged_lfn_base = "/store/temp/user/dmytro.wms2.merged"
+                reqdata["UnmergedLFNBase"] = "/store/temp/user/dmytro.wms2.unmerged"
+                print(f"      lfn_base:    {merged_lfn_base} (test mode)")
             else:
                 merged_lfn_base = await determine_merged_lfn_base(reqdata, dbs_adapter=dbs)
                 print(f"      lfn_base:    {merged_lfn_base} (auto-determined)")
@@ -401,6 +419,16 @@ async def run_import(args: argparse.Namespace) -> None:
                 config_data["request_num_events"] = reqdata.get("RequestNumEvents", 0)
             if args.test_fraction is not None:
                 config_data["test_fraction"] = args.test_fraction
+
+            # Stageout mode and condor pool
+            config_data["stageout_mode"] = stageout_mode
+            config_data["condor_pool"] = "local" if stageout_mode == "local" else "global"
+            if stageout_mode == "test":
+                config_data["consolidation_rse"] = "T2_CH_CERN_Temp"
+            if args.processing_version is not None:
+                config_data["processing_version"] = args.processing_version
+            if args.work_units_per_round is not None:
+                config_data["work_units_per_round"] = args.work_units_per_round
 
             # Priority profile
             config_data["priority_profile"] = {
@@ -465,6 +493,19 @@ async def run_import(args: argparse.Namespace) -> None:
 
             # 2. Plan production DAG
             dp = DAGPlanner(repo, dbs, rucio, condor, settings)
+
+            # When condor_pool=global, the CLI lacks spool env vars
+            # (WMS2_SPOOL_MOUNT, WMS2_REMOTE_SPOOL_PREFIX, WMS2_REMOTE_SCHEDD).
+            # Leave request as "queued" and let the lifecycle manager (which has
+            # the correct env) handle DAG planning + spool-mode submission.
+            if config_data.get("condor_pool") == "global" and not settings.spool_mount:
+                await _transition_request(repo, request_name, "submitted", RequestStatus.QUEUED)
+                await session.commit()
+                print("[2/5] Global pool — skipping local DAG submission")
+                print("      Lifecycle manager will plan and submit with spool mode.")
+                print()
+                print("=== Request queued — lifecycle manager will handle submission ===")
+                return
 
             if dry_run:
                 print("[2/5] Planning production DAG (dry-run, no HTCondor)...")

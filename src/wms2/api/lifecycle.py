@@ -27,7 +27,7 @@ EDITABLE_FIELDS = {
     "site_ban_failure_ratio": (float, lambda v: 0 < v <= 1),
     "log_level": (str, lambda v: v.upper() in ("DEBUG", "INFO", "WARNING", "ERROR")),
     "default_pilot_priority": (int, lambda v: True),
-    "stageout_mode": (str, lambda v: v in ("local", "grid")),
+    "stageout_mode": (str, lambda v: v in ("local", "test", "production")),
     "pileup_remote_read": (bool, lambda v: isinstance(v, bool)),
 }
 

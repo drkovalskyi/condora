@@ -28,6 +28,15 @@ const WMS2_API = (() => {
         return resp.json();
     }
 
+    async function del(path) {
+        const resp = await fetch(prefix + path, { method: 'DELETE' });
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => null);
+            throw new Error(data?.detail || `${resp.status} ${resp.statusText}`);
+        }
+        return resp.json();
+    }
+
     async function patch(path, body = {}) {
         const resp = await fetch(prefix + path, {
             method: 'PATCH',
@@ -57,6 +66,7 @@ const WMS2_API = (() => {
         stopRequest:       (name, reason) => post('/requests/' + encodeURIComponent(name) + '/stop', { reason }),
         releaseRequest:    (name)       => post('/requests/' + encodeURIComponent(name) + '/release'),
         failRequest:       (name)       => post('/requests/' + encodeURIComponent(name) + '/fail'),
+        deleteRequest:     (name)       => del('/requests/' + encodeURIComponent(name)),
         restartRequest:    (name)       => post('/requests/' + encodeURIComponent(name) + '/restart'),
 
         // Workflows

@@ -45,6 +45,19 @@ Build observability for WMS2:
 - HTCondor queue overview (running/idle/held by workflow)
 - Technology TBD (Prometheus + Grafana, or simple web UI, or CLI status command)
 
+### Output registration pipeline (not commissioned)
+
+DBS write operations (open_block, register_files, close_block) and
+Rucio rule creation (source protection, tape archival) are scaffolded
+in the OutputManager but must not run against production services yet.
+The dataset creation step (inject_dataset) is missing from the DBS
+pipeline, so writes always fail. DBS reads (get_files, list_files) and
+Rucio reads (get_replicas) are fine — used by DAG planner. Currently
+the OutputManager receives mock adapters for both DBS and Rucio to
+suppress writes. Commission the full output registration pipeline
+(DBS dataset creation → block management → Rucio rules) against test
+instances before enabling.
+
 ## Develop Next
 
 - Comission execution at other sites. We should follow closely
@@ -84,6 +97,59 @@ request status. Confirm no time was wasted on unnecessary retries. If
 error handling misbehaved, fix it before re-running.
 
 ---
+
+## Stageout modes
+
+Three stageout modes, selected at import time (`--stageout-mode`):
+
+| | local | test | production |
+|---|---|---|---|
+| Stageout | filesystem copy | xrdcp via storage.json | xrdcp via storage.json |
+| LFN prefix | N/A | `/store/temp/user/dmytro.wms2.*` | auto from ReqMgr2 (`/store/mc/...`) |
+| Rucio scope | N/A | `user.dmytro` | `cms` |
+| RSE mapping | N/A | site → `_Temp` (e.g. `T2_CH_CERN_Temp`) | site → as-is (e.g. `T2_CH_CERN`) |
+| DID tier | N/A | `/USER#block` | `/AODSIM#block` |
+| Consolidation RSE | N/A | `T2_CH_CERN_Temp` | `T2_CH_CERN` |
+| Rucio account | N/A | `dmytro` (user, no admin) | service account (admin) |
+| Condor pool | local | global (remote schedd) | global (remote schedd) |
+
+## Rucio output consolidation (intermediate)
+
+Rucio DID registration and consolidation rule support is implemented as an
+intermediate solution. When `consolidation_rse` is set (per-request via
+`config_data` or globally via `WMS2_CONSOLIDATION_RSE`), the OutputManager:
+
+1. Registers merged output files as Rucio DIDs at the execution site RSE
+2. Creates a consolidation replication rule to move files to the target RSE
+
+This is separate from the full DBS+Rucio pipeline (DD-4, DD-5, DD-9) in the
+spec. DBS writes remain disabled.
+
+**Rucio permissions (CMS policy):**
+- `add_replicas`: requires `admin` attribute OR `_Temp` RSE
+- `add_did` (dataset): non-cms scope requires `/USER#` in name
+- `add_did` (container): non-cms scope requires name ending with `/USER`
+- Account `dmytro`: 1 TB at `T2_CH_CERN`, 10 TB at `T2_CH_CERN_Temp`
+- Auth: X.509 proxy → token exchange via `cms-rucio-auth.cern.ch`
+
+**Pending:**
+- **Refactor `RucioClient` to use native Rucio Python client** — The current
+  httpx-based adapter cannot authenticate to CMS Rucio. CMS Rucio requires a
+  two-step flow: X.509 proxy → token exchange via `cms-rucio-auth.cern.ch`,
+  then token-based API calls. httpx doesn't present proxy certs correctly
+  ("Cannot get DN"). The native `rucio.client.Client` (already used for
+  pileup file listing) handles auth correctly. Refactor all `RucioClient`
+  methods to wrap it instead of raw httpx.
+- **CMS DID naming** — CMS Rucio enforces a schema: dataset DIDs must be
+  blocks (`/Primary/Processed/TIER#blockname`). File DIDs cannot be created
+  by user accounts. Replica registration (`add_replicas`) requires a service
+  account or `_Temp` RSE. Adjust `_register_files_in_rucio()` for CMS
+  conventions — in test mode use `_Temp` RSEs with explicit PFN.
+- **Rucio account** — User account `dmytro` can register replicas at `_Temp`
+  RSEs and create rules. Production mode needs service account with `admin`
+  attribute (e.g. `wma_prod`, `wmcore_output`).
+- **Scope** — Production uses `cms` scope; user testing uses `user.dmytro`.
+  Make scope configurable.
 
 ## Known bugs
 

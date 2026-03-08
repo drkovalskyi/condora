@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     rucio_url: str = "https://cms-rucio.cern.ch"
     rucio_account: str = "wms2"
     rucio_home: str = "/tmp/rucio"
+    consolidation_rse: str = ""  # target RSE for output consolidation (e.g. "T2_CH_CERN_Disk")
 
     # Agent identity
     agent_name: str = "wms2-agent"
@@ -98,7 +99,8 @@ class Settings(BaseSettings):
 
     # Output staging — LFN→PFN mapping
     # stageout_mode: "local" = filesystem copy (PFN = local_pfn_prefix + LFN)
-    #                "grid"  = resolve via storage.json (xrdcp/gfal-copy)
+    #                "test"  = grid stageout to /store/temp/, _Temp RSEs, user Rucio scope
+    #                "production" = grid stageout to /store/, real RSEs, cms Rucio scope
     stageout_mode: str = "local"
     local_pfn_prefix: str = "/mnt/shared"
 

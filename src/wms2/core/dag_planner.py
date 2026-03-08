@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,22 @@ from wms2.db.repository import Repository
 from wms2.models.enums import DAGStatus, WorkflowStatus
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for pileup file lists.
+# Key: dataset name, Value: (timestamp, file_list)
+_pileup_cache: dict[str, tuple[float, list[str]]] = {}
+PILEUP_CACHE_TTL = 24 * 3600  # 24 hours
+
+
+def _effective_stageout(mode: str) -> str:
+    """Normalize stageout_mode for DAG generation.
+
+    Both 'test' and 'production' use grid stageout (xrdcp via storage.json).
+    The DAG planner only cares about 'local' vs 'grid'.
+    """
+    if mode in ("test", "production", "grid"):
+        return "grid"
+    return "local"
 
 
 # ── Data classes ────────────────────────────────────────────────
@@ -219,11 +236,15 @@ class DAGPlanner:
         else:
             max_jobs = 0
 
+        t_plan = time.monotonic()
         if is_gen:
             # GEN workflow: no input files, create synthetic event-range nodes
             nodes = self._plan_gen_nodes(workflow, config, max_jobs=max_jobs)
         else:
             nodes = await self._plan_file_based_nodes(workflow, max_jobs=max_jobs)
+        logger.info("Plan %s round %d: %d proc nodes planned in %.1fs",
+                     workflow.request_name, current_round, len(nodes) if nodes else 0,
+                     time.monotonic() - t_plan)
 
         if not nodes:
             if adaptive:
@@ -338,14 +359,23 @@ class DAGPlanner:
                 workflow_id=workflow.id
             )
 
-        # Resolve pileup file availability via Rucio
+        # Resolve pileup file availability via Rucio (with 24h cache)
+        t_pileup = time.monotonic()
         pileup_files: dict[str, list[str]] = {}
         manifest_steps = config.get("manifest_steps", [])
         if self.rucio and manifest_steps:
+            now_ts = time.time()
             for step in manifest_steps:
-                for field in ("mc_pileup", "data_pileup"):
-                    ds = step.get(field, "")
+                for pu_field in ("mc_pileup", "data_pileup"):
+                    ds = step.get(pu_field, "")
                     if ds and ds not in pileup_files:
+                        # Check cache first
+                        cached = _pileup_cache.get(ds)
+                        if cached and (now_ts - cached[0]) < PILEUP_CACHE_TTL:
+                            pileup_files[ds] = cached[1]
+                            logger.info("Pileup %s: %d files (cached)", ds, len(cached[1]))
+                            continue
+                        t_pu = time.monotonic()
                         try:
                             preferred = [
                                 r.strip()
@@ -354,14 +384,18 @@ class DAGPlanner:
                             ] or None
                             files = await self.rucio.get_available_pileup_files(ds, preferred_rses=preferred)
                             pileup_files[ds] = files
-                            if preferred:
-                                logger.info("Pileup %s: %d files at preferred RSEs %s", ds, len(files), preferred)
-                            else:
-                                logger.info("Pileup %s: %d files", ds, len(files))
+                            _pileup_cache[ds] = (now_ts, files)
+                            logger.info("Pileup %s: %d files in %.1fs%s",
+                                        ds, len(files), time.monotonic() - t_pu,
+                                        f" (preferred RSEs {preferred})" if preferred else "")
                         except Exception:
                             logger.warning(
-                                "Rucio pileup query failed for %s", ds, exc_info=True
+                                "Pileup %s: Rucio query failed after %.1fs",
+                                ds, time.monotonic() - t_pu, exc_info=True,
                             )
+        pileup_elapsed = time.monotonic() - t_pileup
+        if pileup_elapsed > 1.0:
+            logger.info("Plan %s: pileup resolution took %.1fs", workflow.request_name, pileup_elapsed)
 
         # Determine job priority from priority profile
         priority_profile = config.get("priority_profile", {})
@@ -404,6 +438,7 @@ class DAGPlanner:
             except Exception:
                 logger.warning("Could not fetch site list for DESIRED_Sites")
 
+        t_gen = time.monotonic()
         dag_file_path = _generate_dag_files(
             submit_dir=submit_dir,
             workflow_id=str(workflow.id),
@@ -421,7 +456,7 @@ class DAGPlanner:
             pileup_files=pileup_files or None,
             job_priority=job_priority,
             extra_classads=config.get("extra_classads"),
-            stageout_mode=config.get("stageout_mode", self.settings.stageout_mode),
+            stageout_mode=_effective_stageout(config.get("stageout_mode", self.settings.stageout_mode)),
             pileup_remote_read=self.settings.pileup_remote_read,
             spool_mode=use_spool,
             allowed_sites=(
@@ -432,8 +467,12 @@ class DAGPlanner:
             all_sites=all_site_names or None,
         )
 
+        logger.info("Plan %s: DAG files generated in %.1fs (%d WUs, %s)",
+                     workflow.request_name, time.monotonic() - t_gen,
+                     len(merge_groups), "spool" if use_spool else "local")
+
         # 8. Count totals
-        stageout_mode = config.get("stageout_mode", self.settings.stageout_mode)
+        stageout_mode = _effective_stageout(config.get("stageout_mode", self.settings.stageout_mode))
         skip_site_pinning = (stageout_mode == "grid")
         total_proc = sum(len(mg.processing_nodes) for mg in merge_groups)
         if skip_site_pinning:
@@ -500,11 +539,14 @@ class DAGPlanner:
                 await self.db.update_workflow(workflow.id, **target_kwargs)
 
         # 11. Submit DAG to HTCondor
+        t_submit = time.monotonic()
         remote_schedd = self.settings.remote_schedd if use_spool else None
         cluster_id, schedd = await self.condor.submit_dag(
             dag_file_path, force=True, spool=use_spool,
             schedd_name=remote_schedd,
         )
+        logger.info("Plan %s: HTCondor submit in %.1fs (cluster=%s, schedd=%s)",
+                     workflow.request_name, time.monotonic() - t_submit, cluster_id, schedd)
         now = datetime.now(timezone.utc)
 
         # For spool mode, map the remote spool Iwd to local sshfs mount
@@ -3438,6 +3480,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import zlib
 from datetime import datetime, timezone
 
 # ── Argument parsing ──────────────────────────────────────────
@@ -3468,6 +3511,7 @@ stageout_mode = info.get("stageout_mode", "local")
 group_index = info["group_index"]
 datasets = info.get("output_datasets", [])
 max_merge_size = info.get("max_merge_size", 4 * 1024**3)
+_glidein_site = os.environ.get("GLIDEIN_CMSSite", "")
 
 # Grid mode: import stageout utility
 stageout = None
@@ -4233,7 +4277,7 @@ if root_files:
     # Write merge_output.json for DAGMonitor → OutputManager bridge
     merge_output = {
         "group_index": group_index,
-        "site": "local",
+        "site": _glidein_site if _glidein_site else "local",
         "datasets": {},
     }
     for ds in datasets:
@@ -4250,9 +4294,18 @@ if root_files:
             for f in sorted(os.listdir(merged_dir)):
                 fp = os.path.join(merged_dir, f)
                 if os.path.isfile(fp):
+                    # Compute adler32 checksum for Rucio registration
+                    cksum = 1  # adler32 initial value
+                    with open(fp, "rb") as cf:
+                        while True:
+                            chunk = cf.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            cksum = zlib.adler32(chunk, cksum) & 0xFFFFFFFF
                     files.append({
                         "lfn": f"{merged_base}/{group_index:06d}/{f}",
                         "size": os.path.getsize(fp),
+                        "adler32": "%08x" % cksum,
                     })
             merge_output["datasets"][ds_name] = {
                 "data_tier": tier,
@@ -4522,10 +4575,13 @@ def parse_stageout_config(slc_path):
         tree = ET.parse(slc_path)
         methods = []
         for method in tree.findall(".//stage-out/method"):
+            protocol = method.get("protocol", "")
+            # Default command: gfal-copy for WebDAV, xrdcp for XRootD
+            default_cmd = "gfal-copy" if "WebDAV" in protocol else "xrdcp"
             methods.append({
                 "volume": method.get("volume", ""),
-                "protocol": method.get("protocol", ""),
-                "command": method.get("command", "xrdcp"),
+                "protocol": protocol,
+                "command": method.get("command", default_cmd),
             })
         return methods
     except Exception:
@@ -4658,11 +4714,20 @@ def upload_file(local_path, pfn, command):
         shutil.copy2(local_path, pfn)
         print(f"  cp: {local_path} -> {pfn}")
     elif command == "xrdcp":
-        _run_cmd(
-            ["xrdcp", "-f", local_path, pfn],
-            description=f"xrdcp upload {os.path.basename(local_path)}",
-        )
-        print(f"  xrdcp: {local_path} -> {pfn}")
+        if pfn.startswith("davs://") or pfn.startswith("https://"):
+            # xrdcp can't reliably handle davs/https — use gfal-copy
+            src = f"file://{os.path.abspath(local_path)}"
+            _run_cmd(
+                ["gfal-copy", "-f", src, pfn],
+                description=f"gfal-copy upload {os.path.basename(local_path)}",
+            )
+            print(f"  gfal-copy: {local_path} -> {pfn}")
+        else:
+            _run_cmd(
+                ["xrdcp", "-f", local_path, pfn],
+                description=f"xrdcp upload {os.path.basename(local_path)}",
+            )
+            print(f"  xrdcp: {local_path} -> {pfn}")
     elif command == "gfal-copy":
         src = f"file://{os.path.abspath(local_path)}"
         _run_cmd(
@@ -4679,10 +4744,18 @@ def download_file(pfn, local_path, command):
     if command == "cp":
         shutil.copy2(pfn, local_path)
     elif command == "xrdcp":
-        _run_cmd(
-            ["xrdcp", "-f", pfn, local_path],
-            description=f"xrdcp download {os.path.basename(pfn)}",
-        )
+        if pfn.startswith("davs://") or pfn.startswith("https://"):
+            # xrdcp can't read davs/https — use gfal-copy
+            dest = f"file://{os.path.abspath(local_path)}"
+            _run_cmd(
+                ["gfal-copy", "-f", pfn, dest],
+                description=f"gfal-copy download {os.path.basename(pfn)}",
+            )
+        else:
+            _run_cmd(
+                ["xrdcp", "-f", pfn, local_path],
+                description=f"xrdcp download {os.path.basename(pfn)}",
+            )
     elif command == "gfal-copy":
         dest = f"file://{os.path.abspath(local_path)}"
         _run_cmd(
@@ -4749,6 +4822,15 @@ def remove_path(pfn, command, recursive=False):
     elif command == "xrdcp":
         m = re.match(r"(root://[^/]+/)(/.*)", pfn)
         if not m:
+            # davs:// or https:// — use gfal-rm
+            cmd = ["gfal-rm"]
+            if recursive:
+                cmd.append("-r")
+            cmd.append(pfn)
+            try:
+                _run_cmd(cmd, retries=2, description=f"gfal-rm {pfn}")
+            except RuntimeError:
+                pass  # Best effort
             return
         host, path = m.group(1).rstrip("/"), m.group(2)
         if recursive:

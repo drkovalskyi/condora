@@ -4,10 +4,9 @@ Handles the output lifecycle at the processing block level: DBS file
 registration, Rucio source protection, DBS block closure, and tape archival
 rule creation.
 
-Fire-and-forget design: WMS2 creates Rucio rules and moves on. It does not
-poll transfer status, manage source protection lifecycle, or track tape
-completion. Once a rule is created, Rucio owns the outcome. WMS2's only
-follow-up responsibility is retry with backoff if a Rucio call fails.
+Rucio registration is FATAL for non-local stageout modes: if registration
+fails, the error propagates to the lifecycle manager which holds the request.
+There is no point producing more data if we cannot register and transfer it.
 """
 
 from __future__ import annotations
@@ -21,6 +20,18 @@ from wms2.db.repository import Repository
 from wms2.models.enums import BlockStatus
 
 logger = logging.getLogger(__name__)
+
+
+# PFN prefix for non-deterministic RSEs (_Temp).
+# Only sites listed here can have replicas registered in test mode.
+# Other sites' files exist on grid storage but aren't tracked by Rucio.
+TEMP_RSE_PFN_PREFIXES = {
+    "T2_CH_CERN_Temp": "root://eoscms.cern.ch:1094//eos/cms",
+}
+
+
+class RucioRegistrationError(Exception):
+    """Raised when Rucio DID registration fails fatally."""
 
 
 class OutputManager:
@@ -50,11 +61,14 @@ class OutputManager:
         self.rucio = rucio_adapter
 
     async def handle_work_unit_completion(
-        self, workflow_id: UUID, block_id: UUID, merge_info: dict
+        self, workflow_id: UUID, block_id: UUID, merge_info: dict,
+        config_data: dict | None = None,
     ) -> None:
         """Called when a work unit completes.
 
-        Registers output files in DBS and creates a Rucio source protection rule.
+        Registers output files in DBS and Rucio, creates source protection rule.
+        Raises RucioRegistrationError if Rucio registration fails for a
+        non-local stageout mode — caller should hold the request.
         """
         block = await self.db.get_processing_block(block_id)
         if not block:
@@ -81,38 +95,155 @@ class OutputManager:
                 files=output_files,
             )
 
-        # 3. Create Rucio source protection rule (no lifetime — permanent)
-        rule_id = None
-        try:
-            rule_id = await self.rucio.create_rule(
-                dataset=block.dataset_name,
-                destination=merge_info.get("site", "local"),
-            )
-        except Exception as e:
-            await self._record_rucio_failure(block, e)
-            logger.warning(
-                "Source protection failed for block %s, will retry: %s",
-                block.id, e,
-            )
-
-        # 4. Update block state
+        # 3. Update block state FIRST — record completion + files before Rucio
+        #    so data is persisted even if Rucio fails
         node_name = merge_info.get("node_name", "unknown")
         source_rules = dict(block.source_rule_ids or {})
-        if rule_id:
-            source_rules[node_name] = rule_id
         completed = list(block.completed_work_units or []) + [node_name]
+
+        # Annotate files with site for retry
+        annotated_files = []
+        for f in output_files:
+            af = dict(f)
+            af["site"] = site
+            annotated_files.append(af)
+
+        accumulated_files = list(block.output_files or []) + annotated_files
 
         await self.db.update_processing_block(
             block.id,
             completed_work_units=completed,
             source_rule_ids=source_rules,
+            output_files=accumulated_files,
+            site=site,
         )
 
-        # 5. Check if block is now complete
-        if len(completed) >= block.total_work_units:
-            await self._complete_block(block)
+        # 4. Register files as Rucio DIDs — FATAL for non-local stageout
+        stageout_mode = (config_data or {}).get("stageout_mode", "local")
+        if output_files and site != "local" and stageout_mode != "local":
+            await self._register_files_in_rucio(
+                block, output_files, site, config_data=config_data,
+            )
+            # No try/except — let exceptions propagate to hold the request
 
-    async def _complete_block(self, block) -> None:
+        # 5. Create Rucio source protection rule (production only)
+        if stageout_mode == "production":
+            try:
+                rule_id = await self.rucio.create_rule(
+                    dataset=block.dataset_name,
+                    destination=merge_info.get("site", "local"),
+                )
+                source_rules[node_name] = rule_id
+                await self.db.update_processing_block(
+                    block.id, source_rule_ids=source_rules,
+                )
+            except Exception as e:
+                await self._record_rucio_failure(block, e)
+                raise RucioRegistrationError(
+                    f"Source protection failed for block {block.id}: {e}"
+                ) from e
+
+        # 6. Check if block is now complete
+        if len(completed) >= block.total_work_units:
+            await self._complete_block(block, config_data=config_data)
+
+    async def _register_files_in_rucio(
+        self, block, output_files: list[dict], site: str,
+        config_data: dict | None = None,
+    ) -> None:
+        """Register merged output files as Rucio DIDs at the site RSE.
+
+        Stageout mode determines naming conventions:
+        - test:  scope=user.dmytro, RSE=<site>_Temp, /USER DID tier, explicit PFN
+        - production: scope=cms, RSE=<site>, standard DID naming
+
+        Raises on failure — caller decides whether to hold the request.
+        """
+        cd = config_data or {}
+        stageout_mode = cd.get("stageout_mode", "local")
+        if stageout_mode == "local":
+            return
+
+        # Determine scope and RSE based on stageout mode
+        if stageout_mode == "test":
+            scope = "user.dmytro"
+            rse = f"{site}_Temp" if not site.endswith("_Temp") else site
+            if rse not in TEMP_RSE_PFN_PREFIXES:
+                logger.info(
+                    "Skipping Rucio registration for site %s — "
+                    "no _Temp RSE configured (files exist on grid but not in Rucio)",
+                    site,
+                )
+                return
+        else:
+            scope = "cms"
+            rse = site
+
+        # Build Rucio DID names from CMS dataset name
+        ds = block.dataset_name
+        parts = ds.strip("/").split("/")
+        if len(parts) != 3:
+            raise RucioRegistrationError(
+                f"Cannot parse dataset name for Rucio: {ds}"
+            )
+        primary, processing, tier = parts
+
+        if stageout_mode == "test":
+            container_name = f"/{primary}/{processing}-{tier}/USER"
+            block_did = f"{container_name}#block_{block.block_index:03d}"
+        else:
+            block_did = f"{ds}#block_{block.block_index:03d}"
+            container_name = None
+
+        pfn_prefix = TEMP_RSE_PFN_PREFIXES.get(rse, "")
+
+        # Build replica list
+        replicas = []
+        file_dids = []
+        for f in output_files:
+            lfn = f.get("lfn", "")
+            size = f.get("size", 0)
+            adler32 = f.get("adler32", "")
+            if not lfn:
+                continue
+            replica = {
+                "scope": scope,
+                "name": lfn,
+                "bytes": size,
+            }
+            if adler32:
+                replica["adler32"] = adler32
+            if pfn_prefix:
+                replica["pfn"] = pfn_prefix + lfn
+            replicas.append(replica)
+            file_dids.append({"scope": scope, "name": lfn})
+
+        if not replicas:
+            return
+
+        # Register replicas (creates file DIDs implicitly)
+        await self.rucio.register_replicas(rse, replicas)
+
+        # Create container and block DIDs, attach files
+        if container_name:
+            await self.rucio.add_did(scope, container_name, "CONTAINER")
+            await self.rucio.add_did(scope, block_did, "DATASET")
+            await self.rucio.attach_dids(
+                scope, container_name,
+                [{"scope": scope, "name": block_did}],
+            )
+        else:
+            await self.rucio.add_did(scope, block_did, "DATASET")
+
+        # Attach files to block
+        await self.rucio.attach_dids(scope, block_did, file_dids)
+
+        logger.info(
+            "Registered %d files in Rucio at %s scope=%s block=%s",
+            len(replicas), rse, scope, block_did,
+        )
+
+    async def _complete_block(self, block, config_data: dict | None = None) -> None:
         """All work units done. Close DBS block and create tape archival rule."""
         block_name = block.dbs_block_name
 
@@ -126,42 +257,87 @@ class OutputManager:
             status=BlockStatus.COMPLETE.value,
         )
 
-        # Create tape archival rule
-        try:
-            tape_rule_id = await self.rucio.create_rule(
-                dataset=block.dataset_name,
-                destination="tier=1&type=TAPE",
-            )
-            await self.db.update_processing_block(
-                block.id,
-                tape_rule_id=tape_rule_id,
-                status=BlockStatus.ARCHIVED.value,
-                rucio_last_error=None,
-                rucio_attempt_count=0,
-            )
-        except Exception as e:
-            await self._record_rucio_failure(block, e)
-            logger.warning(
-                "Tape archival rule failed for block %s, will retry: %s",
-                block.id, e,
-            )
+        # Create tape archival rule (production only)
+        stageout_mode = (config_data or {}).get("stageout_mode", "local")
+        if stageout_mode == "production":
+            try:
+                tape_rule_id = await self.rucio.create_rule(
+                    dataset=block.dataset_name,
+                    destination="tier=1&type=TAPE",
+                )
+                await self.db.update_processing_block(
+                    block.id,
+                    tape_rule_id=tape_rule_id,
+                    status=BlockStatus.ARCHIVED.value,
+                    rucio_last_error=None,
+                    rucio_attempt_count=0,
+                )
+            except Exception as e:
+                await self._record_rucio_failure(block, e)
+                raise RucioRegistrationError(
+                    f"Tape archival rule failed for block {block.id}: {e}"
+                ) from e
 
-    async def process_blocks_for_workflow(self, workflow_id: UUID) -> None:
+        # Create consolidation rule (move all files to one target RSE)
+        cd = config_data or {}
+        consolidation_rse = cd.get("consolidation_rse", "")
+        if consolidation_rse:
+            stageout_mode = cd.get("stageout_mode", "local")
+            ds = block.dataset_name
+            parts = ds.strip("/").split("/")
+            if stageout_mode == "test" and len(parts) == 3:
+                primary, processing, tier = parts
+                rule_did = f"/{primary}/{processing}-{tier}/USER"
+            else:
+                rule_did = ds
+            scope = "user.dmytro" if stageout_mode == "test" else "cms"
+            try:
+                rule_id = await self.rucio.create_rule(
+                    dataset=rule_did,
+                    destination=consolidation_rse,
+                    scope=scope,
+                )
+                await self.db.update_processing_block(
+                    block.id, consolidation_rule_id=rule_id,
+                )
+                logger.info(
+                    "Consolidation rule created for block %s → %s: %s",
+                    block.id, consolidation_rse, rule_id,
+                )
+            except Exception as e:
+                await self._record_rucio_failure(block, e)
+                raise RucioRegistrationError(
+                    f"Consolidation rule failed for block {block.id} → {consolidation_rse}: {e}"
+                ) from e
+
+    async def process_blocks_for_workflow(
+        self, workflow_id: UUID, config_data: dict | None = None,
+    ) -> None:
         """Retry blocks with failed Rucio calls.
 
         Called by the Lifecycle Manager every cycle.
+        Raises RucioRegistrationError if a retry fails — caller should
+        hold the request.
         """
+        cd = config_data or {}
+        stageout_mode = cd.get("stageout_mode", "local")
         blocks = await self.db.get_processing_blocks(workflow_id)
         for block in blocks:
-            try:
+            if stageout_mode == "production":
                 if block.status == BlockStatus.COMPLETE.value:
-                    # Tape rule not yet created — retry
                     await self._retry_tape_archival(block)
                 elif block.status == BlockStatus.OPEN.value and block.rucio_last_error:
-                    # Source protection failed — retry
                     await self._retry_source_protection(block)
-            except Exception:
-                logger.exception("Error retrying block %s", block.id)
+
+            # Retry consolidation rule if configured but missing
+            consolidation_rse = cd.get("consolidation_rse", "")
+            if (consolidation_rse
+                    and block.status in (BlockStatus.COMPLETE.value,
+                                         BlockStatus.ARCHIVED.value)
+                    and not getattr(block, "consolidation_rule_id", None)):
+                await self._retry_consolidation(
+                    block, consolidation_rse, config_data,
+                )
 
     async def _retry_tape_archival(self, block) -> None:
         """Retry tape archival rule creation with backoff."""
@@ -181,6 +357,9 @@ class OutputManager:
             )
         except Exception as e:
             await self._record_rucio_failure(block, e)
+            raise RucioRegistrationError(
+                f"Tape archival retry failed for block {block.id}: {e}"
+            ) from e
 
     async def _retry_source_protection(self, block) -> None:
         """Retry failed source protection rule creation with backoff."""
@@ -191,7 +370,6 @@ class OutputManager:
                 dataset=block.dataset_name,
                 destination="local",
             )
-            # Clear error state on success
             await self.db.update_processing_block(
                 block.id,
                 rucio_last_error=None,
@@ -203,6 +381,67 @@ class OutputManager:
             )
         except Exception as e:
             await self._record_rucio_failure(block, e)
+            raise RucioRegistrationError(
+                f"Source protection retry failed for block {block.id}: {e}"
+            ) from e
+
+    async def _retry_consolidation(
+        self, block, consolidation_rse: str,
+        config_data: dict | None = None,
+    ) -> None:
+        """Retry consolidation rule creation with backoff.
+
+        Re-registers DIDs (idempotent) before creating the rule,
+        since the initial registration may have failed.
+        Groups files by site to register at the correct RSE.
+        """
+        if not self._should_retry(block):
+            return
+
+        # Re-register DIDs grouped by site
+        if block.output_files:
+            files_by_site: dict[str, list[dict]] = {}
+            for f in block.output_files:
+                fsite = f.get("site", block.site or "unknown")
+                files_by_site.setdefault(fsite, []).append(f)
+
+            for fsite, files in files_by_site.items():
+                await self._register_files_in_rucio(
+                    block, files, fsite, config_data=config_data,
+                )
+
+        # Create consolidation rule on the container DID
+        cd = config_data or {}
+        stageout_mode = cd.get("stageout_mode", "local")
+        ds = block.dataset_name
+        parts = ds.strip("/").split("/")
+        if stageout_mode == "test" and len(parts) == 3:
+            primary, processing, tier = parts
+            rule_did = f"/{primary}/{processing}-{tier}/USER"
+        else:
+            rule_did = ds
+        scope = "user.dmytro" if stageout_mode == "test" else "cms"
+        try:
+            rule_id = await self.rucio.create_rule(
+                dataset=rule_did,
+                destination=consolidation_rse,
+                scope=scope,
+            )
+            await self.db.update_processing_block(
+                block.id,
+                consolidation_rule_id=rule_id,
+                rucio_last_error=None,
+                rucio_attempt_count=0,
+            )
+            logger.info(
+                "Consolidation rule retry succeeded for block %s → %s: %s",
+                block.id, consolidation_rse, rule_id,
+            )
+        except Exception as e:
+            await self._record_rucio_failure(block, e)
+            raise RucioRegistrationError(
+                f"Consolidation rule retry failed for block {block.id} → {consolidation_rse}: {e}"
+            ) from e
 
     def _should_retry(self, block) -> bool:
         """Check if retry is allowed (within max duration, respecting backoff)."""
@@ -222,7 +461,6 @@ class OutputManager:
                 block.id, block.dataset_name, elapsed, block.rucio_last_error,
             )
             self._dump_failure_context(block)
-            # Mark as failed — can't use create_task in sync, caller handles
             return False
 
         last_attempt = block.last_rucio_attempt
@@ -297,6 +535,17 @@ class OutputManager:
                 except Exception as e:
                     logger.warning(
                         "Failed to delete tape rule %s: %s", block.tape_rule_id, e
+                    )
+
+            # Delete consolidation rule
+            consolidation_rule = getattr(block, "consolidation_rule_id", None)
+            if consolidation_rule:
+                try:
+                    await self.rucio.delete_rule(consolidation_rule)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to delete consolidation rule %s: %s",
+                        consolidation_rule, e,
                     )
 
             # Invalidate DBS block

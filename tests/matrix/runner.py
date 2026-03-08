@@ -47,6 +47,45 @@ DISK_GB_PER_JOB_OUTPUT = 0.5
 # Minimum free space on /tmp for apptainer and system overhead.
 DISK_GB_TMP_MIN = 1
 
+# Maximum wait time for free slots before test submission (seconds).
+SLOT_WAIT_TIMEOUT = 120
+SLOT_POLL_INTERVAL = 5
+
+
+def _get_free_cpus() -> int:
+    """Query HTCondor for total unclaimed CPUs."""
+    try:
+        result = subprocess.run(
+            ["condor_status", "-af", "Cpus", "-constraint", "State==\"Unclaimed\""],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return 0
+        return sum(int(line) for line in result.stdout.strip().split("\n") if line.strip())
+    except Exception:
+        return 0
+
+
+async def _wait_for_free_slots(needed_cpus: int) -> None:
+    """Wait until enough unclaimed CPUs are available in the local pool."""
+    free = _get_free_cpus()
+    if free >= needed_cpus:
+        return
+    logger.info(
+        "Waiting for %d free CPUs (currently %d free)...", needed_cpus, free,
+    )
+    start = time.monotonic()
+    while time.monotonic() - start < SLOT_WAIT_TIMEOUT:
+        await asyncio.sleep(SLOT_POLL_INTERVAL)
+        free = _get_free_cpus()
+        if free >= needed_cpus:
+            logger.info("Slots available: %d free CPUs", free)
+            return
+    logger.warning(
+        "Slot wait timeout after %ds — proceeding with %d/%d free CPUs",
+        SLOT_WAIT_TIMEOUT, free, needed_cpus,
+    )
+
 
 def _check_disk_space(num_concurrent_jobs: int, output_dir: Path) -> None:
     """Pre-flight check: verify sufficient free disk space.
@@ -1071,6 +1110,10 @@ class MatrixRunner:
         # 2. Pre-flight disk space check
         n_concurrent = wf.num_jobs * getattr(wf, "num_work_units", 1)
         _check_disk_space(n_concurrent, Path(f"/mnt/shared/work/wms2_matrix/wf_{wf.wf_id}"))
+
+        # 2b. Wait for free slots before submission
+        needed_cpus = wf.multicore * n_concurrent
+        await _wait_for_free_slots(needed_cpus)
 
         # 3. Sweep (also cleans leftover LFN output paths)
         work_dir = sweep_pre(wf.wf_id, output_datasets=wf.output_datasets)

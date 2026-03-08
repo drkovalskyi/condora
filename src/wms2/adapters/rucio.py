@@ -1,12 +1,10 @@
-"""Real Rucio adapter using httpx with X.509 certificate authentication."""
+"""Real Rucio adapter using native rucio.client.Client for CMS auth."""
 
 import asyncio
 import logging
 import os
 import re
 from typing import Any
-
-import httpx
 
 from .base import RucioAdapter
 
@@ -22,35 +20,43 @@ _RSE_SUFFIX_RE = re.compile(r"_(Disk|Tape|Test|Temp)$")
 class RucioClient(RucioAdapter):
     def __init__(self, base_url: str, account: str, cert_file: str, key_file: str, verify=True):
         self._base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(
-            cert=(cert_file, key_file),
-            verify=verify,
-            timeout=60.0,
-            headers={"X-Rucio-Account": account},
-        )
+        self._account = account
+        self._cert_file = cert_file
+        self._key_file = key_file
+        self._native = None
 
-    async def close(self):
-        await self._client.aclose()
+    def _get_native_client(self):
+        """Create/cache a native rucio.client.Client instance.
 
-    async def _post(self, path: str, json_data: Any = None) -> Any:
-        url = f"{self._base_url}{path}"
+        Uses rucio.cfg for auth (account, proxy, auth_host). The account
+        from config.py is intentionally NOT passed here — rucio.cfg
+        controls which Rucio account authenticates.
+        """
+        if self._native is None:
+            os.environ.setdefault("RUCIO_HOME", "/tmp/rucio")
+            from rucio.client import Client as RucioNativeClient
+            self._native = RucioNativeClient()
+        return self._native
+
+    async def _call_with_retry(self, func, *args, **kwargs):
+        """Call a synchronous native client method with retry and backoff."""
         last_exc: Exception | None = None
         for attempt in range(MAX_RETRIES):
             try:
-                resp = await self._client.post(url, json=json_data)
-                resp.raise_for_status()
-                return resp.json()
-            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            except Exception as exc:
                 last_exc = exc
                 if attempt < MAX_RETRIES - 1:
-                    import asyncio
                     wait = BACKOFF_BASE * (2 ** attempt)
                     logger.warning(
-                        "Rucio request %s failed (attempt %d/%d): %s, retrying in %.1fs",
-                        path, attempt + 1, MAX_RETRIES, exc, wait,
+                        "Rucio call %s failed (attempt %d/%d): %s, retrying in %.1fs",
+                        func.__name__, attempt + 1, MAX_RETRIES, exc, wait,
                     )
                     await asyncio.sleep(wait)
         raise last_exc  # type: ignore[misc]
+
+    async def close(self):
+        pass  # native client doesn't need explicit cleanup
 
     @staticmethod
     def _rse_to_site(rse: str) -> str | None:
@@ -60,53 +66,93 @@ class RucioClient(RucioAdapter):
         return _RSE_SUFFIX_RE.sub("", rse)
 
     async def get_replicas(self, lfns: list[str]) -> dict[str, list[str]]:
-        payload = {"dids": [{"scope": "cms", "name": lfn} for lfn in lfns]}
-        data = await self._post("/replicas/list", json_data=payload)
+        client = self._get_native_client()
+        dids = [{"scope": "cms", "name": lfn} for lfn in lfns]
+        replicas = await asyncio.to_thread(
+            lambda: list(client.list_replicas(dids, schemes=["root"]))
+        )
         result: dict[str, list[str]] = {lfn: [] for lfn in lfns}
-        if isinstance(data, list):
-            for entry in data:
-                lfn = entry.get("name", "")
-                rses = entry.get("rses", {})
-                sites = set()
-                for rse_name in rses:
-                    site = self._rse_to_site(rse_name)
-                    if site:
-                        sites.add(site)
-                if lfn in result:
-                    result[lfn] = sorted(sites)
+        for entry in replicas:
+            lfn = entry.get("name", "")
+            rses = entry.get("rses", {})
+            sites = set()
+            for rse_name in rses:
+                site = self._rse_to_site(rse_name)
+                if site:
+                    sites.add(site)
+            if lfn in result:
+                result[lfn] = sorted(sites)
         return result
 
-    async def create_rule(self, dataset: str, destination: str, **kwargs: Any) -> str:
-        payload = {
-            "dids": [{"scope": "cms", "name": dataset}],
-            "rse_expression": destination,
-            "copies": 1,
-            **kwargs,
-        }
-        url = f"{self._base_url}/rules/"
-        resp = await self._client.post(url, json=payload)
-        resp.raise_for_status()
-        rule_ids = resp.json()
-        return rule_ids[0] if rule_ids else ""
+    async def create_rule(self, dataset: str, destination: str,
+                          scope: str = "cms", **kwargs: Any) -> str:
+        client = self._get_native_client()
+        dids = [{"scope": scope, "name": dataset}]
+
+        def _add_rule():
+            rule_ids = client.add_replication_rule(
+                dids, copies=1, rse_expression=destination, **kwargs,
+            )
+            return rule_ids[0] if rule_ids else ""
+
+        return await self._call_with_retry(_add_rule)
 
     async def get_rule_status(self, rule_id: str) -> dict[str, Any]:
-        url = f"{self._base_url}/rules/{rule_id}"
-        resp = await self._client.get(url)
-        resp.raise_for_status()
-        return resp.json()
+        client = self._get_native_client()
+        return await self._call_with_retry(client.get_replication_rule, rule_id)
 
     async def delete_rule(self, rule_id: str) -> None:
-        url = f"{self._base_url}/rules/{rule_id}"
-        resp = await self._client.delete(url)
-        resp.raise_for_status()
+        client = self._get_native_client()
+        await self._call_with_retry(client.delete_replication_rule, rule_id)
+
+    @staticmethod
+    def site_to_disk_rse(site_name: str) -> str:
+        """Convert CMS site name to disk RSE name (e.g. T2_CH_CERN → T2_CH_CERN_Disk)."""
+        if site_name.endswith(("_Disk", "_Tape", "_Test", "_Temp")):
+            return site_name
+        return f"{site_name}_Disk"
+
+    async def register_replicas(self, rse: str, files: list[dict[str, Any]]) -> None:
+        client = self._get_native_client()
+        await self._call_with_retry(client.add_replicas, rse=rse, files=files)
+
+    async def add_did(self, scope: str, name: str, did_type: str = "DATASET") -> None:
+        client = self._get_native_client()
+
+        def _add_did():
+            try:
+                if did_type == "CONTAINER":
+                    client.add_container(scope=scope, name=name)
+                else:
+                    client.add_dataset(scope=scope, name=name)
+            except Exception as e:
+                # DataIdentifierAlreadyExists — idempotent
+                if "already exists" in str(e).lower() or "SCOPE_NAME_ALREADY_EXISTS" in str(e):
+                    return
+                raise
+
+        await self._call_with_retry(_add_did)
+
+    async def attach_dids(self, scope: str, name: str,
+                          dids: list[dict[str, str]]) -> None:
+        client = self._get_native_client()
+
+        def _attach():
+            try:
+                client.attach_dids(scope=scope, name=name, dids=dids)
+            except Exception as e:
+                # DuplicateContent / FileAlreadyExists / already attached — idempotent
+                err_str = str(e).lower()
+                if ("already exists" in err_str or "duplicate" in err_str
+                        or "already added" in err_str):
+                    return
+                raise
+
+        await self._call_with_retry(_attach)
 
     async def get_available_pileup_files(self, dataset: str,
                                          preferred_rses: list[str] | None = None) -> list[str]:
-        """Get LFNs with on-disk replicas using rucio-clients Python API.
-
-        If preferred_rses is non-empty, only files with a replica at one of
-        those RSEs are returned.  When empty/None, any disk RSE is accepted.
-        """
+        """Get LFNs with on-disk replicas using rucio-clients Python API."""
         return await asyncio.to_thread(self._get_pileup_sync, dataset, preferred_rses)
 
     def _get_pileup_sync(self, dataset: str,

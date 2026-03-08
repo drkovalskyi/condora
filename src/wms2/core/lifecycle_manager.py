@@ -397,7 +397,8 @@ class RequestLifecycleManager:
             repo, self.dbs, self.rucio, self.condor, self.settings, site_manager=sm,
         )
         self.dag_monitor = DAGMonitor(repo, self.condor, settings=self.settings)
-        self.output_manager = OutputManager(repo, self.dbs, self.rucio)
+        from wms2.adapters.mock import MockDBSAdapter
+        self.output_manager = OutputManager(repo, MockDBSAdapter(), self.rucio)
         self.error_handler = ErrorHandler(repo, self.condor, self.settings, site_manager=sm)
 
     # ── Main Loop ───────────────────────────────────────────────
@@ -657,6 +658,7 @@ class RequestLifecycleManager:
 
             # Process completed work units through output manager
             if result.newly_completed_work_units and self.output_manager:
+                from wms2.core.output_manager import RucioRegistrationError
                 try:
                     all_blocks = await self.db.get_processing_blocks(workflow.id)
                     # Use only the latest block per dataset (current round).
@@ -679,8 +681,16 @@ class RequestLifecycleManager:
                                     "output_files": ds_info.get("files", []),
                                     "site": manifest.get("site", "local"),
                                     "node_name": wu["group_name"],
-                                }
+                                },
+                                config_data=workflow.config_data,
                             )
+                except RucioRegistrationError as e:
+                    logger.error(
+                        "Rucio registration failed for %s — holding request: %s",
+                        request.request_name, e,
+                    )
+                    await self.transition(request, RequestStatus.HELD)
+                    return
                 except Exception:
                     logger.warning(
                         "Output registration failed for %s — will retry next cycle",
@@ -703,7 +713,16 @@ class RequestLifecycleManager:
             # Every cycle: retry failed Rucio calls
             if self.output_manager:
                 try:
-                    await self.output_manager.process_blocks_for_workflow(workflow.id)
+                    await self.output_manager.process_blocks_for_workflow(
+                        workflow.id, config_data=workflow.config_data,
+                    )
+                except RucioRegistrationError as e:
+                    logger.error(
+                        "Rucio retry failed for %s — holding request: %s",
+                        request.request_name, e,
+                    )
+                    await self.transition(request, RequestStatus.HELD)
+                    return
                 except Exception:
                     logger.warning(
                         "Output block processing failed for %s — will retry next cycle",
@@ -785,7 +804,7 @@ class RequestLifecycleManager:
             await self.transition(request, RequestStatus.HELD)
 
     async def _handle_stopping(self, request):
-        """Monitor clean stop progress."""
+        """Monitor clean stop progress. Retry condor_rm if DAG is still alive."""
         workflow = await self.db.get_workflow_by_request(request.request_name)
         if not workflow or not workflow.dag_id:
             return
@@ -801,6 +820,19 @@ class RequestLifecycleManager:
             # DAGMan process gone — stop complete, park in PAUSED
             await self.db.update_dag(dag.id, status=DAGStatus.STOPPED.value)
             await self.transition(request, RequestStatus.PAUSED)
+        else:
+            # DAGMan still alive — retry condor_rm
+            try:
+                await self.condor.remove_job(
+                    schedd_name=dag.schedd_name,
+                    cluster_id=dag.dagman_cluster_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Retry condor_rm failed for DAG %s (%s)",
+                    dag.dagman_cluster_id, request.request_name,
+                    exc_info=True,
+                )
 
     async def _handle_resubmitting(self, request):
         """Prepare recovery DAG if needed, then move to admission queue.
@@ -973,40 +1005,51 @@ class RequestLifecycleManager:
 
     async def get_error_summary(self, request_name: str) -> dict:
         """Read-only error inspection. Aggregates POST data from the
-        current DAG's submit directory."""
-        request = await self.db.get_request(request_name)
-        if not request:
-            raise ValueError(f"Request {request_name} not found")
+        current DAG's submit directory.
 
-        result = {
-            "request_name": request_name,
-            "status": request.status,
-            "dag_id": None,
-            "nodes_done": 0,
-            "nodes_failed": 0,
-            "total_nodes": 0,
-            "error_summary": {},
-            "site_summary": {},
-            "bad_input_files": [],
-        }
+        Uses its own DB session to avoid sharing the lifecycle cycle's
+        session with concurrent API requests (which caused connection leaks).
+        """
+        from wms2.core.error_handler import ErrorHandler
 
-        workflow = await self.db.get_workflow_by_request(request_name)
-        if not workflow or not workflow.dag_id:
-            return result
+        async with self.session_factory() as session:
+            repo = Repository(session)
 
-        dag = await self.db.get_dag(workflow.dag_id)
-        if not dag:
-            return result
+            request = await repo.get_request(request_name)
+            if not request:
+                raise ValueError(f"Request {request_name} not found")
 
-        result["dag_id"] = str(dag.id)
-        result["nodes_done"] = dag.nodes_done or 0
-        result["nodes_failed"] = dag.nodes_failed or 0
-        result["total_nodes"] = dag.total_nodes or 0
+            result = {
+                "request_name": request_name,
+                "status": request.status,
+                "dag_id": None,
+                "nodes_done": 0,
+                "nodes_failed": 0,
+                "total_nodes": 0,
+                "error_summary": {},
+                "site_summary": {},
+                "bad_input_files": [],
+            }
 
-        if not self.error_handler or not dag.submit_dir:
-            return result
+            workflow = await repo.get_workflow_by_request(request_name)
+            if not workflow or not workflow.dag_id:
+                return result
 
-        post_data = self.error_handler.read_post_data(dag.submit_dir)
+            dag = await repo.get_dag(workflow.dag_id)
+            if not dag:
+                return result
+
+            result["dag_id"] = str(dag.id)
+            result["nodes_done"] = dag.nodes_done or 0
+            result["nodes_failed"] = dag.nodes_failed or 0
+            result["total_nodes"] = dag.total_nodes or 0
+
+            if not dag.submit_dir:
+                return result
+
+        # Filesystem reads outside the session — no DB needed
+        eh = ErrorHandler(None, self.condor, self.settings)
+        post_data = eh.read_post_data(dag.submit_dir)
         if not post_data:
             return result
 

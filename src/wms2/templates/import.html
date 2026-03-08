@@ -166,15 +166,16 @@
             </div>
 
             <div class="form-group">
-                <label for="condor-pool">Condor Pool</label>
-                <select id="condor-pool" x-model="condorPool">
-                    <option value="local">Local (dev pool)</option>
-                    <option value="global">Global (CMS GlideinWMS)</option>
+                <label for="stageout-mode">Stageout Mode</label>
+                <select id="stageout-mode" x-model="stageoutMode">
+                    <option value="local">Local (dev pool, filesystem copy)</option>
+                    <option value="test">Test (grid stageout, /store/temp/, _Temp RSEs)</option>
+                    <option value="production">Production (grid stageout, /store/, real RSEs)</option>
                 </select>
-                <div class="form-help">Submit jobs to the local HTCondor pool or the CMS global pool via remote schedd.</div>
+                <div class="form-help">Local: filesystem copy on dev VM. Test: grid xrdcp to /store/temp/ with user Rucio scope. Production: grid xrdcp to /store/ with cms scope.</div>
             </div>
 
-            <template x-if="condorPool === 'global'">
+            <template x-if="stageoutMode !== 'local'">
                 <div class="form-group">
                     <label for="allowed-sites">Allowed Sites</label>
                     <input id="allowed-sites" type="text" x-model="allowedSites"
@@ -226,7 +227,7 @@
         <!-- Replace confirmation dialog -->
         <dialog :open="showReplaceDialog || undefined">
             <h3>Request Already Exists</h3>
-            <p>This request already exists in WMS2 with status: <strong x-text="existingStatus"></strong>.</p>
+            <p>This request already exists in WMS2 with a failed/aborted status.</p>
             <p>Clear the existing request and all its data (workflow, DAGs, history) and re-import?</p>
             <div class="dialog-actions">
                 <button class="outline" @click="showReplaceDialog = false">Cancel</button>

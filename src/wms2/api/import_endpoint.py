@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
 from pydantic import BaseModel
@@ -37,7 +39,8 @@ class ImportBody(BaseModel):
     nominal_priority: int = 3
     priority_switch_fraction: float = 0.5
     replace: bool = False
-    condor_pool: str = "local"  # "local" or "global"
+    condor_pool: str = "global"  # "local" or "global" (which schedd to use)
+    stageout_mode: str = "test"  # "local", "test", or "production"
     allowed_sites: str = ""    # comma-separated CMS site names (for global pool)
 
 
@@ -180,6 +183,10 @@ async def import_request(
     settings=Depends(get_settings),
 ):
     """Import a request from ReqMgr2: fetch spec, create request+workflow+DAG."""
+    t0 = time.monotonic()
+    logger.info("Import started: %s (stageout=%s, pool=%s, replace=%s)",
+                body.request_name, body.stageout_mode, body.condor_pool, body.replace)
+
     reqmgr = getattr(raw_request.app.state, "reqmgr", None)
     dbs = getattr(raw_request.app.state, "dbs", None)
     rucio = getattr(raw_request.app.state, "rucio", None)
@@ -192,26 +199,20 @@ async def import_request(
     existing = await repo.get_request(body.request_name)
     reimportable = ("failed", "aborted")
     if existing:
-        if not body.replace:
-            if existing.status in reimportable:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Request already exists in WMS2 (status: {existing.status}). "
-                           f"Re-run with --replace to replace it.",
-                )
-            else:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Request already exists in WMS2 (status: {existing.status}). "
-                           f"Only failed/aborted requests can be re-imported.",
-                )
+        logger.info("Import %s: request exists (status=%s)", body.request_name, existing.status)
         if existing.status not in reimportable:
             raise HTTPException(
-                status_code=400,
-                detail=f"Cannot replace request in {existing.status} state. "
+                status_code=409,
+                detail=f"Request already exists in WMS2 (status: {existing.status}). "
                        f"Only failed/aborted requests can be re-imported.",
             )
-        # Clean up old request and all related rows
+        if not body.replace:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Request already exists (status: {existing.status}). "
+                       f"Clear and re-import?",
+            )
+        # Replace confirmed — clean up old rows
         workflow = await repo.get_workflow_by_request(body.request_name)
         if workflow:
             for dag in await repo.list_dags(workflow_id=workflow.id):
@@ -222,13 +223,19 @@ async def import_request(
             await repo.delete_workflow(workflow.id)
         await repo.delete_request(body.request_name)
         await repo.session.flush()
-        logger.info("Replaced existing request %s (was %s)", body.request_name, existing.status)
+        logger.info("Import %s: cleared old data (was %s) in %.1fs",
+                     body.request_name, existing.status, time.monotonic() - t0)
 
     # 1. Fetch from ReqMgr2
+    t1 = time.monotonic()
     try:
         reqdata = await reqmgr.get_request(body.request_name)
     except Exception as exc:
+        logger.error("Import %s: ReqMgr2 fetch failed after %.1fs: %s",
+                     body.request_name, time.monotonic() - t1, exc)
         raise HTTPException(status_code=502, detail=f"Failed to fetch from ReqMgr2: {exc}")
+    logger.info("Import %s: fetched from ReqMgr2 in %.1fs (type=%s)",
+                body.request_name, time.monotonic() - t1, reqdata.get("RequestType"))
 
     reqdata = _normalize_request(reqdata)
 
@@ -248,8 +255,17 @@ async def import_request(
         logger.info("Overriding RequestNumEvents to %d for %s",
                      body.request_num_events, body.request_name)
 
-    # Store pool and priority profile in request_data for UI display
+    # Validate stageout_mode
+    if body.stageout_mode not in ("local", "test", "production"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stageout_mode '{body.stageout_mode}'. "
+                   "Must be 'local', 'test', or 'production'.",
+        )
+
+    # Store pool, stageout mode, and priority profile in request_data for UI display
     reqdata["_condor_pool"] = body.condor_pool
+    reqdata["_stageout_mode"] = body.stageout_mode
     reqdata["_priority_profile"] = {
         "pilot": settings.default_pilot_priority,
         "high": body.high_priority,
@@ -271,8 +287,11 @@ async def import_request(
     await session.flush()
 
     # 3. Determine MergedLFNBase and build config_data
-    # Global pool uses dedicated LFN prefixes for stageout to site-local SE.
-    if body.condor_pool == "global":
+    # Stageout mode determines LFN prefixes:
+    #   local: auto-determined from request (filesystem copy)
+    #   test:  /store/temp/user/... (grid stageout, _Temp RSEs, user scope)
+    #   production: auto-determined from request (grid stageout, real RSEs, cms scope)
+    if body.stageout_mode == "test":
         merged_lfn_base = "/store/temp/user/dmytro.wms2.merged"
         reqdata["MergedLFNBase"] = merged_lfn_base
         reqdata["UnmergedLFNBase"] = "/store/temp/user/dmytro.wms2.unmerged"
@@ -305,10 +324,9 @@ async def import_request(
 
     # Condor pool, stageout mode, and site restriction
     config_data["condor_pool"] = body.condor_pool
-    if body.condor_pool == "global":
-        config_data["stageout_mode"] = "grid"
-    else:
-        config_data["stageout_mode"] = settings.stageout_mode
+    config_data["stageout_mode"] = body.stageout_mode
+    if body.stageout_mode == "test":
+        config_data["consolidation_rse"] = "T2_CH_CERN_Temp"
     if body.allowed_sites:
         config_data["allowed_sites"] = body.allowed_sites
     if body.work_units_per_round is not None:
@@ -341,13 +359,20 @@ async def import_request(
             sandbox_ssl_ctx = ssl.create_default_context()
         sandbox_ssl_ctx.load_cert_chain(proxy, proxy)
 
+    t_sandbox = time.monotonic()
+    logger.info("Import %s: creating sandbox (mode=%s)...", body.request_name, body.sandbox_mode)
     try:
-        create_sandbox(
+        # Run in thread to avoid blocking the event loop (synchronous HTTPS to ConfigCache)
+        await asyncio.to_thread(
+            create_sandbox,
             sandbox_path, reqdata, mode=body.sandbox_mode,
             ssl_context=sandbox_ssl_ctx, configcache_url=settings.configcache_url,
         )
     except Exception as exc:
+        logger.error("Import %s: sandbox creation failed after %.1fs: %s",
+                     body.request_name, time.monotonic() - t_sandbox, exc)
         raise HTTPException(status_code=500, detail=f"Failed to create sandbox: {exc}")
+    logger.info("Import %s: sandbox created in %.1fs", body.request_name, time.monotonic() - t_sandbox)
     config_data["sandbox_path"] = sandbox_path
 
     # Extract manifest steps for StepChain pileup
@@ -358,6 +383,8 @@ async def import_request(
         config_data["manifest_steps"] = [_asdict(s) for s in spec.steps]
         config_data["filter_efficiency"] = spec.filter_efficiency
 
+    logger.info("Import %s: creating workflow (input=%s, splitting=%s)",
+                body.request_name, reqdata.get("InputDataset", "N/A"), reqdata.get("SplittingAlgo"))
     workflow = await repo.create_workflow(
         request_name=body.request_name,
         input_dataset=reqdata["InputDataset"],
@@ -384,11 +411,15 @@ async def import_request(
     message = f"Request {body.request_name} imported"
 
     if not body.dry_run and condor is not None:
+        t_dag = time.monotonic()
+        logger.info("Import %s: planning DAG...", body.request_name)
         try:
             dp = DAGPlanner(repo, dbs, rucio, condor, settings)
             dag = await dp.plan_production_dag(workflow, adaptive=True)
             await session.flush()
             dag_id = str(dag.id)
+            logger.info("Import %s: DAG planned and submitted in %.1fs (cluster=%s)",
+                        body.request_name, time.monotonic() - t_dag, dag.dagman_cluster_id)
 
             # Transition to ACTIVE
             from datetime import datetime, timezone
@@ -407,11 +438,14 @@ async def import_request(
             )
             message += f", DAG submitted (cluster {dag.dagman_cluster_id})"
         except Exception as exc:
-            logger.exception("DAG planning/submission failed for %s", body.request_name)
+            logger.exception("Import %s: DAG planning/submission failed after %.1fs",
+                             body.request_name, time.monotonic() - t_dag)
             message += f" (DAG submission failed: {exc})"
     elif body.dry_run:
         message += " (dry run — no DAG submitted)"
 
+    logger.info("Import %s: completed in %.1fs — %s",
+                body.request_name, time.monotonic() - t0, message)
     return {
         "request_name": body.request_name,
         "workflow_id": str(workflow.id),

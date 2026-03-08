@@ -167,8 +167,9 @@ class MockRucioAdapter(RucioAdapter):
         self.calls.append(("get_replicas", (lfns,), {}))
         return {lfn: ["T1_US_FNAL", "T2_US_MIT"] for lfn in lfns}
 
-    async def create_rule(self, dataset: str, destination: str, **kwargs: Any) -> str:
-        self.calls.append(("create_rule", (dataset, destination), kwargs))
+    async def create_rule(self, dataset: str, destination: str,
+                          scope: str = "cms", **kwargs: Any) -> str:
+        self.calls.append(("create_rule", (dataset, destination), {"scope": scope, **kwargs}))
         return "rule-id-12345"
 
     async def get_rule_status(self, rule_id: str) -> dict[str, Any]:
@@ -177,6 +178,16 @@ class MockRucioAdapter(RucioAdapter):
 
     async def delete_rule(self, rule_id: str) -> None:
         self.calls.append(("delete_rule", (rule_id,), {}))
+
+    async def register_replicas(self, rse: str, files: list[dict[str, Any]]) -> None:
+        self.calls.append(("register_replicas", (rse, files), {}))
+
+    async def add_did(self, scope: str, name: str, did_type: str = "DATASET") -> None:
+        self.calls.append(("add_did", (scope, name, did_type), {}))
+
+    async def attach_dids(self, scope: str, name: str,
+                          dids: list[dict[str, str]]) -> None:
+        self.calls.append(("attach_dids", (scope, name, dids), {}))
 
     async def get_available_pileup_files(self, dataset: str,
                                          preferred_rses: list[str] | None = None) -> list[str]:

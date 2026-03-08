@@ -111,12 +111,18 @@ class DAGMonitor:
 
         # Update DAG row with current counts (use inner counts for accurate display)
         now = datetime.now(timezone.utc)
+        live_total = (
+            inner_summary.idle + inner_summary.running
+            + inner_summary.done + inner_summary.failed
+            + inner_summary.held
+        )
         update_kwargs = {
             "nodes_idle": inner_summary.idle,
             "nodes_running": inner_summary.running,
             "nodes_done": inner_summary.done,
             "nodes_failed": inner_summary.failed,
             "nodes_held": inner_summary.held,
+            "total_nodes": live_total,
             "status": DAGStatus.RUNNING.value,
         }
         if newly_completed:
@@ -131,13 +137,8 @@ class DAGMonitor:
             await self._handle_held_oom_jobs(dag)
 
 
-        # Update workflow node counts (including total from live poll)
+        # Update workflow node counts (reuse live_total from DAG update above)
         if dag.workflow_id:
-            live_total = (
-                inner_summary.idle + inner_summary.running
-                + inner_summary.done + inner_summary.failed
-                + inner_summary.held
-            )
             await self.db.update_workflow(
                 dag.workflow_id,
                 nodes_done=inner_summary.done,

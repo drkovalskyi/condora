@@ -145,7 +145,8 @@ class RucioAdapter(ABC):
         """Get replica locations per LFN. Returns {lfn: [site_name, ...]}."""
 
     @abstractmethod
-    async def create_rule(self, dataset: str, destination: str, **kwargs: Any) -> str:
+    async def create_rule(self, dataset: str, destination: str,
+                          scope: str = "cms", **kwargs: Any) -> str:
         """Create a Rucio replication rule. Returns rule_id."""
 
     @abstractmethod
@@ -163,6 +164,21 @@ class RucioAdapter(ABC):
 
         If preferred_rses is non-empty, only files at those RSEs are returned.
         """
+
+    @abstractmethod
+    async def register_replicas(self, rse: str, files: list[dict[str, Any]]) -> None:
+        """Tell Rucio that files exist at the given RSE.
+
+        Each file dict must have 'scope', 'name', 'bytes', 'pfn'.
+        """
+
+    @abstractmethod
+    async def add_did(self, scope: str, name: str, did_type: str = "DATASET") -> None:
+        """Create a DID (dataset or container). 409 Conflict is idempotent."""
+
+    @abstractmethod
+    async def attach_dids(self, scope: str, name: str, dids: list[dict[str, str]]) -> None:
+        """Attach file DIDs to a dataset DID. 409 (duplicate) is idempotent."""
 
 
 class CRICAdapter(ABC):

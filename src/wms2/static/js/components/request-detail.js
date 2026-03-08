@@ -17,6 +17,7 @@ document.addEventListener('alpine:init', () => {
         showStopDialog: false,
         showFailDialog: false,
         showRestartDialog: false,
+        showDeleteDialog: false,
         stopReason: 'Operator-initiated clean stop',
 
         // Priority profile editing
@@ -92,14 +93,37 @@ document.addEventListener('alpine:init', () => {
         get canRestart() {
             return this.request && ['held', 'partial', 'paused', 'aborted', 'failed'].includes(this.request.status);
         },
+        get canDelete() {
+            return this.request && ['failed', 'aborted'].includes(this.request.status);
+        },
         get hasActions() {
-            return this.canStop || this.canRelease || this.canFail || this.canRestart;
+            return this.canStop || this.canRelease || this.canFail || this.canRestart || this.canDelete;
         },
 
         get testFraction() {
             const cd = (this.workflow && this.workflow.config_data) || {};
             const tf = cd.test_fraction;
             return (tf && tf < 1) ? tf : null;
+        },
+
+        get processingVersion() {
+            const cd = (this.workflow && this.workflow.config_data) || {};
+            return cd.processing_version || null;
+        },
+
+        get workUnitsPerRound() {
+            const cd = (this.workflow && this.workflow.config_data) || {};
+            return cd.work_units_per_round || null;
+        },
+
+        get stageoutMode() {
+            const cd = (this.workflow && this.workflow.config_data) || {};
+            return cd.stageout_mode || null;
+        },
+
+        get consolidationRse() {
+            const cd = (this.workflow && this.workflow.config_data) || {};
+            return cd.consolidation_rse || null;
         },
 
         get priorityProfile() {
@@ -206,6 +230,20 @@ document.addEventListener('alpine:init', () => {
                 }
             } catch (e) {
                 this.toast('error', 'Restart failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
+        async doDelete() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.deleteRequest(this.name);
+                this.toast('success', result.message);
+                this.showDeleteDialog = false;
+                window.location.href = '/ui/';
+            } catch (e) {
+                this.toast('error', 'Delete failed: ' + e.message);
             } finally {
                 this.actionLoading = false;
             }

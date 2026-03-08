@@ -64,6 +64,7 @@ class Repository:
                 RequestRow,
                 WorkflowRow.events_produced,
                 WorkflowRow.target_events,
+                WorkflowRow.config_data,
             )
             .outerjoin(WorkflowRow, WorkflowRow.request_name == RequestRow.request_name)
         )
@@ -74,8 +75,8 @@ class Repository:
         stmt = stmt.order_by(RequestRow.created_at.desc()).limit(limit).offset(offset)
         result = await self.session.execute(stmt)
         rows = []
-        for req, ep, te in result.all():
-            rows.append({"request": req, "events_produced": ep, "target_events": te})
+        for req, ep, te, cd in result.all():
+            rows.append({"request": req, "events_produced": ep, "target_events": te, "config_data": cd})
         return rows
 
     async def update_request(self, request_name: str, **kwargs: Any) -> RequestRow | None:

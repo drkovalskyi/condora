@@ -12,7 +12,7 @@ document.addEventListener('alpine:init', () => {
         maxFiles: '',
         processingVersion: '',
         workUnitsPerRound: '',
-        condorPool: 'local',
+        stageoutMode: 'test',
         allowedSites: '',
         highPriority: 5,
         nominalPriority: 3,
@@ -23,7 +23,6 @@ document.addEventListener('alpine:init', () => {
         progressStep: '',
         _progressTimer: null,
         showReplaceDialog: false,
-        existingStatus: '',
 
         // Preview state
         preview: null,
@@ -33,11 +32,10 @@ document.addEventListener('alpine:init', () => {
         // Steps shown during import (timed estimates)
         _progressSteps: [
             { msg: 'Fetching request from ReqMgr2...', delay: 0 },
-            { msg: 'Creating sandbox and extracting config...', delay: 3000 },
-            { msg: 'Resolving input data and pileup...', delay: 8000 },
-            { msg: 'Planning DAG and writing submit files...', delay: 15000 },
-            { msg: 'Submitting DAG to HTCondor...', delay: 25000 },
-            { msg: 'Still working — large requests take longer...', delay: 45000 },
+            { msg: 'Creating sandbox (fetching PSets from ConfigCache)...', delay: 3000 },
+            { msg: 'Resolving input data and pileup...', delay: 15000 },
+            { msg: 'Planning DAG and submitting to HTCondor...', delay: 30000 },
+            { msg: 'Still working — ConfigCache or Rucio may be slow...', delay: 60000 },
         ],
 
         get isValid() {
@@ -122,8 +120,9 @@ document.addEventListener('alpine:init', () => {
             if (this.maxFiles) body.max_files = parseInt(this.maxFiles);
             if (this.processingVersion) body.processing_version = parseInt(this.processingVersion);
             if (this.workUnitsPerRound) body.work_units_per_round = parseInt(this.workUnitsPerRound);
-            body.condor_pool = this.condorPool;
-            if (this.condorPool === 'global' && this.allowedSites.trim()) {
+            body.stageout_mode = this.stageoutMode;
+            body.condor_pool = this.stageoutMode === 'local' ? 'local' : 'global';
+            if (this.stageoutMode !== 'local' && this.allowedSites.trim()) {
                 body.allowed_sites = this.allowedSites.trim();
             }
             body.high_priority = parseInt(this.highPriority);
@@ -147,17 +146,9 @@ document.addEventListener('alpine:init', () => {
                 window.location.href = '/ui/requests/' + encodeURIComponent(result.request_name);
             } catch (e) {
                 if (e.status === 409) {
-                    const m = e.message.match(/status:\s*(\w+)/);
-                    const status = m ? m[1] : 'unknown';
-                    if (status === 'failed' || status === 'aborted') {
-                        this.existingStatus = status;
-                        this.showReplaceDialog = true;
-                    } else {
-                        this.error = e.message;
-                        window.dispatchEvent(new CustomEvent('wms2:toast', {
-                            detail: { type: 'error', message: e.message }
-                        }));
-                    }
+                    this._stopProgress();
+                    this.submitting = false;
+                    this.showReplaceDialog = true;
                 } else {
                     this.error = e.message;
                     window.dispatchEvent(new CustomEvent('wms2:toast', {
@@ -192,5 +183,6 @@ document.addEventListener('alpine:init', () => {
                 this.submitting = false;
             }
         },
+
     }));
 });
