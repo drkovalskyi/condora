@@ -65,6 +65,48 @@ class RucioClient(RucioAdapter):
             return None
         return _RSE_SUFFIX_RE.sub("", rse)
 
+    async def list_temp_rses(self) -> list[str]:
+        client = self._get_native_client()
+
+        def _list():
+            return [
+                rse['rse'] for rse in client.list_rses()
+                if rse['rse'].endswith('_Temp')
+            ]
+
+        return await self._call_with_retry(_list)
+
+    async def get_rse_pfn_prefix(self, rse: str, scheme: str = "root") -> str | None:
+        """Get PFN prefix for an RSE, preferring write-enabled protocols.
+
+        For non-deterministic _Temp RSEs, add_replicas validates PFN against
+        write-capable protocols. First tries the requested scheme if writable,
+        then falls back to any writable protocol (e.g. davs if root is read-only).
+        """
+        client = self._get_native_client()
+
+        def _get_prefix():
+            protos = list(client.get_protocols(rse))
+            # First try requested scheme if it has WAN write access
+            for p in protos:
+                if p['scheme'] == scheme:
+                    wan = p.get('domains', {}).get('wan', {})
+                    if wan.get('write') is not None:
+                        return f"{scheme}://{p['hostname']}:{p['port']}{p['prefix']}"
+            # Fallback: any protocol with WAN write access
+            for p in protos:
+                wan = p.get('domains', {}).get('wan', {})
+                if wan.get('write') is not None:
+                    s = p['scheme']
+                    return f"{s}://{p['hostname']}:{p['port']}{p['prefix']}"
+            # Last resort: any protocol matching requested scheme
+            for p in protos:
+                if p['scheme'] == scheme:
+                    return f"{scheme}://{p['hostname']}:{p['port']}{p['prefix']}"
+            return None
+
+        return await self._call_with_retry(_get_prefix)
+
     async def get_replicas(self, lfns: list[str]) -> dict[str, list[str]]:
         client = self._get_native_client()
         dids = [{"scope": "cms", "name": lfn} for lfn in lfns]
@@ -90,10 +132,16 @@ class RucioClient(RucioAdapter):
         dids = [{"scope": scope, "name": dataset}]
 
         def _add_rule():
-            rule_ids = client.add_replication_rule(
-                dids, copies=1, rse_expression=destination, **kwargs,
-            )
-            return rule_ids[0] if rule_ids else ""
+            try:
+                rule_ids = client.add_replication_rule(
+                    dids, copies=1, rse_expression=destination, **kwargs,
+                )
+                return rule_ids[0] if rule_ids else ""
+            except Exception as e:
+                err_str = str(e).lower()
+                if "duplicate" in err_str or "already exists" in err_str:
+                    return "existing"
+                raise
 
         return await self._call_with_retry(_add_rule)
 
@@ -151,9 +199,17 @@ class RucioClient(RucioAdapter):
         await self._call_with_retry(_attach)
 
     async def get_available_pileup_files(self, dataset: str,
-                                         preferred_rses: list[str] | None = None) -> list[str]:
-        """Get LFNs with on-disk replicas using rucio-clients Python API."""
-        return await asyncio.to_thread(self._get_pileup_sync, dataset, preferred_rses)
+                                         preferred_rses: list[str] | None = None,
+                                         timeout: float = 60.0) -> list[str]:
+        """Get LFNs with on-disk replicas using rucio-clients Python API.
+
+        Args:
+            timeout: Maximum seconds to wait for the Rucio query (default 60s).
+        """
+        return await asyncio.wait_for(
+            asyncio.to_thread(self._get_pileup_sync, dataset, preferred_rses),
+            timeout=timeout,
+        )
 
     def _get_pileup_sync(self, dataset: str,
                          preferred_rses: list[str] | None = None) -> list[str]:

@@ -148,7 +148,8 @@ async def lifespan(app: FastAPI):
     try:
         async with session_factory() as session:
             repo = Repository(session)
-            sm = SiteManager(repo, settings, cric_adapter=cric)
+            sm = SiteManager(repo, settings, cric_adapter=cric,
+                             rucio_adapter=rucio)
             stats = await sm.sync_from_cric()
             await session.commit()
             logger.info("Startup CRIC sync: %s", stats)
@@ -166,7 +167,8 @@ async def lifespan(app: FastAPI):
             try:
                 async with session_factory() as session:
                     repo = Repository(session)
-                    sm = SiteManager(repo, settings, cric_adapter=cric)
+                    sm = SiteManager(repo, settings, cric_adapter=cric,
+                                     rucio_adapter=rucio)
                     stats = await sm.sync_from_cric()
                     await session.commit()
                     logger.info("Periodic CRIC sync: %s", stats)

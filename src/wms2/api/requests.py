@@ -8,7 +8,7 @@ from wms2.db.repository import Repository
 from wms2.models.enums import DAGStatus, RequestStatus
 from wms2.models.request import Request, RequestCreate, RequestUpdate
 
-from .deps import get_repository
+from .deps import get_repository, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -414,6 +414,88 @@ async def restart_request(
         "status": "failed",
         "message": f"Request {request_name} restarted as {new_name}",
     }
+
+
+@router.post("/{request_name}/clone", response_model=dict)
+async def clone_request(
+    request_name: str,
+    raw_request: FastAPIRequest = None,
+    repo: Repository = Depends(get_repository),
+    settings=Depends(get_settings),
+):
+    """Kill, clear, and re-import with incremented processing_version.
+
+    Equivalent to: stop → fail → delete → import (same parameters, new version).
+    The request name stays the same. All old data is cleaned up.
+    """
+    from wms2.api.import_endpoint import ImportBody, import_request
+
+    existing = await repo.get_request(request_name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    reqdata = existing.request_data or {}
+    workflow = await repo.get_workflow_by_request(request_name)
+    config_data = (workflow.config_data if workflow else None) or {}
+
+    # Determine new processing version
+    current_version = reqdata.get("ProcessingVersion",
+                                  reqdata.get("processing_version", 1))
+    new_version = current_version + 1
+
+    # 1. Kill running DAG
+    if workflow and workflow.dag_id:
+        dag = await repo.get_dag(workflow.dag_id)
+        if dag and dag.status in (DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value):
+            condor = getattr(raw_request.app.state, "condor", None)
+            if condor:
+                try:
+                    await condor.remove_job(
+                        schedd_name=dag.schedd_name,
+                        cluster_id=dag.dagman_cluster_id,
+                    )
+                    logger.info("Clone %s: removed DAG %s from %s",
+                                request_name, dag.dagman_cluster_id, dag.schedd_name)
+                except Exception:
+                    logger.warning("Clone %s: failed to remove DAG %s",
+                                   request_name, dag.dagman_cluster_id, exc_info=True)
+
+    # 2. Delete all old records (DAGs, blocks, workflow, request)
+    if workflow:
+        for d in await repo.list_dags(workflow_id=workflow.id):
+            await repo.delete_dag_history(d.id)
+            await repo.delete_dag(d.id)
+        for block in await repo.get_processing_blocks(workflow.id):
+            await repo.delete_processing_block(block.id)
+        await repo.delete_workflow(workflow.id)
+    await repo.delete_request(request_name)
+    await repo.session.flush()
+    logger.info("Clone %s: cleared old data (was %s, version %d)",
+                request_name, existing.status, current_version)
+
+    # 3. Re-import with same parameters + incremented version
+    #    Reconstruct ImportBody from the old config_data
+    priority_profile = config_data.get("priority_profile", {})
+    import_body = ImportBody(
+        request_name=request_name,
+        stageout_mode=config_data.get("stageout_mode", "test"),
+        condor_pool=config_data.get("condor_pool", "global"),
+        test_fraction=config_data.get("test_fraction"),
+        processing_version=new_version,
+        allowed_sites=config_data.get("allowed_sites", ""),
+        work_units_per_round=config_data.get("work_units_per_round"),
+        high_priority=priority_profile.get("high", 5),
+        nominal_priority=priority_profile.get("nominal", 3),
+        priority_switch_fraction=priority_profile.get("switch_fraction", 0.5),
+        replace=True,
+    )
+
+    result = await import_request(import_body, raw_request, repo, settings)
+    result["cloned_from_version"] = current_version
+    result["new_version"] = new_version
+    logger.info("Clone %s: re-imported with version %d → %d",
+                request_name, current_version, new_version)
+    return result
 
 
 @router.get("/{request_name}/errors", response_model=dict)

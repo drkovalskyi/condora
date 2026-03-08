@@ -165,11 +165,22 @@ class RucioAdapter(ABC):
         If preferred_rses is non-empty, only files at those RSEs are returned.
         """
 
+    async def list_temp_rses(self) -> list[str]:
+        """List all RSE names matching *_Temp."""
+        return []
+
+    async def get_rse_pfn_prefix(self, rse: str, scheme: str = "root") -> str | None:
+        """Get PFN prefix for an RSE (scheme://host:port/prefix).
+
+        Returns None if the RSE has no protocol with the given scheme.
+        """
+        return None
+
     @abstractmethod
     async def register_replicas(self, rse: str, files: list[dict[str, Any]]) -> None:
         """Tell Rucio that files exist at the given RSE.
 
-        Each file dict must have 'scope', 'name', 'bytes', 'pfn'.
+        Each file dict must have 'scope', 'name', 'bytes'.
         """
 
     @abstractmethod

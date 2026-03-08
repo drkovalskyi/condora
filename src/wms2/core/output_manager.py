@@ -21,13 +21,9 @@ from wms2.models.enums import BlockStatus
 
 logger = logging.getLogger(__name__)
 
-
-# PFN prefix for non-deterministic RSEs (_Temp).
-# Only sites listed here can have replicas registered in test mode.
-# Other sites' files exist on grid storage but aren't tracked by Rucio.
-TEMP_RSE_PFN_PREFIXES = {
-    "T2_CH_CERN_Temp": "root://eoscms.cern.ch:1094//eos/cms",
-}
+# Module-level cache: tracks (block_id, rse) pairs that have been successfully
+# registered in Rucio this process lifetime. Prevents redundant idempotent calls.
+_rucio_registered_cache: set[tuple] = set()
 
 
 class RucioRegistrationError(Exception):
@@ -55,10 +51,12 @@ class OutputManager:
         repository: Repository,
         dbs_adapter: DBSAdapter,
         rucio_adapter: RucioAdapter,
+        site_manager=None,
     ):
         self.db = repository
         self.dbs = dbs_adapter
         self.rucio = rucio_adapter
+        self.site_manager = site_manager
 
     async def handle_work_unit_completion(
         self, workflow_id: UUID, block_id: UUID, merge_info: dict,
@@ -154,9 +152,10 @@ class OutputManager:
         """Register merged output files as Rucio DIDs at the site RSE.
 
         Stageout mode determines naming conventions:
-        - test:  scope=user.dmytro, RSE=<site>_Temp, /USER DID tier, explicit PFN
+        - test:  scope=user.dmytro, RSE=<site>_Temp, /USER DID tier
         - production: scope=cms, RSE=<site>, standard DID naming
 
+        Rucio derives PFN from RSE protocol config (deterministic naming).
         Raises on failure — caller decides whether to hold the request.
         """
         cd = config_data or {}
@@ -167,14 +166,17 @@ class OutputManager:
         # Determine scope and RSE based on stageout mode
         if stageout_mode == "test":
             scope = "user.dmytro"
-            rse = f"{site}_Temp" if not site.endswith("_Temp") else site
-            if rse not in TEMP_RSE_PFN_PREFIXES:
-                logger.info(
-                    "Skipping Rucio registration for site %s — "
-                    "no _Temp RSE configured (files exist on grid but not in Rucio)",
-                    site,
-                )
-                return
+            if self.site_manager:
+                rse = self.site_manager.get_temp_rse_name(site)
+                if not rse:
+                    logger.info(
+                        "Skipping Rucio registration for site %s — "
+                        "no _Temp RSE in Rucio (files exist on grid but not in Rucio)",
+                        site,
+                    )
+                    return
+            else:
+                rse = f"{site}_Temp" if not site.endswith("_Temp") else site
         else:
             scope = "cms"
             rse = site
@@ -195,9 +197,11 @@ class OutputManager:
             block_did = f"{ds}#block_{block.block_index:03d}"
             container_name = None
 
-        pfn_prefix = TEMP_RSE_PFN_PREFIXES.get(rse, "")
+        # Build replica list with PFN for non-deterministic _Temp RSEs
+        pfn_prefix = None
+        if self.site_manager and stageout_mode == "test":
+            pfn_prefix = self.site_manager.get_temp_rse_pfn_prefix(rse)
 
-        # Build replica list
         replicas = []
         file_dids = []
         for f in output_files:
@@ -214,7 +218,10 @@ class OutputManager:
             if adler32:
                 replica["adler32"] = adler32
             if pfn_prefix:
-                replica["pfn"] = pfn_prefix + lfn
+                # _Temp RSE prefix maps /store/temp/ → PFN base path
+                # LFN: /store/temp/user/... → suffix: user/...
+                lfn_suffix = lfn.removeprefix("/store/temp/")
+                replica["pfn"] = pfn_prefix + lfn_suffix
             replicas.append(replica)
             file_dids.append({"scope": scope, "name": lfn})
 
@@ -238,6 +245,7 @@ class OutputManager:
         # Attach files to block
         await self.rucio.attach_dids(scope, block_did, file_dids)
 
+        _rucio_registered_cache.add((block.id, rse))
         logger.info(
             "Registered %d files in Rucio at %s scope=%s block=%s",
             len(replicas), rse, scope, block_did,
@@ -285,9 +293,9 @@ class OutputManager:
             # Skip consolidation if no files were registered in Rucio
             # (e.g. execution site has no _Temp RSE in test mode)
             file_sites = {f.get("site", "") for f in (block.output_files or [])}
-            has_rucio_files = any(
-                f"{s}_Temp" in TEMP_RSE_PFN_PREFIXES or s in TEMP_RSE_PFN_PREFIXES
-                for s in file_sites if s
+            has_rucio_files = (
+                not self.site_manager
+                or any(self.site_manager.has_temp_rse(s) for s in file_sites if s)
             )
             if not has_rucio_files and cd.get("stageout_mode") == "test":
                 logger.info(
@@ -319,6 +327,16 @@ class OutputManager:
                     block.id, consolidation_rse, rule_id,
                 )
             except Exception as e:
+                err_str = str(e).lower()
+                if "duplicate" in err_str or "already exists" in err_str:
+                    logger.info(
+                        "Consolidation rule already exists for block %s → %s",
+                        block.id, consolidation_rse,
+                    )
+                    await self.db.update_processing_block(
+                        block.id, consolidation_rule_id="existing",
+                    )
+                    return
                 await self._record_rucio_failure(block, e)
                 raise RucioRegistrationError(
                     f"Consolidation rule failed for block {block.id} → {consolidation_rse}: {e}"
@@ -337,6 +355,30 @@ class OutputManager:
         stageout_mode = cd.get("stageout_mode", "local")
         blocks = await self.db.get_processing_blocks(workflow_id)
         for block in blocks:
+            # Retry replica registration for files not yet in Rucio.
+            # register_replicas / add_did / attach_dids are idempotent,
+            # so safe to call again even if some files were already registered.
+            if (stageout_mode != "local"
+                    and block.output_files
+                    and self.site_manager):
+                files_by_site: dict[str, list[dict]] = {}
+                for f in block.output_files:
+                    fsite = f.get("site", "")
+                    if fsite and fsite != "local":
+                        files_by_site.setdefault(fsite, []).append(f)
+                for fsite, files in files_by_site.items():
+                    rse = self.site_manager.get_temp_rse_name(fsite)
+                    if rse and (block.id, rse) not in _rucio_registered_cache:
+                        try:
+                            await self._register_files_in_rucio(
+                                block, files, fsite, config_data=config_data,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Rucio registration retry failed for block %s site %s",
+                                block.id, fsite, exc_info=True,
+                            )
+
             if stageout_mode == "production":
                 if block.status == BlockStatus.COMPLETE.value:
                     await self._retry_tape_archival(block)
@@ -414,10 +456,10 @@ class OutputManager:
 
         # Skip if no files are at Rucio-enabled sites (test mode)
         cd_check = config_data or {}
-        if cd_check.get("stageout_mode") == "test":
+        if cd_check.get("stageout_mode") == "test" and self.site_manager:
             file_sites = {f.get("site", "") for f in (block.output_files or [])}
             has_rucio_files = any(
-                f"{s}_Temp" in TEMP_RSE_PFN_PREFIXES or s in TEMP_RSE_PFN_PREFIXES
+                self.site_manager.has_temp_rse(s)
                 for s in file_sites if s
             )
             if not has_rucio_files:
@@ -468,6 +510,20 @@ class OutputManager:
                 block.id, consolidation_rse, rule_id,
             )
         except Exception as e:
+            err_str = str(e).lower()
+            if "duplicate" in err_str or "already exists" in err_str:
+                # Rule already exists — treat as success
+                logger.info(
+                    "Consolidation rule already exists for block %s → %s (idempotent)",
+                    block.id, consolidation_rse,
+                )
+                await self.db.update_processing_block(
+                    block.id,
+                    consolidation_rule_id="existing",
+                    rucio_last_error=None,
+                    rucio_attempt_count=0,
+                )
+                return
             await self._record_rucio_failure(block, e)
             raise RucioRegistrationError(
                 f"Consolidation rule retry failed for block {block.id} → {consolidation_rse}: {e}"

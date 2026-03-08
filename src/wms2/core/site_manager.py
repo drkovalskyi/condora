@@ -11,11 +11,20 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from wms2.adapters.base import CRICAdapter
+from wms2.adapters.base import CRICAdapter, RucioAdapter
 from wms2.config import Settings
 from wms2.db.repository import Repository
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for _Temp RSE names (shared across SiteManager instances
+# within the same process). Populated by sync_temp_rses(), used by
+# get_temp_rse_sites() and has_temp_rse().
+_temp_rse_cache: set[str] = set()
+
+# Module-level cache for _Temp RSE PFN prefixes: {rse_name: "root://host:port/prefix"}
+# Populated alongside _temp_rse_cache by sync_temp_rses().
+_temp_rse_pfn_cache: dict[str, str] = {}
 
 
 class SiteManager:
@@ -24,10 +33,12 @@ class SiteManager:
         repository: Repository,
         settings: Settings,
         cric_adapter: CRICAdapter | None = None,
+        rucio_adapter: RucioAdapter | None = None,
     ):
         self.db = repository
         self.settings = settings
         self.cric_adapter = cric_adapter
+        self.rucio_adapter = rucio_adapter
 
     async def ban_site(
         self,
@@ -118,6 +129,79 @@ class SiteManager:
             return await self.db.get_active_bans_for_site(site_name)
         return await self.db.list_all_active_bans()
 
+    def get_temp_rse_sites(self) -> set[str]:
+        """Return CMS site names that have a _Temp RSE.
+
+        Strips both _Temp and _Disk suffixes to get bare CMS site names.
+        E.g. "T2_CH_CERN_Temp" → "T2_CH_CERN",
+             "T1_US_FNAL_Disk_Temp" → "T1_US_FNAL".
+        """
+        import re
+        suffix_re = re.compile(r"(_Disk)?_Temp$")
+        return {suffix_re.sub("", rse) for rse in _temp_rse_cache}
+
+    def has_temp_rse(self, site: str) -> bool:
+        """Check if a site has a _Temp RSE.
+
+        Checks both {site}_Temp (T2) and {site}_Disk_Temp (T1) forms.
+        """
+        return self.get_temp_rse_name(site) is not None
+
+    def get_temp_rse_name(self, site: str) -> str | None:
+        """Return the actual _Temp RSE name for a site, or None.
+
+        T2 sites use {site}_Temp, T1 sites use {site}_Disk_Temp.
+        """
+        if site.endswith("_Temp"):
+            return site if site in _temp_rse_cache else None
+        if f"{site}_Temp" in _temp_rse_cache:
+            return f"{site}_Temp"
+        if f"{site}_Disk_Temp" in _temp_rse_cache:
+            return f"{site}_Disk_Temp"
+        return None
+
+    def get_temp_rse_pfn_prefix(self, rse: str) -> str | None:
+        """Return the PFN prefix for a _Temp RSE, e.g. 'root://host:port/path/'.
+
+        Used to construct PFN = pfn_prefix + lfn_suffix for non-deterministic RSEs.
+        """
+        return _temp_rse_pfn_cache.get(rse)
+
+    async def sync_temp_rses(self) -> int:
+        """Fetch _Temp RSE list and PFN prefixes from Rucio.
+
+        Called during CRIC sync and at startup. Returns count of _Temp RSEs.
+        Non-deterministic _Temp RSEs require explicit PFN for replica
+        registration — we cache the root:// protocol prefix for each.
+        """
+        global _temp_rse_cache, _temp_rse_pfn_cache
+        if self.rucio_adapter is None:
+            logger.info("_Temp RSE sync skipped — no rucio_adapter configured")
+            return 0
+        try:
+            rses = await self.rucio_adapter.list_temp_rses()
+            _temp_rse_cache = set(rses)
+
+            # Fetch PFN prefixes for each _Temp RSE
+            pfn_cache: dict[str, str] = {}
+            for rse in rses:
+                try:
+                    prefix = await self.rucio_adapter.get_rse_pfn_prefix(rse)
+                    if prefix:
+                        pfn_cache[rse] = prefix
+                except Exception:
+                    logger.warning("Failed to get PFN prefix for %s", rse)
+            _temp_rse_pfn_cache = pfn_cache
+
+            logger.info(
+                "Cached %d _Temp RSEs (%d with PFN prefix) from Rucio",
+                len(_temp_rse_cache), len(_temp_rse_pfn_cache),
+            )
+            return len(_temp_rse_cache)
+        except Exception:
+            logger.exception("Failed to fetch _Temp RSE list from Rucio")
+            return 0
+
     async def sync_from_cric(self) -> dict[str, Any]:
         """Sync site information from CRIC into the sites table.
 
@@ -157,4 +241,8 @@ class SiteManager:
             "CRIC sync complete: %d added, %d updated, %d total, %d errors",
             added, updated, len(sites), errors,
         )
+
+        # Also refresh the _Temp RSE cache from Rucio
+        await self.sync_temp_rses()
+
         return {"added": added, "updated": updated, "total": len(sites), "errors": errors}

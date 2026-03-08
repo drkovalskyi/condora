@@ -414,7 +414,10 @@ async def import_request(
         t_dag = time.monotonic()
         logger.info("Import %s: planning DAG...", body.request_name)
         try:
-            dp = DAGPlanner(repo, dbs, rucio, condor, settings)
+            from wms2.core.site_manager import SiteManager
+            sm = SiteManager(repo, settings, rucio_adapter=rucio)
+            await sm.sync_temp_rses()
+            dp = DAGPlanner(repo, dbs, rucio, condor, settings, site_manager=sm)
             dag = await dp.plan_production_dag(workflow, adaptive=True)
             await session.flush()
             dag_id = str(dag.id)

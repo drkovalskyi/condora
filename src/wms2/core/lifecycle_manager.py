@@ -393,7 +393,8 @@ class RequestLifecycleManager:
         from wms2.core.site_manager import SiteManager
         from wms2.core.workflow_manager import WorkflowManager
 
-        sm = SiteManager(repo, self.settings, cric_adapter=self.cric)
+        sm = SiteManager(repo, self.settings, cric_adapter=self.cric,
+                         rucio_adapter=self.rucio)
         self.db = repo
         self.workflow_manager = WorkflowManager(repo, self.reqmgr) if self.reqmgr else None
         self.dag_planner = DAGPlanner(
@@ -401,7 +402,8 @@ class RequestLifecycleManager:
         )
         self.dag_monitor = DAGMonitor(repo, self.condor, settings=self.settings)
         from wms2.adapters.mock import MockDBSAdapter
-        self.output_manager = OutputManager(repo, MockDBSAdapter(), self.rucio)
+        self.output_manager = OutputManager(repo, MockDBSAdapter(), self.rucio,
+                                            site_manager=sm)
         self.error_handler = ErrorHandler(repo, self.condor, self.settings, site_manager=sm)
 
     # ── Main Loop ───────────────────────────────────────────────

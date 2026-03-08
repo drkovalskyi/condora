@@ -6,6 +6,101 @@
 
 ---
 
+## 2026-03-08 — Dynamic Rucio RSE management, pileup cache persistence, stageout hardening
+
+### What was done
+
+Replaced hardcoded `TEMP_RSE_PFN_PREFIXES` dict (only T2_CH_CERN_Temp) with
+live Rucio queries for all _Temp RSEs and their PFN prefixes. Made the pileup
+file cache persist to disk so it survives service restarts. Added timeout guards
+and protocol normalization to stageout operations. Added a clone endpoint for
+quick request re-import with incremented processing version.
+
+### Changes
+
+1. **Dynamic _Temp RSE discovery** (`site_manager.py`, `output_manager.py`)
+   - New `SiteManager.sync_temp_rses()` fetches all `*_Temp` RSE names and
+     their PFN prefixes from Rucio on startup and during CRIC sync
+   - Module-level `_temp_rse_cache` (set) and `_temp_rse_pfn_cache` (dict)
+     replace the old hardcoded `TEMP_RSE_PFN_PREFIXES` in output_manager
+   - Helper methods: `get_temp_rse_sites()`, `has_temp_rse()`,
+     `get_temp_rse_name()`, `get_temp_rse_pfn_prefix()`
+   - OutputManager now receives `site_manager` parameter; uses it for RSE
+     lookups in registration and consolidation
+   - DAG planner test-mode site restriction uses SiteManager instead of
+     importing from OutputManager
+
+2. **Rucio adapter enhancements** (`rucio.py`, `base.py`, `mock.py`)
+   - New `list_temp_rses()` — lists all RSEs ending with `_Temp`
+   - New `get_rse_pfn_prefix()` — gets write-capable protocol prefix for an RSE
+   - `add_replication_rule()` handles duplicate rules idempotently
+   - `get_available_pileup_files()` now has a 60s timeout (was unbounded —
+     Rucio 502 retries could take 2+ minutes)
+
+3. **Disk-backed pileup cache** (`dag_planner.py`)
+   - Cache persisted to `/mnt/shared/tmp/wms2/pileup_cache.json`
+   - `_load_pileup_cache()` reads from disk on first access (lazy)
+   - `_save_pileup_cache()` writes after successful Rucio queries
+   - Survives service restarts — avoids 2+ minute Rucio queries for the same
+     PREMIX dataset on every reimport
+
+4. **Clone request endpoint** (`requests.py`)
+   - `POST /api/v1/requests/{name}/clone` — kills running DAG, clears all
+     old data, re-imports with incremented ProcessingVersion
+   - Reconstructs ImportBody from stored config_data (stageout_mode, condor_pool,
+     test_fraction, allowed_sites, priority profile)
+
+5. **Stageout hardening** (`dag_planner.py` embedded scripts)
+   - `gfal2` → `gfal-copy` normalization via `_normalize_cmd()` helper
+   - Download-first merge strategy: downloads unmerged files via write protocol
+     (davs:/gfal-copy) instead of relying on direct root:// access which fails
+     at some sites (RAL, KIT)
+   - Added explicit timeouts: upload 600s, download 300s, list 120s
+   - Fixed double-escaped regex in embedded Python (`\\d+` → `\d+`)
+   - Fixed POST script memory-bump regex for request_memory parsing
+
+6. **Rucio registration reliability** (`output_manager.py`)
+   - Consolidation rule creation handles duplicates gracefully
+   - Round completion retries replica registration for files not yet in Rucio
+   - `_rucio_registered_cache` prevents redundant registration calls within
+     a single process lifetime
+
+7. **Wiring** (`main.py`, `lifecycle_manager.py`, `import_endpoint.py`)
+   - SiteManager created with `rucio_adapter` in lifespan, CRIC sync, lifecycle
+     cycle, and import endpoint
+   - OutputManager receives `site_manager` in lifecycle cycle setup
+
+### Files changed
+
+| File | What |
+|------|------|
+| `src/wms2/adapters/base.py` | New `list_temp_rses()`, `get_rse_pfn_prefix()` base methods |
+| `src/wms2/adapters/mock.py` | Mock implementation of `list_temp_rses()` |
+| `src/wms2/adapters/rucio.py` | _Temp RSE listing, PFN prefix lookup, pileup timeout, rule dedup |
+| `src/wms2/api/import_endpoint.py` | Pass SiteManager to DAGPlanner during import |
+| `src/wms2/api/requests.py` | New clone endpoint |
+| `src/wms2/core/dag_planner.py` | Disk-backed pileup cache, stageout fixes, regex fixes |
+| `src/wms2/core/lifecycle_manager.py` | Pass rucio_adapter to SiteManager, site_manager to OutputManager |
+| `src/wms2/core/output_manager.py` | Dynamic RSE lookups, registration retry, consolidation dedup |
+| `src/wms2/core/site_manager.py` | _Temp RSE sync/cache/lookup methods |
+| `src/wms2/main.py` | Pass rucio_adapter to SiteManager in lifespan and CRIC sync |
+
+### Verification
+
+- Service started, CRIC sync fetches 150 sites, _Temp RSE sync cached 68 RSEs
+  with PFN prefixes from Rucio
+- Import completed with test-mode site restriction using 68 Rucio-enabled sites
+- DAG submitted to global pool (cluster 171230)
+
+### Known issues
+
+- Pileup Rucio query still fails when Rucio returns 502 (transient) — now
+  bounded to 60s timeout instead of 2+ minutes
+- Failed pileup queries are not cached — DAGs proceed without pileup file
+  list and CMSSW falls back to AAA remote read
+
+---
+
 ## 2026-03-08 — Service resilience: crash detection and auto-recovery
 
 ### What was done

@@ -20,10 +20,44 @@ from wms2.models.enums import DAGStatus, WorkflowStatus
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache for pileup file lists.
+# Disk-backed cache for pileup file lists (survives service restarts).
 # Key: dataset name, Value: (timestamp, file_list)
 _pileup_cache: dict[str, tuple[float, list[str]]] = {}
 PILEUP_CACHE_TTL = 24 * 3600  # 24 hours
+PILEUP_CACHE_FILE = "/mnt/shared/tmp/wms2/pileup_cache.json"
+_pileup_cache_loaded = False
+
+
+def _load_pileup_cache() -> None:
+    """Load pileup cache from disk on first access."""
+    global _pileup_cache, _pileup_cache_loaded
+    if _pileup_cache_loaded:
+        return
+    _pileup_cache_loaded = True
+    try:
+        with open(PILEUP_CACHE_FILE) as f:
+            raw = json.load(f)
+        now = time.time()
+        for ds, entry in raw.items():
+            ts, files = entry[0], entry[1]
+            if (now - ts) < PILEUP_CACHE_TTL:
+                _pileup_cache[ds] = (ts, files)
+        if _pileup_cache:
+            logger.info("Loaded pileup cache from disk: %d datasets", len(_pileup_cache))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.debug("Could not load pileup cache from disk", exc_info=True)
+
+
+def _save_pileup_cache() -> None:
+    """Persist pileup cache to disk."""
+    try:
+        os.makedirs(os.path.dirname(PILEUP_CACHE_FILE), exist_ok=True)
+        with open(PILEUP_CACHE_FILE, "w") as f:
+            json.dump({ds: [ts, files] for ds, (ts, files) in _pileup_cache.items()}, f)
+    except Exception:
+        logger.debug("Could not save pileup cache to disk", exc_info=True)
 
 
 def _effective_stageout(mode: str) -> str:
@@ -359,12 +393,14 @@ class DAGPlanner:
                 workflow_id=workflow.id
             )
 
-        # Resolve pileup file availability via Rucio (with 24h cache)
+        # Resolve pileup file availability via Rucio (with 24h disk-backed cache)
         t_pileup = time.monotonic()
         pileup_files: dict[str, list[str]] = {}
         manifest_steps = config.get("manifest_steps", [])
         if self.rucio and manifest_steps:
+            _load_pileup_cache()
             now_ts = time.time()
+            cache_updated = False
             for step in manifest_steps:
                 for pu_field in ("mc_pileup", "data_pileup"):
                     ds = step.get(pu_field, "")
@@ -385,6 +421,7 @@ class DAGPlanner:
                             files = await self.rucio.get_available_pileup_files(ds, preferred_rses=preferred)
                             pileup_files[ds] = files
                             _pileup_cache[ds] = (now_ts, files)
+                            cache_updated = True
                             logger.info("Pileup %s: %d files in %.1fs%s",
                                         ds, len(files), time.monotonic() - t_pu,
                                         f" (preferred RSEs {preferred})" if preferred else "")
@@ -393,6 +430,8 @@ class DAGPlanner:
                                 "Pileup %s: Rucio query failed after %.1fs",
                                 ds, time.monotonic() - t_pu, exc_info=True,
                             )
+            if cache_updated:
+                _save_pileup_cache()
         pileup_elapsed = time.monotonic() - t_pileup
         if pileup_elapsed > 1.0:
             logger.info("Plan %s: pileup resolution took %.1fs", workflow.request_name, pileup_elapsed)
@@ -451,18 +490,15 @@ class DAGPlanner:
         # In test stageout mode, restrict to sites with _Temp RSE entries
         # so that Rucio registration and consolidation can succeed.
         raw_stageout = config.get("stageout_mode", self.settings.stageout_mode)
-        if raw_stageout == "test" and use_spool:
-            from wms2.core.output_manager import TEMP_RSE_PFN_PREFIXES
-            rucio_sites = {
-                rse.replace("_Temp", "")
-                for rse in TEMP_RSE_PFN_PREFIXES
-            }
+        if raw_stageout == "test" and use_spool and self.site_manager:
+            rucio_sites = self.site_manager.get_temp_rse_sites()
             if rucio_sites:
                 if effective_allowed:
                     effective_allowed = [s for s in effective_allowed if s in rucio_sites]
                 else:
                     effective_allowed = sorted(rucio_sites)
-                logger.info("Test mode: restricted to Rucio-enabled sites: %s", effective_allowed)
+                logger.info("Test mode: restricted to Rucio-enabled sites (%d): %s",
+                            len(effective_allowed), effective_allowed)
 
         dag_file_path = _generate_dag_files(
             submit_dir=submit_dir,
@@ -1595,7 +1631,7 @@ fi
 if [ "$CLASSIFICATION" = "infrastructure_memory" ]; then
     SUB_FILE="${GROUP_DIR}/${NODE_NAME}.sub"
     if [ -f "$SUB_FILE" ]; then
-        current_mem=$(grep -oP 'request_memory\\s*=\\s*\\K\\d+' "$SUB_FILE")
+        current_mem=$(grep -oP 'request_memory\s*=\s*\K\d+' "$SUB_FILE")
         if [ -n "$current_mem" ]; then
             new_mem=$((current_mem * 3 / 2))
             sed -i "s/request_memory = .*/request_memory = ${new_mem}/" "$SUB_FILE"
@@ -1981,9 +2017,9 @@ for filename, finfo in file_map.items():
         # Try EDM variant + strip numeric suffix:
         # NANOEDMAODSIM1 -> NANOAODSIM matches NANOAODSIM
         import re as _re
-        tier_norm = _re.sub(r'(EDM)?(\\d+)$', '', tier.upper())
+        tier_norm = _re.sub(r'(EDM)?(\d+)$', '', tier.upper())
         for ds_tier, base in tier_to_unmerged.items():
-            ds_norm = _re.sub(r'\\d+$', '', ds_tier.upper())
+            ds_norm = _re.sub(r'\d+$', '', ds_tier.upper())
             if tier_norm == ds_norm:
                 unmerged_base = base
                 break
@@ -3919,7 +3955,10 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
         print(f"  WARNING: No merge method available, copying {len(batch)} files to {out_dir}")
         for rf in batch:
             dest = os.path.join(out_dir, os.path.basename(rf))
-            shutil.copy2(rf, dest)
+            if rf.startswith("root://") or rf.startswith("davs://"):
+                stageout.download_file(rf, dest, grid_write_cmd)
+            else:
+                shutil.copy2(rf, dest)
             print(f"    Copied: {dest}")
             merged_files.append(dest)
 
@@ -4044,22 +4083,26 @@ if has_unmerged and stageout_mode == "grid" and stageout is not None:
                     if entry.endswith("_metrics.json"):
                         unmerged_metrics.append(local)
 
-        # Resolve ROOT file read URLs (prefer XRootD for direct CMSSW access)
+        # Download ROOT files locally via write protocol (davs:/gfal-copy).
+        # root:// direct access fails at some sites (RAL, KIT) — downloading
+        # via the write protocol is reliable since that's how files were staged.
         for entry in entries:
             if entry.endswith(".root"):
                 lfn = f"{unmerged_lfn_dir}/{entry}"
                 try:
-                    read_pfn, is_direct = stageout.resolve_read_pfn(lfn, siteconfig)
-                    if is_direct:
-                        # CMSSW can read root:// directly — no download needed
-                        unmerged_root_files.append(read_pfn)
-                    else:
-                        # Download to local temp dir
-                        local = os.path.join(os.getcwd(), entry)
-                        stageout.download_file(read_pfn, local, grid_write_cmd)
-                        unmerged_root_files.append(local)
+                    pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
+                    local = os.path.join(os.getcwd(), entry)
+                    stageout.download_file(pfn, local, cmd)
+                    unmerged_root_files.append(local)
                 except Exception as e:
-                    print(f"WARNING: Could not resolve read PFN for {lfn}: {e}")
+                    print(f"WARNING: Could not download {entry}: {e}")
+                    # Fallback: try direct root:// access
+                    try:
+                        read_pfn, _ = stageout.resolve_read_pfn(lfn, siteconfig)
+                        unmerged_root_files.append(read_pfn)
+                        print(f"  Falling back to direct access: {read_pfn}")
+                    except Exception:
+                        print(f"  Skipping {entry} — no access method available")
 
 elif has_unmerged:
     # Local mode: read from unmerged site storage via filesystem
@@ -4135,7 +4178,7 @@ if root_files:
             step_idx = finfo.get("step_index", -1)
         else:
             # Fallback: extract from filename pattern proc_NNN_stepN_TIER.root
-            m = re.match(r'proc_\\d+_step(\\d+)_(\\w+)\\.root', basename)
+            m = re.match(r'proc_\d+_step(\d+)_(\w+)\.root', basename)
             if m:
                 tier = m.group(2)
                 step_idx = int(m.group(1)) - 1
@@ -4165,9 +4208,9 @@ if root_files:
             # Try EDM variant + strip numeric suffix:
             # NANOEDMAODSIM1 -> NANOAODSIM matches NANOAODSIM
             import re as _re
-            ds_norm = _re.sub(r'\\d+$', '', ds_tier.upper())
+            ds_norm = _re.sub(r'\d+$', '', ds_tier.upper())
             for tier, files in tier_to_files.items():
-                tier_norm = _re.sub(r'(EDM)?(\\d+)$', '', tier.upper())
+                tier_norm = _re.sub(r'(EDM)?(\d+)$', '', tier.upper())
                 if tier_norm == ds_norm:
                     tier_files = files
                     step_idx = tier_to_step.get(tier, -1)
@@ -4717,13 +4760,13 @@ def resolve_read_pfn(lfn, siteconfig_path):
 
 # ── File operations ───────────────────────────────────────────
 
-def _run_cmd(cmd, retries=3, retry_delay=10, description=""):
+def _run_cmd(cmd, retries=3, retry_delay=10, description="", timeout=3600):
     """Run a shell command with retries."""
     for attempt in range(retries):
         try:
             result = subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, timeout=3600,
+                universal_newlines=True, timeout=timeout,
             )
             if result.returncode == 0:
                 return result
@@ -4740,8 +4783,16 @@ def _run_cmd(cmd, retries=3, retry_delay=10, description=""):
     raise RuntimeError(f"{description} failed after {retries} attempts")
 
 
+def _normalize_cmd(command):
+    """Normalize stageout command names. gfal2 is used at some CMS sites as alias for gfal-copy."""
+    if command == "gfal2":
+        return "gfal-copy"
+    return command
+
+
 def upload_file(local_path, pfn, command):
     """Upload local file to remote PFN."""
+    command = _normalize_cmd(command)
     if command == "cp":
         dest_dir = os.path.dirname(pfn)
         os.makedirs(dest_dir, exist_ok=True)
@@ -4754,12 +4805,14 @@ def upload_file(local_path, pfn, command):
             _run_cmd(
                 ["gfal-copy", "-f", src, pfn],
                 description=f"gfal-copy upload {os.path.basename(local_path)}",
+                timeout=600,
             )
             print(f"  gfal-copy: {local_path} -> {pfn}")
         else:
             _run_cmd(
                 ["xrdcp", "-f", local_path, pfn],
                 description=f"xrdcp upload {os.path.basename(local_path)}",
+                timeout=600,
             )
             print(f"  xrdcp: {local_path} -> {pfn}")
     elif command == "gfal-copy":
@@ -4767,6 +4820,7 @@ def upload_file(local_path, pfn, command):
         _run_cmd(
             ["gfal-copy", "-f", src, pfn],
             description=f"gfal-copy upload {os.path.basename(local_path)}",
+            timeout=600,
         )
         print(f"  gfal-copy: {local_path} -> {pfn}")
     else:
@@ -4775,6 +4829,7 @@ def upload_file(local_path, pfn, command):
 
 def download_file(pfn, local_path, command):
     """Download remote PFN to local file."""
+    command = _normalize_cmd(command)
     if command == "cp":
         shutil.copy2(pfn, local_path)
     elif command == "xrdcp":
@@ -4784,17 +4839,20 @@ def download_file(pfn, local_path, command):
             _run_cmd(
                 ["gfal-copy", "-f", pfn, dest],
                 description=f"gfal-copy download {os.path.basename(pfn)}",
+                timeout=300,
             )
         else:
             _run_cmd(
                 ["xrdcp", "-f", pfn, local_path],
                 description=f"xrdcp download {os.path.basename(pfn)}",
+                timeout=300,
             )
     elif command == "gfal-copy":
         dest = f"file://{os.path.abspath(local_path)}"
         _run_cmd(
             ["gfal-copy", "-f", pfn, dest],
             description=f"gfal-copy download {os.path.basename(pfn)}",
+            timeout=300,
         )
     else:
         raise ValueError(f"Unknown stageout command: {command}")
@@ -4802,6 +4860,7 @@ def download_file(pfn, local_path, command):
 
 def list_dir(pfn_dir, command):
     """List files in a remote directory. Returns list of basenames."""
+    command = _normalize_cmd(command)
     if command == "cp":
         if os.path.isdir(pfn_dir):
             return sorted(os.listdir(pfn_dir))
@@ -4814,6 +4873,7 @@ def list_dir(pfn_dir, command):
             result = _run_cmd(
                 ["xrdfs", host_prefix.rstrip("/"), "ls", path],
                 retries=2, description=f"xrdfs ls {path}",
+                timeout=120,
             )
             entries = []
             for line in result.stdout.strip().split("\\n"):
@@ -4825,6 +4885,7 @@ def list_dir(pfn_dir, command):
         result = _run_cmd(
             ["gfal-ls", pfn_dir],
             retries=2, description=f"gfal-ls {pfn_dir}",
+            timeout=120,
         )
         entries = []
         for line in result.stdout.strip().split("\\n"):
@@ -4836,6 +4897,7 @@ def list_dir(pfn_dir, command):
         result = _run_cmd(
             ["gfal-ls", pfn_dir],
             retries=2, description=f"gfal-ls {pfn_dir}",
+            timeout=120,
         )
         entries = []
         for line in result.stdout.strip().split("\\n"):
@@ -4848,6 +4910,7 @@ def list_dir(pfn_dir, command):
 
 def remove_path(pfn, command, recursive=False):
     """Remove a remote file or directory."""
+    command = _normalize_cmd(command)
     if command == "cp":
         if recursive and os.path.isdir(pfn):
             shutil.rmtree(pfn)
@@ -4902,6 +4965,7 @@ def remove_path(pfn, command, recursive=False):
 
 def mkdir_p(pfn, command):
     """Create remote directory (including parents)."""
+    command = _normalize_cmd(command)
     if command == "cp":
         os.makedirs(pfn, exist_ok=True)
     elif command == "xrdcp":

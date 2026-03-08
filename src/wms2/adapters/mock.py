@@ -163,6 +163,12 @@ class MockRucioAdapter(RucioAdapter):
     def __init__(self):
         self.calls: list[tuple[str, tuple, dict]] = []
 
+    async def list_temp_rses(self) -> list[str]:
+        self.calls.append(("list_temp_rses", (), {}))
+        return getattr(self, "_temp_rses", [
+            "T1_US_FNAL_Temp", "T2_US_MIT_Temp", "T2_CH_CERN_Temp",
+        ])
+
     async def get_replicas(self, lfns: list[str]) -> dict[str, list[str]]:
         self.calls.append(("get_replicas", (lfns,), {}))
         return {lfn: ["T1_US_FNAL", "T2_US_MIT"] for lfn in lfns}
