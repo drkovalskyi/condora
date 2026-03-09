@@ -1,4 +1,8 @@
+import asyncio
 import logging
+import os
+import re
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request as FastAPIRequest
@@ -11,6 +15,24 @@ from wms2.models.request import Request, RequestCreate, RequestUpdate
 from .deps import get_repository, get_settings
 
 logger = logging.getLogger(__name__)
+
+# Simple TTL cache for expensive filesystem-scanning endpoints.
+# Both /errors and /site-performance scan sshfs-mounted spool directories
+# which involves thousands of file operations with network latency.
+# Results only change on round completion (~minutes), so a 30s TTL is safe.
+_api_cache: dict[str, tuple[float, object]] = {}
+_CACHE_TTL = 30  # seconds
+
+
+def _cache_get(key: str) -> object | None:
+    entry = _api_cache.get(key)
+    if entry and time.monotonic() - entry[0] < _CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _cache_set(key: str, value: object) -> None:
+    _api_cache[key] = (time.monotonic(), value)
 
 
 class StopRequest(BaseModel):
@@ -505,6 +527,10 @@ async def get_request_errors(
     repo: Repository = Depends(get_repository),
 ):
     """Get error summary for a request (any state)."""
+    cached = _cache_get(f"errors:{request_name}")
+    if cached is not None:
+        return cached
+
     existing = await repo.get_request(request_name)
     if not existing:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -513,7 +539,9 @@ async def get_request_errors(
     if lm is None:
         raise HTTPException(status_code=503, detail="Lifecycle manager not available")
 
-    return await lm.get_error_summary(request_name)
+    result = await lm.get_error_summary(request_name)
+    _cache_set(f"errors:{request_name}", result)
+    return result
 
 
 @router.get("/{request_name}/versions", response_model=list[Request])
@@ -579,3 +607,190 @@ async def update_priority_profile(
 
     logger.info("Priority profile updated for %s: %s", request_name, profile)
     return {"request_name": request_name, "priority_profile": profile}
+
+
+# ---------------------------------------------------------------------------
+# Site performance
+# ---------------------------------------------------------------------------
+
+_NODE_COMPLETED_RE = re.compile(
+    r"(\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) Node (\S+) job completed"
+)
+
+
+def _scan_site_performance(dag_infos: list[dict]) -> list[dict]:
+    """Scan spool directories for per-WU site and timing data (blocking I/O).
+
+    dag_infos: [{"submit_dir": str, "round": int}, ...]
+    Returns list of per-WU dicts.
+    """
+    results = []
+    for dag_info in dag_infos:
+        submit_dir = dag_info["submit_dir"]
+        dag_round = dag_info["round"]
+        if not os.path.isdir(submit_dir):
+            continue
+        # Find mg_* subdirectories
+        try:
+            entries = os.listdir(submit_dir)
+        except OSError:
+            continue
+        mg_dirs = sorted(e for e in entries if e.startswith("mg_") and
+                         os.path.isdir(os.path.join(submit_dir, e)))
+        for mg_name in mg_dirs:
+            mg_path = os.path.join(submit_dir, mg_name)
+            # Get elected site
+            site_file = os.path.join(submit_dir, f"{mg_name}_elected_site")
+            if not os.path.isfile(site_file):
+                continue
+            try:
+                site = open(site_file).read().strip()
+            except OSError:
+                continue
+            if not site:
+                continue
+
+            # Check DagStatus — only include completed (5) WUs
+            status_file = os.path.join(mg_path, "group.dag.status")
+            if os.path.isfile(status_file):
+                try:
+                    content = open(status_file).read()
+                    m = re.search(r"DagStatus\s*=\s*(\d+)", content)
+                    dag_status = int(m.group(1)) if m else None
+                except OSError:
+                    dag_status = None
+            else:
+                dag_status = None
+
+            # Parse dagman.out for completion timestamps
+            dagman_out = os.path.join(mg_path, "group.dag.dagman.out")
+            if not os.path.isfile(dagman_out):
+                continue
+            try:
+                text = open(dagman_out).read()
+            except OSError:
+                continue
+
+            landing_ts = None
+            last_proc_ts = None
+            merge_ts = None
+            cleanup_ts = None
+            for match in _NODE_COMPLETED_RE.finditer(text):
+                ts_str, node = match.group(1), match.group(2)
+                try:
+                    ts = datetime.strptime(ts_str, "%m/%d/%y %H:%M:%S")
+                except ValueError:
+                    continue
+                if node == "landing":
+                    landing_ts = ts
+                elif node.startswith("proc_"):
+                    if last_proc_ts is None or ts > last_proc_ts:
+                        last_proc_ts = ts
+                elif node == "merge":
+                    merge_ts = ts
+                elif node == "cleanup":
+                    cleanup_ts = ts
+
+            # Compute durations (only if we have landing + last_proc at minimum)
+            if not landing_ts or not last_proc_ts:
+                continue
+            proc_sec = (last_proc_ts - landing_ts).total_seconds()
+
+            merge_sec = None
+            if merge_ts and last_proc_ts:
+                merge_sec = (merge_ts - last_proc_ts).total_seconds()
+
+            total_sec = None
+            if cleanup_ts:
+                total_sec = (cleanup_ts - landing_ts).total_seconds()
+            elif merge_ts:
+                total_sec = (merge_ts - landing_ts).total_seconds()
+
+            completed = dag_status == 5
+            results.append({
+                "site": site,
+                "round": dag_round,
+                "mg_name": mg_name,
+                "proc_sec": proc_sec,
+                "merge_sec": merge_sec,
+                "total_sec": total_sec,
+                "completed": completed,
+            })
+    return results
+
+
+@router.get("/{request_name}/site-performance")
+async def get_site_performance(
+    request_name: str,
+    repo: Repository = Depends(get_repository),
+):
+    """Site performance aggregated from DAG spool directories (excludes round 0)."""
+    cached = _cache_get(f"site_perf:{request_name}")
+    if cached is not None:
+        return cached
+
+    existing = await repo.get_request(request_name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    workflow = await repo.get_workflow_by_request(request_name)
+    if not workflow:
+        return {"sites": [], "total_wus": 0}
+
+    dags = await repo.list_dags(workflow_id=workflow.id, limit=1000)
+    # Sort by created_at ascending (list_dags returns desc)
+    dags.sort(key=lambda d: d.created_at)
+
+    # Build dag_infos, skip round 0 (first DAG)
+    dag_infos = []
+    for i, dag in enumerate(dags):
+        if i == 0:
+            continue  # skip round 0
+        if not dag.submit_dir:
+            continue
+        dag_infos.append({"submit_dir": dag.submit_dir, "round": i})
+
+    if not dag_infos:
+        return {"sites": [], "total_wus": 0}
+
+    # Run blocking I/O in thread pool
+    loop = asyncio.get_running_loop()
+    raw = await loop.run_in_executor(None, _scan_site_performance, dag_infos)
+
+    # Aggregate by site (only completed WUs for timing averages)
+    site_map: dict[str, dict] = {}
+    for wu in raw:
+        site = wu["site"]
+        if site not in site_map:
+            site_map[site] = {"wus_done": 0, "wus_running": 0,
+                              "proc_secs": [], "merge_secs": [], "total_secs": []}
+        entry = site_map[site]
+        if wu["completed"]:
+            entry["wus_done"] += 1
+            entry["proc_secs"].append(wu["proc_sec"])
+            if wu["merge_sec"] is not None:
+                entry["merge_secs"].append(wu["merge_sec"])
+            if wu["total_sec"] is not None:
+                entry["total_secs"].append(wu["total_sec"])
+        else:
+            entry["wus_running"] += 1
+
+    def _avg(lst):
+        return round(sum(lst) / len(lst) / 60, 1) if lst else None
+
+    sites = []
+    for site, d in site_map.items():
+        sites.append({
+            "site": site,
+            "wus_done": d["wus_done"],
+            "wus_running": d["wus_running"],
+            "avg_proc_min": _avg(d["proc_secs"]),
+            "avg_merge_min": _avg(d["merge_secs"]),
+            "avg_total_min": _avg(d["total_secs"]),
+        })
+    sites.sort(key=lambda s: -(s["wus_done"] + s["wus_running"]))
+
+    total = sum(s["wus_done"] + s["wus_running"] for s in sites)
+    result = {"sites": sites, "total_wus": total}
+    _cache_set(f"site_perf:{request_name}", result)
+    return result

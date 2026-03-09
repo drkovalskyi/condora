@@ -9,6 +9,7 @@ document.addEventListener('alpine:init', () => {
         workflow: null,
         dag: null,
         errors: null,
+        sitePerformance: null,
         loading: true,
         error: null,
 
@@ -35,15 +36,14 @@ document.addEventListener('alpine:init', () => {
             try {
                 this.loading = true;
                 this.error = null;
-                this.request = await WMS2_API.getRequest(this.name);
 
-                // Fetch workflow, DAG, and errors in parallel (graceful failures)
-                const [wf, errs] = await Promise.all([
+                // Phase 1: fetch request + workflow + DAG (fast — renders the page)
+                const [req, wf] = await Promise.all([
+                    WMS2_API.getRequest(this.name),
                     WMS2_API.getWorkflowByRequest(this.name).catch(() => null),
-                    WMS2_API.getRequestErrors(this.name).catch(() => null),
                 ]);
+                this.request = req;
                 this.workflow = wf;
-                this.errors = errs;
 
                 if (wf && wf.dag_id) {
                     this.dag = await WMS2_API.getDAG(wf.dag_id).catch(() => null);
@@ -55,6 +55,15 @@ document.addEventListener('alpine:init', () => {
             } finally {
                 this.loading = false;
             }
+
+            // Phase 2: fetch errors + site performance in background (slow)
+            Promise.all([
+                WMS2_API.getRequestErrors(this.name).catch(() => null),
+                WMS2_API.getSitePerformance(this.name).catch(() => null),
+            ]).then(([errs, sitePerf]) => {
+                this.errors = errs;
+                this.sitePerformance = sitePerf;
+            });
         },
 
         get hasWorkflow() { return this.workflow != null; },
@@ -63,6 +72,10 @@ document.addEventListener('alpine:init', () => {
             if (!this.errors) return false;
             const e = this.errors;
             return (e.total_failures || 0) > 0 || (e.site_errors && e.site_errors.length > 0);
+        },
+
+        get hasSitePerformance() {
+            return this.sitePerformance && this.sitePerformance.sites && this.sitePerformance.sites.length > 0;
         },
 
         get progressPct() {

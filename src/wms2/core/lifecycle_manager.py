@@ -1110,9 +1110,13 @@ class RequestLifecycleManager:
             if not dag.submit_dir:
                 return result
 
-        # Filesystem reads outside the session — no DB needed
+        # Filesystem reads outside the session — run in thread pool to avoid
+        # blocking the async event loop (these files are on sshfs in spool mode)
         eh = ErrorHandler(None, self.condor, self.settings)
-        post_data = eh.read_post_data(dag.submit_dir)
+        loop = asyncio.get_running_loop()
+        post_data = await loop.run_in_executor(
+            None, eh.read_post_data, dag.submit_dir
+        )
         if not post_data:
             return result
 
