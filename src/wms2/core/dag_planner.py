@@ -408,6 +408,9 @@ class DAGPlanner:
                     self.settings.max_jobs_per_work_unit,
                     test_fraction=config.get("test_fraction", 1.0),
                     current_events_per_job=current_epj,
+                    pilot_fraction=config.get(
+                        "pilot_fraction", self.settings.pilot_fraction
+                    ),
                 )
                 if computed is not None:
                     jobs_per_wu = computed
@@ -852,6 +855,7 @@ def _compute_jobs_per_wu_from_write_mb(
     max_jobs: int,
     test_fraction: float = 1.0,
     current_events_per_job: int = 0,
+    pilot_fraction: float = 0.01,
 ) -> int | None:
     """Compute optimal jobs_per_work_unit from measured write_mb in step_metrics.
 
@@ -872,6 +876,7 @@ def _compute_jobs_per_wu_from_write_mb(
     # Find the minimum write_mb.mean across all steps from the most recent round
     min_write_mb = None
     round_epj = 0
+    source_round = None
     for round_num in sorted(rounds.keys(), key=int, reverse=True):
         round_data = rounds[round_num]
         round_epj = round_data.get("effective_events_per_job", 0)
@@ -885,10 +890,21 @@ def _compute_jobs_per_wu_from_write_mb(
                     if min_write_mb is None or mean_write < min_write_mb:
                         min_write_mb = mean_write
         if min_write_mb is not None:
+            source_round = int(round_num)
             break  # Use most recent round only
 
     if min_write_mb is None or min_write_mb <= 0:
         return None
+
+    # Fallback: if effective_events_per_job was not stored (old round data),
+    # infer it for round 0 using pilot_fraction
+    if round_epj == 0 and source_round == 0 and current_events_per_job > 0:
+        if 0 < pilot_fraction < 1.0:
+            round_epj = max(1, int(current_events_per_job * pilot_fraction))
+            logger.info(
+                "Inferred round 0 effective_epj=%d from pilot_fraction=%.4f",
+                round_epj, pilot_fraction,
+            )
 
     # Scale write_mb if the round used a different events_per_job than current
     # (e.g. pilot round with 40 epj → production with 4000 epj)
