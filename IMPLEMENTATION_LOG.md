@@ -6,6 +6,77 @@
 
 ---
 
+## 2026-03-09 — Pilot→production WU sizing fix, UUID merge filenames, large-tier skip-merge
+
+### What was done
+
+Fixed a bug where work-unit sizing after a pilot round (round 0) used raw
+pilot write_mb values without scaling for the 100× difference in
+events_per_job between pilot and production jobs. This caused 4 WUs of 100
+procs instead of ~30-50 WUs of ~13 procs for request 00057. Also added UUID
+filenames for merged output (matching WMAgent convention) and smart
+skip-merge for tiers with already-large files.
+
+### Changes
+
+1. **Store effective_events_per_job in round metrics** (`lifecycle_manager.py`)
+   - `complete_round()` now records `effective_events_per_job` in each
+     round's metrics (from `dag.node_counts` or `splitting_params`)
+   - This is the actual epj used for that round (e.g. 40 for pilot with
+     `pilot_fraction=0.01`, 4000 for production)
+
+2. **Scale write_mb by epj ratio** (`dag_planner.py:_compute_jobs_per_wu_from_write_mb`)
+   - New `current_events_per_job` parameter
+   - Reads `effective_events_per_job` from the round data
+   - Scales `min_write_mb` proportionally when round epj differs from current
+   - Example: pilot write_mb=3.04 MB (40 events) → 304 MB (4000 events)
+     → `round(4096/304) = 13` jobs/WU instead of `int(4096/3.04) = 1347`
+     (clamped to 100)
+   - Changed `int()` to `round()` for better rounding
+
+3. **Pass current_events_per_job at call site** (`dag_planner.py`)
+   - Reads `events_per_job` from `workflow.splitting_params` and passes
+     it to `_compute_jobs_per_wu_from_write_mb`
+
+4. **Cap total_events by test_fraction** (`dag_planner.py:_plan_gen_nodes`)
+   - When `test_fraction` is set, caps `total_events` at
+     `request_num_events × test_fraction` before filter_eff inflation
+   - Prevents planning nodes beyond the target for test-fraction requests
+
+5. **UUID filenames for merged output** (`dag_planner.py:merge_root_tier`)
+   - Each merged output file uses `uuid.uuid4().root` instead of
+     `merged_{TIER}.root` / `merged_{TIER}_N.root`
+   - Matches WMAgent CMSSW-GUID naming convention
+   - `merge_output.json` LFN entries use UUID filenames automatically
+
+6. **Skip-merge for large-file tiers** (`dag_planner.py:merge_root_tier`)
+   - When average file size >= `max_merge_size / 2` (e.g. 2 GB), skips
+     merge entirely — copies each file with a UUID name
+   - Prevents producing 30+ GB merged files for tiers like AODSIM when
+     WU sizing targets the smallest tier (NANOAODSIM)
+   - Passes `file_sizes` dict to `batch_by_size` for accurate batching
+
+### Design decisions
+
+- **Scaling is linear**: Output file size scales roughly linearly with
+  event count for CMSSW steps. This is accurate enough for WU sizing —
+  the exact ratio doesn't matter, just the order of magnitude.
+- **test_fraction cap before filter_eff**: The cap applies to the target
+  event count, then filter_eff inflates it for job planning. This gives
+  the correct number of generated events to produce the capped output.
+- **Skip-merge threshold at max_merge_size/2**: Files above this size are
+  already "large enough" — merging them would exceed the target. Copying
+  with UUID names preserves provenance via merge_output.json.
+
+### Verification
+
+- Matrix smoke tests: all 5 passed (synthetic, simulator, fault injection)
+- UUID naming confirmed in merge_output.json: `d209c952-...-7ae0c9065f5c.root`
+- For 00057 scenario: pilot write_mb=3.04 MB (40 epj) would scale to
+  304 MB (4000 epj), giving 13 jobs/WU → ~31 WUs (verified by calculation)
+
+---
+
 ## 2026-03-08 — Dynamic Rucio RSE management, pileup cache persistence, stageout hardening
 
 ### What was done

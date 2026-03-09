@@ -263,7 +263,12 @@ class DAGPlanner:
         # Adaptive cap: limit the number of processing jobs per round
         if adaptive:
             if current_round == 0:
-                wus = self.settings.first_round_work_units
+                pilot_fraction = config.get("pilot_fraction", self.settings.pilot_fraction)
+                if pilot_fraction == 0:
+                    # No pilot — use production WU count
+                    wus = config.get("work_units_per_round") or self.settings.work_units_per_round
+                else:
+                    wus = self.settings.first_round_work_units
             else:
                 wus = config.get("work_units_per_round") or self.settings.work_units_per_round
             max_jobs = wus * self.settings.jobs_per_work_unit
@@ -324,6 +329,30 @@ class DAGPlanner:
         # filter_efficiency is used at planning time (inflating total_events in
         # _plan_gen_nodes) but not passed to the processing wrapper.
 
+        # Wall time computation needs time_per_event and events_per_job.
+        # Round 0: use request hint; round 1+: use measured value from step_metrics.
+        tpe_sec = float(config.get("time_per_event", 0))
+        step_metrics = getattr(workflow, "step_metrics", None)
+        if isinstance(step_metrics, dict) and current_round > 0:
+            # Prefer measured time_per_event from prior round
+            measured_tpe = step_metrics.get("total_time_per_event_sec")
+            if not measured_tpe:
+                # Check in summary or adaptive_params
+                ap = step_metrics.get("adaptive_params", {})
+                measured_tpe = ap.get("time_per_event_sec") if isinstance(ap, dict) else None
+            if measured_tpe and float(measured_tpe) > 0:
+                tpe_sec = float(measured_tpe)
+        if tpe_sec > 0:
+            resource_params["time_per_event_sec"] = tpe_sec
+        sp = workflow.splitting_params or {}
+        epj = sp.get("events_per_job") or sp.get("eventsPerJob") or 0
+        if epj:
+            resource_params["events_per_job"] = int(epj)
+        # Per-request idle timeout override (set via config_data at import or API)
+        idle_timeout_override = config.get("idle_timeout_sec")
+        if idle_timeout_override:
+            resource_params["idle_timeout_override"] = int(idle_timeout_override)
+
         # ── Apply adaptive params from prior round optimization ──
         if adaptive and current_round > 0:
             step_metrics = getattr(workflow, "step_metrics", None)
@@ -368,11 +397,17 @@ class DAGPlanner:
         if adaptive and current_round > 0 and jobs_per_wu is None:
             step_metrics = getattr(workflow, "step_metrics", None)
             if isinstance(step_metrics, dict):
+                # Current events_per_job (may differ from pilot round's effective epj)
+                sp = workflow.splitting_params or {}
+                current_epj = int(
+                    sp.get("events_per_job") or sp.get("eventsPerJob") or 0
+                )
                 computed = _compute_jobs_per_wu_from_write_mb(
                     step_metrics,
                     self.settings.target_merged_size_kb,
                     self.settings.max_jobs_per_work_unit,
                     test_fraction=config.get("test_fraction", 1.0),
+                    current_events_per_job=current_epj,
                 )
                 if computed is not None:
                     jobs_per_wu = computed
@@ -522,6 +557,7 @@ class DAGPlanner:
             spool_mode=use_spool,
             allowed_sites=effective_allowed,
             all_sites=all_site_names or None,
+            settings=self.settings,
         )
 
         logger.info("Plan %s: DAG files generated in %.1fs (%d WUs, %s)",
@@ -551,6 +587,16 @@ class DAGPlanner:
         }
         if not skip_site_pinning:
             node_counts["landing"] = len(merge_groups)
+        # Store effective events_per_job for round 0 pilot scaling — used by
+        # complete_round() to compute correct offset advancement.
+        if is_gen and current_round == 0:
+            pilot_fraction = config.get("pilot_fraction", self.settings.pilot_fraction)
+            nominal_epj = (workflow.splitting_params or {}).get("events_per_job") or \
+                          (workflow.splitting_params or {}).get("eventsPerJob") or 100_000
+            if 0 < pilot_fraction < 1.0:
+                node_counts["effective_events_per_job"] = max(1, int(nominal_epj * pilot_fraction))
+            else:
+                node_counts["effective_events_per_job"] = int(nominal_epj)
         dag = await self.db.create_dag(
             workflow_id=workflow.id,
             dag_file_path=dag_file_path,
@@ -718,7 +764,26 @@ class DAGPlanner:
 
         params = workflow.splitting_params or {}
         events_per_job = params.get("events_per_job") or params.get("eventsPerJob") or 100_000
+
+        # Apply pilot_fraction for round 0 — scale events_per_job
+        current_round = getattr(workflow, "current_round", 0) or 0
+        if current_round == 0:
+            pilot_fraction = config.get("pilot_fraction", 0.01)
+            if 0 < pilot_fraction < 1.0:
+                events_per_job = max(1, int(events_per_job * pilot_fraction))
+                logger.info("Pilot round: events_per_job scaled to %d (fraction=%.4f)",
+                            events_per_job, pilot_fraction)
+
         total_events = int(config.get("request_num_events") or 0)
+
+        # Cap total_events by test_fraction if set (limits total production)
+        test_fraction = float(config.get("test_fraction", 1.0))
+        if 0 < test_fraction < 1.0 and total_events > 0:
+            total_events = max(1, int(total_events * test_fraction))
+            logger.info(
+                "GEN workflow %s: capped total_events to %d (test_fraction=%.4f)",
+                workflow.id, total_events, test_fraction,
+            )
 
         # For GenFilter workflows, RequestNumEvents is desired *output* events
         # but events_per_job is *generated* events per job.  Inflate total to
@@ -786,6 +851,7 @@ def _compute_jobs_per_wu_from_write_mb(
     target_merged_size_kb: int,
     max_jobs: int,
     test_fraction: float = 1.0,
+    current_events_per_job: int = 0,
 ) -> int | None:
     """Compute optimal jobs_per_work_unit from measured write_mb in step_metrics.
 
@@ -793,6 +859,11 @@ def _compute_jobs_per_wu_from_write_mb(
     produce a target merged file size. When test_fraction < 1, the target is
     scaled down proportionally (e.g. 4 GB * 0.01 = 40 MB) so that merged files
     stay proportional to the test run. Returns None if no write_mb data found.
+
+    If current_events_per_job is set and differs from the round's
+    effective_events_per_job (e.g. pilot fraction scaling), the measured
+    write_mb is scaled proportionally — output size scales linearly with
+    event count.
     """
     rounds = step_metrics.get("rounds", {})
     if not rounds:
@@ -800,8 +871,10 @@ def _compute_jobs_per_wu_from_write_mb(
 
     # Find the minimum write_mb.mean across all steps from the most recent round
     min_write_mb = None
+    round_epj = 0
     for round_num in sorted(rounds.keys(), key=int, reverse=True):
         round_data = rounds[round_num]
+        round_epj = round_data.get("effective_events_per_job", 0)
         wu_metrics = round_data.get("wu_metrics", [])
         for wu in wu_metrics:
             per_step = wu.get("per_step", {})
@@ -817,10 +890,20 @@ def _compute_jobs_per_wu_from_write_mb(
     if min_write_mb is None or min_write_mb <= 0:
         return None
 
+    # Scale write_mb if the round used a different events_per_job than current
+    # (e.g. pilot round with 40 epj → production with 4000 epj)
+    if current_events_per_job > 0 and round_epj > 0 and round_epj != current_events_per_job:
+        scale = current_events_per_job / round_epj
+        logger.info(
+            "Scaling write_mb %.2f MB by %.1fx (epj %d→%d)",
+            min_write_mb, scale, round_epj, current_events_per_job,
+        )
+        min_write_mb *= scale
+
     # target_merged_size_kb is in KB, write_mb is in MB
     # Scale target by test_fraction so test runs get proportionally smaller merges
     target_mb = target_merged_size_kb / 1024.0 * test_fraction
-    optimal = int(target_mb / min_write_mb)
+    optimal = round(target_mb / min_write_mb)
 
     # Clamp to [1, max_jobs]
     return max(1, min(optimal, max_jobs))
@@ -903,6 +986,7 @@ def _generate_dag_files(
     spool_mode: bool = False,
     allowed_sites: list[str] | None = None,
     all_sites: list[str] | None = None,
+    settings: Settings | None = None,
 ) -> str:
     """Generate all DAG files on disk. Returns path to outer workflow.dag."""
     submit_path = Path(submit_dir)
@@ -1002,6 +1086,7 @@ def _generate_dag_files(
             allowed_sites=allowed_sites,
             spool_mode=spool_mode,
             all_sites=all_sites,
+            settings=settings,
         )
 
         if spool_mode:
@@ -1015,16 +1100,58 @@ def _generate_dag_files(
                 capture_output=True,
             )
 
-    # Category throttling for merge groups
-    outer_lines.append("")
-    for mg in merge_groups:
-        mg_name = f"mg_{mg.group_index:06d}"
-        outer_lines.append(f"CATEGORY {mg_name} MergeGroup")
-    outer_lines.append("MAXJOBS MergeGroup 10")
+    # All merge group SUBDAGs run without concurrency limit — DAGMan
+    # and the schedd handle scheduling.  Inner category throttles
+    # (Processing, Merge, Cleanup) still apply within each SUBDAG.
 
     dag_path = str(submit_path / "workflow.dag")
     _write_file(dag_path, "\n".join(outer_lines) + "\n")
     return dag_path
+
+
+def _compute_max_wall_time_mins(
+    node_type: str,
+    resource_params: dict | None = None,
+    settings: Settings | None = None,
+) -> int:
+    """Compute MaxWallTimeMinsRun for a given node type.
+
+    For proc nodes: time_per_event × events_per_job / ncpus × safety_factor,
+    with a minimum of 120 min and fallback of 1440 min (24h).
+    For merge: max(merge_min, proc_estimate × 2), minimum 240 min.
+    For landing: fixed (default 30 min).
+    For cleanup: fixed (default 60 min).
+    """
+    rp = resource_params or {}
+    sf = settings.wall_time_safety_factor if settings else 3.0
+
+    if node_type == "landing":
+        return settings.landing_wall_time_mins if settings else 30
+
+    if node_type == "cleanup":
+        return settings.cleanup_wall_time_mins if settings else 60
+
+    if node_type == "proc":
+        tpe = rp.get("time_per_event_sec", 0)
+        epj = rp.get("events_per_job", 0)
+        ncpus = rp.get("ncpus", 1) or 1
+        if tpe > 0 and epj > 0:
+            wall_sec = tpe * epj / ncpus * sf
+            return max(120, int(wall_sec / 60) + 1)
+        return 1440  # 24h fallback when no performance data
+
+    if node_type == "merge":
+        merge_min = settings.merge_wall_time_mins_min if settings else 240
+        # Estimate merge time as 2× proc time
+        tpe = rp.get("time_per_event_sec", 0)
+        epj = rp.get("events_per_job", 0)
+        ncpus = rp.get("ncpus", 1) or 1
+        if tpe > 0 and epj > 0:
+            proc_wall_min = tpe * epj / ncpus * sf / 60
+            return max(merge_min, int(proc_wall_min * 2) + 1)
+        return merge_min
+
+    return 1440  # unknown node type fallback
 
 
 def _generate_group_dag(
@@ -1047,6 +1174,7 @@ def _generate_group_dag(
     allowed_sites: list[str] | None = None,
     spool_mode: bool = False,
     all_sites: list[str] | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Generate a single merge group sub-DAG (group.dag) + submit files."""
     exe = executables or {}
@@ -1218,6 +1346,41 @@ def _generate_group_dag(
         all_desired = ""
     out_dir = mg_name if spool_mode else ""
 
+    # ── Wall time and idle timeout per node type ──
+    held_timeout = settings.periodic_remove_held_timeout_sec if settings else 420
+    disk_limit = settings.periodic_remove_disk_limit_kb if settings else 20971520
+
+    landing_wall = _compute_max_wall_time_mins("landing", rp, settings)
+    proc_wall = _compute_max_wall_time_mins("proc", rp, settings)
+    merge_wall = _compute_max_wall_time_mins("merge", rp, settings)
+    cleanup_wall = _compute_max_wall_time_mins("cleanup", rp, settings)
+
+    # Idle timeout tiered by priority level
+    # Per-request override takes precedence over tier-based default.
+    idle_override = rp.get("idle_timeout_override", 0)
+    if idle_override:
+        proc_idle_timeout = idle_override
+    elif settings:
+        if job_priority >= 5:
+            proc_idle_timeout = settings.idle_timeout_high_sec
+        elif job_priority >= 3:
+            proc_idle_timeout = settings.idle_timeout_normal_sec
+        else:
+            proc_idle_timeout = settings.idle_timeout_low_sec
+    else:
+        proc_idle_timeout = 43200  # 12h default
+
+    # Merge/cleanup get the tightest idle timeout (they're always high priority)
+    merge_idle_timeout = min(
+        proc_idle_timeout,
+        settings.idle_timeout_high_sec if settings else 14400,
+    )
+    # Landing gets the same as merge (it's also high priority)
+    landing_idle_timeout = merge_idle_timeout
+
+    # Merge priority boost — merge jobs should always run before proc at same site
+    merge_priority = job_priority + (settings.merge_priority_boost if settings else 10)
+
     if not skip_site_pinning:
         # Landing node: /bin/true job with free site selection.
         # Its POST script (elect_site.sh) extracts MATCH_GLIDEIN_CMSSite
@@ -1242,12 +1405,17 @@ def _generate_group_dag(
             extra_classads=landing_classads,
             output_dir=out_dir,
             transfer_executable=False,
+            max_wall_time_mins_run=landing_wall,
+            idle_timeout_sec=landing_idle_timeout,
+            held_timeout_sec=held_timeout,
+            disk_limit_kb=disk_limit,
         )
         lines.append(f"JOB landing {fp}landing.sub")
         landing_log = f"{fp}landing.log"
         lines.append(
             f"SCRIPT POST landing elect_site.sh {elected_site} {landing_log}"
         )
+        lines.append("RETRY landing 3 UNLESS-EXIT 42")
         lines.append("")
 
     # Processing nodes
@@ -1291,6 +1459,10 @@ def _generate_group_dag(
             priority=job_priority,
             extra_classads=extra_classads,
             output_dir=out_dir,
+            max_wall_time_mins_run=proc_wall,
+            idle_timeout_sec=proc_idle_timeout,
+            held_timeout_sec=held_timeout,
+            disk_limit_kb=disk_limit,
         )
         lines.append(f"JOB {node_name} {fp}{node_name}.sub")
         if not skip_site_pinning:
@@ -1316,6 +1488,16 @@ def _generate_group_dag(
             merge_transfer.append("wms2_stageout.py")
         else:
             merge_transfer.append("../wms2_stageout.py")
+    # In spool mode, remap merge output files into the WU's subdirectory
+    # to prevent multi-WU spool conflicts (each WU's merge_output.json
+    # and work_unit_metrics.json would otherwise overwrite at spool root).
+    merge_output_remaps = None
+    if spool_mode:
+        mg_name = f"mg_{merge_group.group_index:06d}"
+        merge_output_remaps = {
+            "merge_output.json": f"{mg_name}/merge_output.json",
+            "work_unit_metrics.json": f"{mg_name}/work_unit_metrics.json",
+        }
     _write_submit_file(
         str(group_dir / "merge.sub"),
         executable=merge_exe,
@@ -1325,10 +1507,15 @@ def _generate_group_dag(
         memory_mb=memory_mb,
         disk_kb=disk_kb,
         transfer_input_files=merge_transfer or None,
+        transfer_output_remaps=merge_output_remaps,
         environment=proc_env or None,
-        priority=job_priority,
+        priority=merge_priority,
         extra_classads=extra_classads,
         output_dir=out_dir,
+        max_wall_time_mins_run=merge_wall,
+        idle_timeout_sec=merge_idle_timeout,
+        held_timeout_sec=held_timeout,
+        disk_limit_kb=disk_limit,
     )
     lines.append(f"JOB merge {fp}merge.sub")
     if not skip_site_pinning:
@@ -1366,9 +1553,13 @@ def _generate_group_dag(
         desired_sites=all_desired if skip_site_pinning else "",
         transfer_input_files=cleanup_transfer or None,
         environment=proc_env or None,
-        priority=job_priority,
+        priority=merge_priority,
         extra_classads=extra_classads,
         output_dir=out_dir,
+        max_wall_time_mins_run=cleanup_wall,
+        idle_timeout_sec=merge_idle_timeout,
+        held_timeout_sec=held_timeout,
+        disk_limit_kb=disk_limit,
     )
     lines.append(f"JOB cleanup {fp}cleanup.sub")
     if not skip_site_pinning:
@@ -1425,6 +1616,7 @@ def _write_submit_file(
     disk_kb: int = 0,
     ncpus: int = 0,
     transfer_input_files: list[str] | None = None,
+    transfer_output_remaps: dict[str, str] | None = None,
     environment: dict[str, str] | None = None,
     banned_sites: list[str] | None = None,
     allowed_sites: list[str] | None = None,
@@ -1432,6 +1624,10 @@ def _write_submit_file(
     extra_classads: dict[str, str] | None = None,
     output_dir: str = "",
     transfer_executable: bool = True,
+    max_wall_time_mins_run: int = 0,
+    idle_timeout_sec: int = 43200,
+    held_timeout_sec: int = 420,
+    disk_limit_kb: int = 20971520,
 ) -> None:
     stem = Path(path).stem
     out_prefix = f"{output_dir}/" if output_dir else ""
@@ -1470,6 +1666,9 @@ def _write_submit_file(
         lines.append(f"x509userproxy = {proxy_ref}")
     if transfer_input_files:
         lines.append(f"transfer_input_files = {','.join(transfer_input_files)}")
+    if transfer_output_remaps:
+        remap_str = "; ".join(f"{k} = {v}" for k, v in transfer_output_remaps.items())
+        lines.append(f'transfer_output_remaps = "{remap_str}"')
     if desired_sites:
         lines.append(f'+DESIRED_Sites = "{desired_sites}"')
     # CMS GlideinWMS classads — required for glidein provisioning and matching.
@@ -1488,6 +1687,44 @@ def _write_submit_file(
     # highprio, production, analysis. Use "production" to match Tier-0 jobs.
     lines.append("accounting_group = production")
     lines.append("accounting_group_user = dmytro")
+    # Job lease: if the startd (glidein) loses contact, the schedd evicts
+    # the job after this many seconds. Without this, zombie jobs can stay
+    # "Running" indefinitely when glideins die without clean shutdown.
+    # WMAgent uses 1200s (20 min). We use the same.
+    lines.append("+JobLeaseDuration = 1200")
+    # Wall time enforcement — periodic_remove kills zombie/runaway jobs.
+    # MaxWallTimeMinsRun is per-node (computed by caller based on node type).
+    if max_wall_time_mins_run > 0:
+        lines.append(f"+MaxWallTimeMinsRun = {max_wall_time_mins_run}")
+    # periodic_remove: kill jobs that exceed wall time, are stuck held/idle, or use too much disk.
+    lines.append(
+        "periodic_remove = "
+        "(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) "
+        "&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus) || "
+        f"(JobStatus == 5 && time() - EnteredCurrentStatus > {held_timeout_sec}) || "
+        f"(JobStatus == 1 && time() - EnteredCurrentStatus > {idle_timeout_sec}) || "
+        f"(DiskUsage > {disk_limit_kb})"
+    )
+    # Diagnostic reason — HTCondor logs this when periodic_remove fires.
+    lines.append(
+        '+PeriodicRemoveReason = strcat("WMS2: ", '
+        'ifThenElse(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) '
+        '&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus, '
+        'strcat("wall time exceeded (", MaxWallTimeMinsRun, " min limit)"), '
+        'ifThenElse(JobStatus == 5, '
+        'strcat("held for ", int((time() - EnteredCurrentStatus)/60), " min"), '
+        f'ifThenElse(JobStatus == 1, '
+        f'strcat("idle for ", int((time() - EnteredCurrentStatus)/3600), " hours"), '
+        f'"disk usage exceeded ({disk_limit_kb} KB limit)"))))'
+    )
+    # periodic_release: auto-release jobs held for transient reasons.
+    # HoldReasonCode 6=SIGKILL, 13=submit failure, 28=memory exceeded, 30=network error.
+    # NumJobStarts < 5 prevents infinite release loops.
+    lines.append(
+        "periodic_release = (NumJobStarts < 5) && "
+        "(HoldReasonCode == 28 || HoldReasonCode == 30 || "
+        "HoldReasonCode == 13 || HoldReasonCode == 6)"
+    )
     req_parts = []
     if allowed_sites:
         pos = " || ".join(
@@ -1497,8 +1734,7 @@ def _write_submit_file(
     if banned_sites:
         for s in banned_sites:
             req_parts.append(f'(TARGET.GLIDEIN_CMSSite =!= "{s}")')
-    if req_parts:
-        lines.append(f"Requirements = {' && '.join(req_parts)}")
+    lines.append(f"Requirements = {' && '.join(req_parts)}")
     if priority:
         lines.append(f"priority = {priority}")
     if extra_classads:
@@ -1640,8 +1876,12 @@ if [ "$CLASSIFICATION" = "infrastructure_memory" ]; then
 fi
 
 # --- Early abort on repeated identical failures ---
-# If N different proc nodes failed with the same exit code, this is systemic.
-# Abort the sub-DAG instead of burning through all retries on remaining nodes.
+# If N different proc nodes have EXHAUSTED retries with the same exit code,
+# this is systemic. Abort the sub-DAG instead of burning through all retries
+# on remaining nodes.
+# Only count nodes where final=true (retries exhausted) — transient failures
+# on early attempts should not trigger abort since retries will likely land
+# on different workers.
 # Threshold scales to group size: min(proc_count, 3) so a 2-node group
 # aborts after 2 matching failures instead of never reaching 3.
 PROC_COUNT=$(ls "${GROUP_DIR}"/proc_*.sub 2>/dev/null | wc -l)
@@ -1650,13 +1890,21 @@ CURRENT_EXIT="$EXIT_CODE"
 match_count=0
 for pj in "${GROUP_DIR}"/proc_*.post.json; do
     [ -f "$pj" ] || continue
-    pj_exit=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('job',{}).get('exit_code',''))" "$pj" 2>/dev/null)
-    if [ "$pj_exit" = "$CURRENT_EXIT" ]; then
+    pj_data=$(python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+ec=d.get('job',{}).get('exit_code','')
+final=d.get('final',False)
+print(f'{ec} {final}')
+" "$pj" 2>/dev/null)
+    pj_exit="${pj_data%% *}"
+    pj_final="${pj_data##* }"
+    if [ "$pj_exit" = "$CURRENT_EXIT" ] && [ "$pj_final" = "True" ]; then
         match_count=$((match_count + 1))
     fi
 done
 if [ "$match_count" -ge "$IDENTICAL_THRESHOLD" ]; then
-    echo "ABORT: $match_count nodes failed with exit code $CURRENT_EXIT — systemic failure" >&2
+    echo "ABORT: $match_count nodes exhausted retries with exit code $CURRENT_EXIT — systemic failure" >&2
     exit $ABORT_EXIT
 fi
 
@@ -3252,6 +3500,39 @@ while True:
     step_idx += 1
 
 if all_metrics:
+    # Add ncpus from manifest (tracks core count used for this job)
+    try:
+        mf = json.load(open('manifest.json'))
+        for m in all_metrics:
+            si = m.get('step_index', 0)
+            steps = mf.get('steps', [])
+            if si < len(steps):
+                m['ncpus'] = steps[si].get('multicore', 1)
+    except Exception:
+        pass
+
+    # Extract cgroup peak memory from memory_monitor.log
+    # Columns: ts_sec cgroup_mb anon_mb file_mb shmem_mb tmpfs_present
+    cgroup_peak_mb = 0
+    try:
+        with open('memory_monitor.log') as mlf:
+            for line in mlf:
+                if line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        cg = int(parts[1])
+                        if cg > cgroup_peak_mb:
+                            cgroup_peak_mb = cg
+                    except ValueError:
+                        pass
+    except FileNotFoundError:
+        pass
+    if cgroup_peak_mb > 0:
+        for m in all_metrics:
+            m['cgroup_memory_mb'] = cgroup_peak_mb
+
     out = 'proc_${NODE_INDEX}_metrics.json'
     with open(out, 'w') as fh:
         json.dump(all_metrics, fh, indent=2)
@@ -3546,6 +3827,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import uuid
 import zlib
 from datetime import datetime, timezone
 
@@ -3862,6 +4144,9 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
     """Merge ROOT files for a single tier using cmsRun + mergeProcess().
 
     Batches files by max_merge_size and produces multiple outputs if needed.
+    Uses UUID filenames (like WMAgent) for each output file.
+    For tiers where individual files are already large (>= max_merge_size/2),
+    skips merge entirely and copies each file with a UUID name.
     Falls back to hadd if cmsRun fails, then to uproot merge for simulator mode.
     """
     # Determine CMSSW version/arch for this tier's step
@@ -3895,15 +4180,42 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
     has_cvmfs = os.path.isdir("/cvmfs/cms.cern.ch")
     can_cmsrun = bool(cmssw_version) and has_cvmfs
 
+    # Check if individual files are already large — skip merge if so
+    file_sizes = {}
+    total_size = 0
+    for f in tier_files:
+        if os.path.isfile(f):
+            sz = os.path.getsize(f)
+            file_sizes[f] = sz
+            total_size += sz
+    if file_sizes:
+        avg_size = total_size / len(file_sizes)
+        if avg_size >= max_merge_size / 2:
+            print(f"  Tier {tier}: avg file size {avg_size / (1024**2):.0f} MB >= "
+                  f"{max_merge_size / (2 * 1024**2):.0f} MB — skipping merge, "
+                  f"copying {len(tier_files)} files with UUID names")
+            merged_files = []
+            for f in tier_files:
+                out_name = f"{uuid.uuid4()}.root"
+                out_file = os.path.join(out_dir, out_name)
+                if f.startswith("root://") or f.startswith("davs://"):
+                    stageout.download_file(f, out_file, grid_write_cmd)
+                else:
+                    shutil.copy2(f, out_file)
+                size = os.path.getsize(out_file)
+                print(f"    {os.path.basename(f)} -> {out_name} ({size / (1024**2):.1f} MB)")
+                merged_files.append(out_file)
+            return merged_files
+
     # Batch files by target merge size
-    batches = batch_by_size(tier_files, max_merge_size)
+    batches = batch_by_size(tier_files, max_merge_size, file_sizes=file_sizes)
     print(f"  {len(batches)} merge batch(es) for tier {tier} "
           f"(max_merge_size={max_merge_size / (1024**3):.1f} GB)")
 
     merged_files = []
     for batch_idx, batch in enumerate(batches):
-        suffix = f"_{batch_idx}" if len(batches) > 1 else ""
-        out_file = os.path.join(out_dir, f"merged_{output_tier}{suffix}.root")
+        out_name = f"{uuid.uuid4()}.root"
+        out_file = os.path.join(out_dir, out_name)
 
         if len(batch) == 1:
             # Single file — just copy/download, no merge needed
@@ -3914,11 +4226,11 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
             else:
                 shutil.copy2(src, out_file)
             size = os.path.getsize(out_file)
-            print(f"  Batch {batch_idx}: single file copied -> {out_file} ({size} bytes)")
+            print(f"  Batch {batch_idx}: single file copied -> {out_name} ({size} bytes)")
             merged_files.append(out_file)
             continue
 
-        print(f"  Batch {batch_idx}: {len(batch)} files")
+        print(f"  Batch {batch_idx}: {len(batch)} files -> {out_name}")
 
         if can_cmsrun:
             pset_path = os.path.join(work_dir, f"merge_cfg_{tier}_{batch_idx}.py")
@@ -3927,7 +4239,7 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
             success = run_cmsrun(pset_path, cmssw_version, scram_arch, work_dir)
             if success and os.path.isfile(out_file):
                 size = os.path.getsize(out_file)
-                print(f"  Batch {batch_idx}: cmsRun merge -> {out_file} ({size} bytes)")
+                print(f"  Batch {batch_idx}: cmsRun merge -> {out_name} ({size} bytes)")
                 merged_files.append(out_file)
                 continue
             else:
@@ -3938,7 +4250,7 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
             success = merge_root_with_hadd(batch, out_file, cmssw_version, scram_arch)
             if success and os.path.isfile(out_file):
                 size = os.path.getsize(out_file)
-                print(f"  Batch {batch_idx}: hadd fallback -> {out_file} ({size} bytes)")
+                print(f"  Batch {batch_idx}: hadd fallback -> {out_name} ({size} bytes)")
                 merged_files.append(out_file)
                 continue
 
@@ -3947,19 +4259,20 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
             success = merge_root_with_uproot(batch, out_file)
             if success and os.path.isfile(out_file):
                 size = os.path.getsize(out_file)
-                print(f"  Batch {batch_idx}: uproot merge -> {out_file} ({size} bytes)")
+                print(f"  Batch {batch_idx}: uproot merge -> {out_name} ({size} bytes)")
                 merged_files.append(out_file)
                 continue
 
-        # Last resort: copy files individually
+        # Last resort: copy files individually with UUID names
         print(f"  WARNING: No merge method available, copying {len(batch)} files to {out_dir}")
         for rf in batch:
-            dest = os.path.join(out_dir, os.path.basename(rf))
+            copy_name = f"{uuid.uuid4()}.root"
+            dest = os.path.join(out_dir, copy_name)
             if rf.startswith("root://") or rf.startswith("davs://"):
                 stageout.download_file(rf, dest, grid_write_cmd)
             else:
                 shutil.copy2(rf, dest)
-            print(f"    Copied: {dest}")
+            print(f"    Copied: {copy_name}")
             merged_files.append(dest)
 
     return merged_files

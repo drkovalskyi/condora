@@ -184,10 +184,16 @@ async def complete_round(repo, settings, workflow, dag):
     node_counts = dag.node_counts or {}
     proc_jobs = node_counts.get("processing", dag.nodes_done)
 
+    # ── Pilot throwaway check ──
+    pilot_throwaway = (
+        current_round == 0
+        and config.get("pilot_throwaway", settings.pilot_throwaway)
+    )
+
     # ── events_produced fix: read from disk if DB shows 0 ──
     completed_wus = dag.completed_work_units or []
     events_from_wus = 0
-    if is_gen and (workflow.events_produced or 0) == 0 and completed_wus:
+    if is_gen and not pilot_throwaway and (workflow.events_produced or 0) == 0 and completed_wus:
         events_from_wus = _count_events_from_disk(dag.submit_dir, completed_wus)
         if events_from_wus > 0:
             logger.info(
@@ -200,16 +206,27 @@ async def complete_round(repo, settings, workflow, dag):
 
     # ── Collect WU metrics from disk ──
     wu_metrics_list = []
+    seen_metrics_paths: set[str] = set()
     if dag.submit_dir and completed_wus:
         for wu_name in completed_wus:
             metrics_path = os.path.join(
                 dag.submit_dir, wu_name, "work_unit_metrics.json"
             )
-            # In spool mode, merge output files end up at the spool root
+            # In spool mode, merge output files may be at the spool root
+            # (old DAGs without transfer_output_remaps) or in mg_XXX/ subdirs
+            # (new DAGs with the remap fix).
             if not os.path.exists(metrics_path):
                 metrics_path = os.path.join(
                     dag.submit_dir, "work_unit_metrics.json"
                 )
+            # Deduplicate: don't read the same spool-root file 50 times.
+            # When all WUs fall back to the same file, we read it once and
+            # store it once — the adaptive optimizer sees 1 WU of data,
+            # not 50 identical copies.
+            real_path = os.path.realpath(metrics_path)
+            if real_path in seen_metrics_paths:
+                continue
+            seen_metrics_paths.add(real_path)
             if os.path.exists(metrics_path):
                 try:
                     wu_metrics_list.append(json.load(open(metrics_path)))
@@ -240,6 +257,13 @@ async def complete_round(repo, settings, workflow, dag):
     round_key = str(current_round)
     if round_key in new_metrics.get("rounds", {}):
         new_metrics["rounds"][round_key]["resource_params"] = resource_params
+        # Store effective events_per_job for this round — needed by
+        # _compute_jobs_per_wu_from_write_mb to scale pilot write_mb to
+        # production events_per_job.
+        node_counts_rc = dag.node_counts or {}
+        effective_epj = node_counts_rc.get("effective_events_per_job") or \
+            (params.get("events_per_job") or params.get("eventsPerJob") or 100_000)
+        new_metrics["rounds"][round_key]["effective_events_per_job"] = int(effective_epj)
 
     # ── Adaptive optimization ──
     adaptive_params = _compute_adaptive_params(
@@ -270,9 +294,14 @@ async def complete_round(repo, settings, workflow, dag):
         "current_round": new_round,
         "step_metrics": new_metrics,
     }
-    if is_gen:
-        events_per_job = (params.get("events_per_job")
-                          or params.get("eventsPerJob") or 100_000)
+    if pilot_throwaway:
+        # Don't advance offset or count events — pilot output is discarded
+        logger.info("Pilot throwaway: skipping event/file offset advance for round 0")
+    elif is_gen:
+        # Use effective_events_per_job from DAG (accounts for pilot_fraction scaling)
+        node_counts = dag.node_counts or {}
+        events_per_job = node_counts.get("effective_events_per_job") or \
+            (params.get("events_per_job") or params.get("eventsPerJob") or 100_000)
         new_offset = (workflow.next_first_event or 1) + proc_jobs * events_per_job
         update_kwargs["next_first_event"] = new_offset
     else:
@@ -289,6 +318,7 @@ async def complete_round(repo, settings, workflow, dag):
         "step_metrics": new_metrics,
         "adaptive_params": adaptive_params,
         "proc_jobs": proc_jobs,
+        "pilot_throwaway": pilot_throwaway,
     }
 
 
@@ -532,71 +562,81 @@ class RequestLifecycleManager:
                         self.settings.remote_schedd if use_spool else None
                     )
 
-                    dag_file = dag.dag_file_path
-                    local_copy_dir = None
-                    if use_spool:
-                        # Spool-mode DAG: submit_dir is on sshfs mount
-                        # (read-only). Copy only DAG infrastructure
-                        # files to local temp so from_dag() can write
-                        # .condor.sub, then re-spool. Skip large output
-                        # files (.root, .log, .out, .err, metrics).
-                        local_copy_dir = tempfile.mkdtemp(
-                            prefix="wms2_rescue_"
+                    # If spool dir was cleaned up (e.g. old DAG removed),
+                    # skip rescue and fall through to fresh replanning.
+                    if use_spool and dag.submit_dir and not os.path.isdir(dag.submit_dir):
+                        logger.warning(
+                            "Rescue spool dir missing (%s) — fresh replan",
+                            dag.submit_dir,
                         )
-                        await asyncio.to_thread(
-                            _copy_dag_infrastructure,
-                            dag.submit_dir, local_copy_dir,
-                        )
-                        dag_file = os.path.join(
-                            local_copy_dir,
-                            os.path.basename(dag.dag_file_path),
-                        )
-
-                    # Remove stale .condor.sub and .lock so from_dag()
-                    # can recreate them without Force. We must NOT use
-                    # Force because that passes -force to DAGMan which
-                    # causes it to ignore the rescue file.
-                    for stale in (dag_file + ".condor.sub",
-                                  dag_file + ".lock"):
-                        if os.path.exists(stale):
-                            os.remove(stale)
-
-                    try:
-                        cluster_id, schedd = await self.condor.submit_dag(
-                            dag_file, force=False,
-                            spool=use_spool, schedd_name=schedd_name,
-                        )
-                    finally:
-                        if local_copy_dir:
-                            shutil.rmtree(local_copy_dir, ignore_errors=True)
-
-                    # Map new spool Iwd to local mount for monitoring
-                    new_submit_dir = dag.submit_dir
-                    if use_spool:
-                        iwd = await self.condor.get_job_iwd(
-                            cluster_id, schedd
-                        )
-                        if iwd:
-                            new_submit_dir = iwd.replace(
-                                self.settings.remote_spool_prefix,
-                                self.settings.spool_mount, 1,
+                        await self.db.update_dag(dag.id, status=DAGStatus.FAILED.value)
+                        # Fall through to plan_production_dag below
+                    else:
+                        dag_file = dag.dag_file_path
+                        local_copy_dir = None
+                        if use_spool:
+                            # Spool-mode DAG: submit_dir is on sshfs mount
+                            # (read-only). Copy only DAG infrastructure
+                            # files to local temp so from_dag() can write
+                            # .condor.sub, then re-spool. Skip large output
+                            # files (.root, .log, .out, .err, metrics).
+                            local_copy_dir = tempfile.mkdtemp(
+                                prefix="wms2_rescue_"
+                            )
+                            await asyncio.to_thread(
+                                _copy_dag_infrastructure,
+                                dag.submit_dir, local_copy_dir,
+                            )
+                            dag_file = os.path.join(
+                                local_copy_dir,
+                                os.path.basename(dag.dag_file_path),
                             )
 
-                    await self.db.update_dag(
-                        dag.id,
-                        dagman_cluster_id=cluster_id,
-                        schedd_name=schedd,
-                        status=DAGStatus.SUBMITTED.value,
-                        submit_dir=new_submit_dir,
-                    )
-                    # Reset workflow status back to active (was set to
-                    # RESUBMITTING by error_handler._prepare_rescue)
-                    await self.db.update_workflow(
-                        workflow.id,
-                        status=WorkflowStatus.ACTIVE.value,
-                    )
-                    await self.transition(request, RequestStatus.ACTIVE)
-                    return
+                        # Remove stale .condor.sub and .lock so from_dag()
+                        # can recreate them without Force. We must NOT use
+                        # Force because that passes -force to DAGMan which
+                        # causes it to ignore the rescue file.
+                        for stale in (dag_file + ".condor.sub",
+                                      dag_file + ".lock"):
+                            if os.path.exists(stale):
+                                os.remove(stale)
+
+                        try:
+                            cluster_id, schedd = await self.condor.submit_dag(
+                                dag_file, force=False,
+                                spool=use_spool, schedd_name=schedd_name,
+                            )
+                        finally:
+                            if local_copy_dir:
+                                shutil.rmtree(local_copy_dir, ignore_errors=True)
+
+                        # Map new spool Iwd to local mount for monitoring
+                        new_submit_dir = dag.submit_dir
+                        if use_spool:
+                            iwd = await self.condor.get_job_iwd(
+                                cluster_id, schedd
+                            )
+                            if iwd:
+                                new_submit_dir = iwd.replace(
+                                    self.settings.remote_spool_prefix,
+                                    self.settings.spool_mount, 1,
+                                )
+
+                        await self.db.update_dag(
+                            dag.id,
+                            dagman_cluster_id=cluster_id,
+                            schedd_name=schedd,
+                            status=DAGStatus.SUBMITTED.value,
+                            submit_dir=new_submit_dir,
+                        )
+                        # Reset workflow status back to active (was set to
+                        # RESUBMITTING by error_handler._prepare_rescue)
+                        await self.db.update_workflow(
+                            workflow.id,
+                            status=WorkflowStatus.ACTIVE.value,
+                        )
+                        await self.transition(request, RequestStatus.ACTIVE)
+                        return
 
         current_round = getattr(workflow, "current_round", 0) or 0
         is_adaptive = getattr(request, "adaptive", False)
@@ -711,13 +751,19 @@ class RequestLifecycleManager:
                     )
 
             # Accumulate production counters from completed work units
+            # (skip if pilot_throwaway — events don't count toward target)
             if result.newly_completed_work_units:
-                total_new_events = sum(
-                    wu.get("output_events", 0) for wu in result.newly_completed_work_units
+                wf = await self.db.get_workflow_by_request(request.request_name)
+                wf_config = (wf.config_data or {}) if wf else {}
+                is_pilot_throwaway = (
+                    (getattr(wf, "current_round", 0) or 0) == 0
+                    and wf_config.get("pilot_throwaway", self.settings.pilot_throwaway)
                 )
-                if total_new_events > 0:
-                    wf = await self.db.get_workflow_by_request(request.request_name)
-                    if wf:
+                if not is_pilot_throwaway:
+                    total_new_events = sum(
+                        wu.get("output_events", 0) for wu in result.newly_completed_work_units
+                    )
+                    if total_new_events > 0 and wf:
                         await self.db.update_workflow(
                             wf.id,
                             events_produced=(wf.events_produced or 0) + total_new_events,
@@ -780,6 +826,10 @@ class RequestLifecycleManager:
                 # No error_handler or completion.action == "hold"
                 await self.transition(request, RequestStatus.HELD)
                 return
+            # Tail WU escalation: when most WUs are done, bump remaining
+            # jobs' priority so the last few WUs don't block round completion.
+            await self._maybe_escalate_tail_priority(dag, workflow, result)
+
             # RUNNING — no transition, will poll again next cycle
             return
 
@@ -1089,6 +1139,67 @@ class RequestLifecycleManager:
         result["bad_input_files"] = sorted(bad_files)
         return result
 
+    # ── Tail WU Priority Escalation ──────────────────────────
+
+    async def _maybe_escalate_tail_priority(self, dag, workflow, poll_result):
+        """Bump remaining job priorities when most WUs are done.
+
+        When ≥90% (configurable) of work units have completed, the last few
+        WUs become the bottleneck for round completion. Escalating their
+        priority via condor_qedit helps them schedule faster.
+        """
+        threshold = self.settings.tail_escalation_threshold
+        total_wus = dag.total_work_units or 0
+        if total_wus < 2:
+            return  # nothing to escalate with 0-1 WUs
+
+        # Re-fetch DAG to get updated node_counts from poll_dag()
+        dag = await self.db.get_dag(dag.id)
+        if not dag:
+            return
+        nc = dag.node_counts or {}
+        wus_done = nc.get("wus_done", 0)
+
+        if wus_done < total_wus * threshold:
+            return  # not at tail yet
+
+        # Check if already escalated (stored in node_counts to avoid repeated edits)
+        if nc.get("_tail_escalated"):
+            return
+
+        # Escalate: bump priority of all remaining jobs under this DAGMan
+        boost = self.settings.tail_escalation_priority
+        if not dag.dagman_cluster_id:
+            return
+
+        try:
+            # Edit all non-completed payload jobs under this DAG hierarchy.
+            # We bump their HTCondor priority by the configured boost.
+            constraint = (
+                f"DAGManJobId == {dag.dagman_cluster_id} "
+                f"&& JobUniverse =!= 7 "
+                f"&& JobStatus =!= 4"  # not completed
+            )
+            await self.condor.edit_job_attr(
+                constraint, "Priority",
+                str(boost),
+                schedd_name=dag.schedd_name,
+            )
+            logger.info(
+                "Tail escalation: bumped priority to %d for remaining jobs "
+                "in DAG %s (%d/%d WUs done) [%s]",
+                boost, dag.dagman_cluster_id, wus_done, total_wus,
+                workflow.request_name,
+            )
+            # Mark escalation so we don't repeat
+            nc["_tail_escalated"] = True
+            await self.db.update_dag(dag.id, node_counts=nc)
+        except Exception:
+            logger.warning(
+                "Tail escalation failed for DAG %s",
+                dag.dagman_cluster_id, exc_info=True,
+            )
+
     # ── Adaptive Round Completion ──────────────────────────────
 
     async def _handle_round_completion(self, request, workflow, dag):
@@ -1102,6 +1213,10 @@ class RequestLifecycleManager:
         # Shared logic: metrics, adaptive, offset advancement
         result = await complete_round(self.db, self.settings, workflow, dag)
         new_round = result["new_round"]
+
+        # Pilot throwaway: clean up output files (best-effort)
+        if result.get("pilot_throwaway"):
+            await self._cleanup_pilot_output(workflow, dag)
 
         # Re-fetch workflow to get latest production counters
         workflow = await self.db.get_workflow_by_request(request.request_name)
@@ -1179,6 +1294,65 @@ class RequestLifecycleManager:
 
         # Return to admission queue for next round
         await self.transition(request, RequestStatus.QUEUED)
+
+    # ── Pilot Output Cleanup ─────────────────────────────────────
+
+    async def _cleanup_pilot_output(self, workflow, dag):
+        """Delete merged output files from a throwaway pilot round (best-effort).
+
+        Reads merge_output.json from each completed WU to find merged file paths,
+        then deletes them via os.remove (local) or gfal-rm (grid).
+        """
+        config = workflow.config_data or {}
+        stageout_mode = config.get("stageout_mode", self.settings.stageout_mode)
+        completed_wus = dag.completed_work_units or []
+        if not completed_wus:
+            return
+
+        deleted = 0
+        for wu_name in completed_wus:
+            # Find merge_output.json
+            merge_path = os.path.join(dag.submit_dir, wu_name, "merge_output.json")
+            if not os.path.exists(merge_path):
+                merge_path = os.path.join(dag.submit_dir, "merge_output.json")
+            if not os.path.exists(merge_path):
+                continue
+
+            try:
+                with open(merge_path) as f:
+                    merge_output = json.load(f)
+            except Exception:
+                logger.debug("Could not read merge_output: %s", merge_path)
+                continue
+
+            # merge_output has "merged_files": [{"pfn": "...", "lfn": "..."}]
+            for mf in merge_output.get("merged_files", []):
+                pfn = mf.get("pfn", "")
+                lfn = mf.get("lfn", "")
+                try:
+                    if stageout_mode == "local":
+                        local_path = pfn or os.path.join(
+                            self.settings.local_pfn_prefix, lfn.lstrip("/")
+                        )
+                        if os.path.exists(local_path):
+                            os.remove(local_path)
+                            deleted += 1
+                    else:
+                        # Grid: use gfal-rm
+                        if pfn:
+                            proc = await asyncio.subprocess.create_subprocess_exec(
+                                "gfal-rm", pfn,
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
+                            await proc.wait()
+                            deleted += 1
+                except Exception:
+                    logger.debug("Pilot cleanup failed for %s", pfn or lfn, exc_info=True)
+
+        if deleted:
+            logger.info("Pilot throwaway: deleted %d merged output files for %s",
+                        deleted, workflow.request_name)
 
     # ── Clean Stop ──────────────────────────────────────────────
 
