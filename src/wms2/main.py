@@ -19,6 +19,7 @@ from wms2.adapters.mock import (
 from wms2.api.router import api_router
 from wms2.config import Settings
 from wms2.core.lifecycle_manager import RequestLifecycleManager
+from wms2.core.monitoring_collector import MonitoringCache, run_monitoring_collector
 from wms2.core.site_manager import SiteManager
 from wms2.db.engine import create_engine, create_session_factory
 from wms2.db.repository import Repository
@@ -131,6 +132,10 @@ async def lifespan(app: FastAPI):
     app.state.dbs = dbs
     app.state.rucio = rucio
 
+    # Monitoring cache (in-memory, read by API endpoints)
+    monitoring_cache = MonitoringCache()
+    app.state.monitoring_cache = monitoring_cache
+
     # Task health tracking
     now = time.time()
     app.state.task_health = {
@@ -139,6 +144,10 @@ async def lifespan(app: FastAPI):
             "cycle_count": 0, "last_error": None, "restarts": 0,
         },
         "cric_sync": {
+            "started_at": now, "last_cycle_at": None,
+            "cycle_count": 0, "last_error": None, "restarts": 0,
+        },
+        "monitoring_collector": {
             "started_at": now, "last_cycle_at": None,
             "cycle_count": 0, "last_error": None, "restarts": 0,
         },
@@ -211,12 +220,33 @@ async def lifespan(app: FastAPI):
         _make_task_watchdog(app, "lifecycle", run_lifecycle))
     app.state.lifecycle_task = lifecycle_task
 
+    # Monitoring collector background task
+    def on_monitoring_cycle(exc):
+        health = app.state.task_health["monitoring_collector"]
+        health["last_cycle_at"] = time.time()
+        health["cycle_count"] += 1
+        if exc:
+            health["last_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            health["last_error"] = None
+
+    async def run_monitoring():
+        await run_monitoring_collector(
+            session_factory, condor, settings, monitoring_cache,
+            on_cycle=on_monitoring_cycle,
+        )
+
+    monitoring_task = asyncio.create_task(run_monitoring())
+    monitoring_task.add_done_callback(
+        _make_task_watchdog(app, "monitoring_collector", run_monitoring))
+    app.state.monitoring_collector_task = monitoring_task
+
     logger.info("WMS2 v%s started", __version__)
 
     yield
 
     # Shutdown — cancel current tasks (may differ from originals if watchdog restarted them)
-    for task_attr in ("cric_sync_task", "lifecycle_task"):
+    for task_attr in ("cric_sync_task", "lifecycle_task", "monitoring_collector_task"):
         task = getattr(app.state, task_attr, None)
         if task and not task.done():
             task.cancel()

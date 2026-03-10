@@ -37,7 +37,7 @@ async def health(raw_request: FastAPIRequest):
         degraded = True
 
     # Background task liveness
-    for task_name in ("lifecycle", "cric_sync"):
+    for task_name in ("lifecycle", "cric_sync", "monitoring_collector"):
         task = getattr(raw_request.app.state, f"{task_name}_task", None)
         if task is not None and not task.done():
             checks[task_name] = "running"
@@ -74,76 +74,22 @@ async def htcondor_overview(
     raw_request: FastAPIRequest,
     repo: Repository = Depends(get_repository),
 ):
-    """Live HTCondor job counts grouped by request and site.
+    """HTCondor job counts grouped by request and site.
 
-    For each active request with a running DAG, queries HTCondor for
-    payload job status and MATCH_GLIDEIN_CMSSite, then aggregates
-    running/idle/held counts per site.
+    Serves pre-collected data from the background monitoring collector.
+    Falls back to a live query if the cache is empty (first cycle not
+    yet completed after startup).
     """
+    cache = getattr(raw_request.app.state, "monitoring_cache", None)
+    if cache:
+        data, age = cache.get_overview()
+        if data is not None:
+            return {**data, "_data_age_seconds": round(age, 1)}
+
+    # Fallback: live query (only during startup before first collection)
+    from wms2.core.monitoring_collector import collect_htcondor_overview
+
+    session_factory = raw_request.app.state.session_factory
     condor = getattr(raw_request.app.state, "condor", None)
-
-    # Find all non-terminal requests that have an active workflow + DAG
-    requests = await repo.get_non_terminal_requests()
-    request_entries = []
-    grand_totals = {"running": 0, "idle": 0, "held": 0}
-    grand_by_site: dict[str, dict[str, int]] = {}
-
-    async def _query_one(req_row):
-        """Query HTCondor for one request's active DAG."""
-        wf = await repo.get_workflow_by_request(req_row.request_name)
-        if not wf or not wf.dag_id:
-            return None
-        dag = await repo.get_dag(wf.dag_id)
-        if not dag or not dag.dagman_cluster_id:
-            return None
-        if dag.status not in ("submitted", "running"):
-            return None
-
-        sites: dict[str, dict[str, int]] = {}
-        if condor:
-            try:
-                sites = await condor.query_dag_site_summary(
-                    dag.dagman_cluster_id, schedd_name=dag.schedd_name,
-                )
-            except Exception:
-                log.debug("HTCondor site query failed for DAG %s", dag.id)
-
-        totals = {"running": 0, "idle": 0, "held": 0}
-        for counts in sites.values():
-            for k in totals:
-                totals[k] += counts.get(k, 0)
-
-        return {
-            "request_name": req_row.request_name,
-            "request_status": req_row.status,
-            "round": wf.current_round,
-            "dag_status": dag.status,
-            "dagman_cluster_id": dag.dagman_cluster_id,
-            "schedd_name": dag.schedd_name,
-            "sites": sites,
-            "totals": totals,
-        }
-
-    # Query all active DAGs concurrently
-    tasks = [_query_one(r) for r in requests]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for res in results:
-        if res is None or isinstance(res, Exception):
-            continue
-        request_entries.append(res)
-        for k in grand_totals:
-            grand_totals[k] += res["totals"][k]
-        for site, counts in res["sites"].items():
-            if site not in grand_by_site:
-                grand_by_site[site] = {"running": 0, "idle": 0, "held": 0}
-            for k in counts:
-                grand_by_site[site][k] += counts[k]
-
-    return {
-        "requests": request_entries,
-        "totals": {
-            **grand_totals,
-            "by_site": grand_by_site,
-        },
-    }
+    data = await collect_htcondor_overview(session_factory, condor)
+    return {**data, "_data_age_seconds": 0}
