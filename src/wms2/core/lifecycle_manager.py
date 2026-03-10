@@ -1244,22 +1244,6 @@ class RequestLifecycleManager:
                 await self.transition(request, RequestStatus.COMPLETED)
                 return
 
-            # Safety net: if generated-event ranges are exhausted but target
-            # not met, complete with warning (avoid infinite loops)
-            total_gen_events = config.get("request_num_events", 0)
-            filter_eff = float(config.get("filter_efficiency", 1.0))
-            if filter_eff > 0 and filter_eff < 1.0 and total_gen_events > 0:
-                total_gen_events = int(total_gen_events / filter_eff)
-            new_offset = workflow.next_first_event or 1
-            remaining_gen = total_gen_events - new_offset + 1
-            if remaining_gen <= 0:
-                logger.warning(
-                    "Request %s: generated-event ranges exhausted "
-                    "(produced %d / target %d). Completing.",
-                    request.request_name, produced, target,
-                )
-                await self.transition(request, RequestStatus.COMPLETED)
-                return
         else:
             total_files = workflow.total_input_files or 0
             processed = workflow.files_processed or 0
