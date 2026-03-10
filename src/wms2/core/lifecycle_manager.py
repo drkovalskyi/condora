@@ -652,6 +652,11 @@ class RequestLifecycleManager:
                 workflow, adaptive=is_adaptive,
             )
         if dag is None:
+            # All work done — update workflow status before completing request
+            if workflow:
+                await self.db.update_workflow(
+                    workflow.id, status=WorkflowStatus.COMPLETED.value,
+                )
             await self.transition(request, RequestStatus.COMPLETED)
         else:
             await self.transition(request, RequestStatus.ACTIVE)

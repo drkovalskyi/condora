@@ -804,22 +804,41 @@ class DAGPlanner:
             logger.warning("GEN workflow %s has no RequestNumEvents, using 1 node", workflow.id)
             total_events = events_per_job
 
-        # Adaptive offset: skip events already processed in prior rounds
-        start_event = getattr(workflow, "next_first_event", 1) or 1
-        remaining_events = total_events - start_event + 1
-        if remaining_events <= 0:
+        # Determine how many more jobs are needed based on actual output,
+        # NOT on next_first_event (which is an accumulator that can drift
+        # when rounds fail or parameters change mid-stream).
+        #
+        # next_first_event is used only for seed assignment below.
+        target_output = int(config.get("request_num_events") or 0)
+        if 0 < test_fraction < 1.0 and target_output > 0:
+            target_output = max(1, int(target_output * test_fraction))
+        produced = getattr(workflow, "events_produced", 0) or 0
+        remaining_output = target_output - produced
+        if remaining_output <= 0:
             return []
-
+        # Convert remaining output events to generated events
+        remaining_events = int(remaining_output / filter_eff) if filter_eff < 1.0 else remaining_output
         num_jobs = math.ceil(remaining_events / events_per_job)
 
         # Adaptive cap: limit batch size per round
         if max_jobs > 0:
             num_jobs = min(num_jobs, max_jobs)
 
+        # Seed offset: next_first_event ensures no two jobs ever share
+        # the same event range (even across failed/retried rounds).
+        start_event = getattr(workflow, "next_first_event", 1) or 1
+
+        logger.info(
+            "GEN workflow %s: %d nodes, %d events/job, start_event=%d, "
+            "produced=%d/%d output events",
+            workflow.id, num_jobs, events_per_job, start_event,
+            produced, target_output,
+        )
+
         nodes: list[DAGNodeSpec] = []
         for i in range(num_jobs):
             first_event = start_event + i * events_per_job
-            last_event = min(start_event + (i + 1) * events_per_job - 1, total_events)
+            last_event = first_event + events_per_job - 1
             actual_events = last_event - first_event + 1
 
             # Create a synthetic InputFile so the rest of the pipeline works
@@ -839,10 +858,6 @@ class DAGPlanner:
                 )
             )
 
-        logger.info(
-            "GEN workflow %s: %d nodes, %d events/job, start_event=%d, total=%d",
-            workflow.id, num_jobs, events_per_job, start_event, total_events,
-        )
         return nodes
 
 
