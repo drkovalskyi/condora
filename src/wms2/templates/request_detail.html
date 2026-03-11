@@ -11,35 +11,29 @@
 
     <template x-if="request">
         <div>
-            <!-- Header -->
-            <h1 style="font-size:1.3rem; word-break:break-all;">
-                <span x-text="request.request_name"></span>
-                <span x-html="statusBadge(request.status)" style="margin-left:0.5rem;"></span>
-            </h1>
-
-            <!-- Action buttons -->
-            <template x-if="hasActions">
-                <div class="action-buttons">
-                    <template x-if="canStop">
-                        <button class="outline" @click="showStopDialog = true" :disabled="actionLoading">Stop</button>
-                    </template>
-                    <template x-if="canRelease">
-                        <button class="outline" @click="doRelease()" :disabled="actionLoading"
-                                x-text="request.status === 'paused' ? 'Resume' : 'Release'"></button>
-                    </template>
-                    <template x-if="canFail">
-                        <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444;"
-                                @click="showFailDialog = true" :disabled="actionLoading">Fail</button>
-                    </template>
-                    <template x-if="canRestart">
-                        <button class="outline" @click="showRestartDialog = true" :disabled="actionLoading">Restart</button>
-                    </template>
-                    <template x-if="canDelete">
-                        <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444;"
-                                @click="showDeleteDialog = true" :disabled="actionLoading">Delete</button>
-                    </template>
-                </div>
-            </template>
+            <!-- Header + actions on one line -->
+            <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                <h1 style="font-size:1.3rem; word-break:break-all; margin:0;">
+                    <span x-text="request.request_name"></span>
+                    <span x-html="statusBadge(request.status)" style="margin-left:0.5rem;"></span>
+                </h1>
+                <template x-if="canStop">
+                    <button class="outline" @click="showStopDialog = true" :disabled="actionLoading"
+                            style="font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;">Stop</button>
+                </template>
+                <template x-if="canFail">
+                    <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showFailDialog = true" :disabled="actionLoading">Fail</button>
+                </template>
+                <template x-if="canClone">
+                    <button class="outline" style="--pico-color: #f59e0b; --pico-border-color: #f59e0b; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showCloneDialog = true" :disabled="actionLoading">Clone</button>
+                </template>
+                <template x-if="canDelete">
+                    <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showDeleteDialog = true" :disabled="actionLoading">Delete</button>
+                </template>
+            </div>
 
             <!-- Stop dialog -->
             <dialog x-ref="stopDialog" :open="showStopDialog || undefined">
@@ -61,7 +55,7 @@
             <!-- Fail dialog -->
             <dialog x-ref="failDialog" :open="showFailDialog || undefined">
                 <h3>Fail Request</h3>
-                <p>This will kill the running DAG and mark the request as failed. This cannot be undone.</p>
+                <p>This will stop the running DAG and mark the request as failed.</p>
                 <div class="dialog-actions">
                     <button class="outline" @click="showFailDialog = false" :disabled="actionLoading">Cancel</button>
                     <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
@@ -75,8 +69,7 @@
             <!-- Delete dialog -->
             <dialog x-ref="deleteDialog" :open="showDeleteDialog || undefined">
                 <h3>Delete Request</h3>
-                <p>This will permanently delete the request and all related data (workflow, DAGs, processing blocks, history).
-                   You can re-import it afterwards.</p>
+                <p>Permanently delete this request and all related data (workflow, DAGs, blocks, history).</p>
                 <div class="dialog-actions">
                     <button class="outline" @click="showDeleteDialog = false" :disabled="actionLoading">Cancel</button>
                     <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
@@ -87,16 +80,23 @@
                 </div>
             </dialog>
 
-            <!-- Restart dialog -->
-            <dialog x-ref="restartDialog" :open="showRestartDialog || undefined">
-                <h3>Restart Request</h3>
-                <p>This will fail the current request and create a new one with an incremented version.
-                   You will be redirected to the new request.</p>
+            <!-- Clone dialog -->
+            <dialog x-ref="cloneDialog" :open="showCloneDialog || undefined">
+                <h3>Clone Request</h3>
+                <p>This will stop the DAG, fail the request, and re-import from ReqMgr2 with an
+                   incremented processing version. The old request is kept as
+                   <code x-text="request.request_name + '_Failed_v' + (processingVersion || '?')"></code>
+                   for reference.</p>
+                <template x-if="processingVersion != null">
+                    <p>Version: <strong x-text="'v' + processingVersion"></strong>
+                       → <strong x-text="'v' + (processingVersion + 1)"></strong></p>
+                </template>
                 <div class="dialog-actions">
-                    <button class="outline" @click="showRestartDialog = false" :disabled="actionLoading">Cancel</button>
-                    <button @click="doRestart()" :disabled="actionLoading">
-                        <span x-show="!actionLoading">Confirm Restart</span>
-                        <span x-show="actionLoading">Restarting...</span>
+                    <button class="outline" @click="showCloneDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #f59e0b; --pico-border-color: #f59e0b;"
+                            @click="doClone()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Clone</span>
+                        <span x-show="actionLoading">Cloning...</span>
                     </button>
                 </div>
             </dialog>
@@ -297,6 +297,41 @@
                                     <td x-text="m.avg_peak_rss != null ? fmtNum(Math.round(m.avg_peak_rss)) : '—'"></td>
                                     <td x-text="m.avg_time_per_event != null ? Number(m.avg_time_per_event).toFixed(2) : '—'"></td>
                                     <td x-text="m.avg_throughput != null ? Number(m.avg_throughput).toFixed(1) : '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Site performance -->
+            <template x-if="hasSitePerformance">
+                <div class="section">
+                    <h3>Site Performance</h3>
+                    <p style="font-size:0.85rem; opacity:0.7;">
+                        <span x-text="sitePerformance.total_wus"></span> work units across
+                        <span x-text="sitePerformance.sites.length"></span> sites (excluding round 0)
+                    </p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Site</th>
+                                <th style="text-align:right">Done</th>
+                                <th style="text-align:right">Running</th>
+                                <th style="text-align:right">Avg Proc</th>
+                                <th style="text-align:right">Avg Merge</th>
+                                <th style="text-align:right">Avg Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in sitePerformance.sites" :key="s.site">
+                                <tr>
+                                    <td x-text="s.site"></td>
+                                    <td style="text-align:right" x-text="s.wus_done"></td>
+                                    <td style="text-align:right" x-text="s.wus_running || ''"></td>
+                                    <td style="text-align:right" x-text="s.avg_proc_min != null ? s.avg_proc_min + ' min' : '—'"></td>
+                                    <td style="text-align:right" x-text="s.avg_merge_min != null ? s.avg_merge_min + ' min' : '—'"></td>
+                                    <td style="text-align:right; font-weight:600" x-text="s.avg_total_min != null ? s.avg_total_min + ' min' : '—'"></td>
                                 </tr>
                             </template>
                         </tbody>

@@ -12,6 +12,8 @@ document.addEventListener('alpine:init', () => {
         maxFiles: '',
         processingVersion: '',
         workUnitsPerRound: '',
+        pilotFraction: '',
+        pilotThrowaway: false,
         stageoutMode: 'test',
         allowedSites: '',
         highPriority: 5,
@@ -35,7 +37,8 @@ document.addEventListener('alpine:init', () => {
             { msg: 'Creating sandbox (fetching PSets from ConfigCache)...', delay: 3000 },
             { msg: 'Resolving input data and pileup...', delay: 15000 },
             { msg: 'Planning DAG and submitting to HTCondor...', delay: 30000 },
-            { msg: 'Still working — ConfigCache or Rucio may be slow...', delay: 60000 },
+            { msg: 'Pileup resolution may take several minutes for large datasets...', delay: 60000 },
+            { msg: 'Still querying Rucio for pileup files — retrying if needed...', delay: 300000 },
         ],
 
         get isValid() {
@@ -58,7 +61,10 @@ document.addEventListener('alpine:init', () => {
         get estimatedRounds() {
             const totalWUs = this.estimatedTotalWUs;
             if (totalWUs === null) return null;
-            const firstRoundWUs = this.preview.defaults.first_round_work_units;
+            const pf = this.pilotFraction !== '' ? parseFloat(this.pilotFraction) : 0.01;
+            const firstRoundWUs = pf === 0
+                ? (parseInt(this.workUnitsPerRound) || this.preview.defaults.work_units_per_round)
+                : this.preview.defaults.first_round_work_units;
             const wupr = parseInt(this.workUnitsPerRound) || this.preview.defaults.work_units_per_round;
             const remaining = totalWUs - firstRoundWUs;
             if (remaining <= 0) return 1;
@@ -120,6 +126,8 @@ document.addEventListener('alpine:init', () => {
             if (this.maxFiles) body.max_files = parseInt(this.maxFiles);
             if (this.processingVersion) body.processing_version = parseInt(this.processingVersion);
             if (this.workUnitsPerRound) body.work_units_per_round = parseInt(this.workUnitsPerRound);
+            if (this.pilotFraction !== '') body.pilot_fraction = parseFloat(this.pilotFraction);
+            if (this.pilotThrowaway) body.pilot_throwaway = true;
             body.stageout_mode = this.stageoutMode;
             body.condor_pool = this.stageoutMode === 'local' ? 'local' : 'global';
             if (this.stageoutMode !== 'local' && this.allowedSites.trim()) {

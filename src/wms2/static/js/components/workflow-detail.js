@@ -5,12 +5,19 @@ document.addEventListener('alpine:init', () => {
     Alpine.data('workflowDetail', (workflowId) => ({
         workflowId: workflowId,
         workflow: null,
+        request: null,
         dag: null,
         allDags: [],
         outputDatasets: [],
         loading: true,
         error: null,
         selectedMetricsRound: 'all',  // 'all' or round number string
+
+        // Action state
+        actionLoading: false,
+        showStopDialog: false,
+        showFailDialog: false,
+        stopReason: 'Operator-initiated clean stop',
 
         init() {
             this.fetchAll();
@@ -22,6 +29,7 @@ document.addEventListener('alpine:init', () => {
                 this.loading = true;
                 this.error = null;
                 this.workflow = await WMS2_API.getWorkflow(this.workflowId);
+                this.request = await WMS2_API.getRequest(this.workflow.request_name).catch(() => null);
 
                 const [dags, ods] = await Promise.all([
                     WMS2_API.getWorkflowDags(this.workflowId).catch(() => []),
@@ -57,8 +65,9 @@ document.addEventListener('alpine:init', () => {
         /** Step metrics filtered by selected round. */
         get stepMetrics() {
             if (!this.workflow || !this.workflow.step_metrics) return [];
+            const nameFn = (idx) => this.stepName(idx);
             if (this.selectedMetricsRound === 'all') {
-                return parseStepMetrics(this.workflow.step_metrics);
+                return parseStepMetrics(this.workflow.step_metrics, nameFn);
             }
             // Parse single round
             const sm = this.workflow.step_metrics;
@@ -66,7 +75,7 @@ document.addEventListener('alpine:init', () => {
             const roundData = rounds[this.selectedMetricsRound];
             if (!roundData) return [];
             const fake = { rounds: { [this.selectedMetricsRound]: roundData } };
-            return parseStepMetrics(fake);
+            return parseStepMetrics(fake, nameFn);
         },
 
         get splittingDisplay() {
@@ -122,6 +131,14 @@ document.addEventListener('alpine:init', () => {
                 global_tag: s.global_tag || '—',
                 scram_arch: s.scram_arch || '—',
             }));
+        },
+
+        /** Map step index (string "0","1",...) to step name from manifest. */
+        stepName(idx) {
+            const steps = this.configData.manifest_steps || [];
+            const i = Number(idx);
+            if (i >= 0 && i < steps.length && steps[i].name) return steps[i].name;
+            return 'Step ' + idx;
         },
 
         /**
@@ -188,12 +205,15 @@ document.addEventListener('alpine:init', () => {
                 } else {
                     // Walk backwards to find the adaptive_params that determined
                     // this round's resources (from the previous round that has them).
-                    // Do NOT fall back to sm.adaptive_params — that's the latest
-                    // global value, not what was used for this specific round.
                     let ap = null;
                     for (let prev = roundNum - 1; prev >= 0; prev--) {
                         const prevRd = rounds[String(prev)];
                         if (prevRd?.adaptive_params) { ap = prevRd.adaptive_params; break; }
+                    }
+                    // Fall back to top-level adaptive_params (latest optimization
+                    // result, applies to the next round after the last completed).
+                    if (!ap && sm.adaptive_params) {
+                        ap = sm.adaptive_params;
                     }
                     if (ap) {
                         memUsed = ap.tuned_memory_mb || origMem;
@@ -205,7 +225,7 @@ document.addEventListener('alpine:init', () => {
                 }
 
                 // Compute average CPU efficiency and peak memory from wu_metrics
-                let cpuEff = null, peakMem = null;
+                let cpuEff = null, peakMem = null, cgroupMem = null;
                 const wuMetrics = rd?.wu_metrics || [];
                 if (wuMetrics.length > 0) {
                     let cpuSum = 0, cpuWeight = 0, maxMem = 0;
@@ -226,8 +246,24 @@ document.addEventListener('alpine:init', () => {
                     if (maxMem > 0) peakMem = Math.round(maxMem);
                 }
 
-                // Cgroup measured memory from adaptive_params
-                const cgroupMem = rd?.adaptive_params?.measured_memory_mb || null;
+                // Try per-round adaptive_params first, then top-level for the
+                // most recently completed round
+                let roundAp = rd?.adaptive_params;
+                if (!roundAp && sm.adaptive_params && roundNum === (sm.rounds_completed || 0) - 1) {
+                    roundAp = sm.adaptive_params;
+                }
+                const mSummary = roundAp?.metrics_summary;
+
+                // Fall back to metrics_summary for CPU/memory when wu_metrics absent
+                if (cpuEff == null && mSummary?.weighted_cpu_eff != null) {
+                    cpuEff = mSummary.weighted_cpu_eff;
+                }
+                if (peakMem == null && mSummary?.peak_rss_mb != null) {
+                    peakMem = Math.round(mSummary.peak_rss_mb);
+                }
+
+                // Cgroup peak memory — diagnostic
+                cgroupMem = mSummary?.cgroup_peak_mb || null;
 
                 const nodesDone = rd?.nodes_done || latestDag?.nodes_done || 0;
                 const nodesFailed = rd?.nodes_failed || latestDag?.nodes_failed || 0;
@@ -237,6 +273,8 @@ document.addEventListener('alpine:init', () => {
                     round: roundNum,
                     status: latestDag?.status || null,
                     work_units: rd?.work_units || latestDag?.total_work_units || 0,
+                    wus_done: latestDag?.wus_done ?? (latestDag?.status === 'completed' ? (rd?.work_units || latestDag?.total_work_units || 0) : 0),
+                    wus_failed: latestDag?.wus_failed ?? 0,
                     nodes_total: nodesTotal,
                     nodes_done: nodesDone,
                     nodes_failed: nodesFailed,
@@ -277,6 +315,52 @@ document.addEventListener('alpine:init', () => {
         get reqmgrUrl() {
             if (!this.workflow) return null;
             return 'https://cmsweb.cern.ch/reqmgr2/fetch?rid=' + encodeURIComponent(this.workflow.request_name);
+        },
+
+        // Action visibility — based on request status
+        get canStop() {
+            return this.request && ['active', 'pilot_running'].includes(this.request.status);
+        },
+        get canFail() {
+            return this.request && ['held', 'partial', 'paused', 'active', 'pilot_running', 'stopping'].includes(this.request.status);
+        },
+        get hasActions() {
+            return this.canStop || this.canFail;
+        },
+
+        toast(type, message) {
+            window.dispatchEvent(new CustomEvent('wms2:toast', {
+                detail: { type, message }
+            }));
+        },
+
+        async doStop() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.stopRequest(this.workflow.request_name, this.stopReason);
+                this.toast('success', result.message);
+                this.showStopDialog = false;
+                this.stopReason = 'Operator-initiated clean stop';
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Stop failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
+        async doFail() {
+            this.actionLoading = true;
+            try {
+                const result = await WMS2_API.failRequest(this.workflow.request_name);
+                this.toast('success', result.message);
+                this.showFailDialog = false;
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Fail failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
         },
     }));
 });

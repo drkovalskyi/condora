@@ -1,6 +1,6 @@
 /**
  * Alpine requestDetail — fetches and exposes request + workflow + DAG data.
- * Includes action methods (stop, release, fail, restart) with toast feedback.
+ * Includes action methods (stop, fail, clone) with toast feedback.
  */
 document.addEventListener('alpine:init', () => {
     Alpine.data('requestDetail', (requestName) => ({
@@ -17,7 +17,7 @@ document.addEventListener('alpine:init', () => {
         actionLoading: false,
         showStopDialog: false,
         showFailDialog: false,
-        showRestartDialog: false,
+        showCloneDialog: false,
         showDeleteDialog: false,
         stopReason: 'Operator-initiated clean stop',
 
@@ -94,23 +94,24 @@ document.addEventListener('alpine:init', () => {
         },
 
         // Action visibility helpers
+        // STOP: only when there's a running DAG to stop
         get canStop() {
             return this.request && ['active', 'pilot_running'].includes(this.request.status);
         },
-        get canRelease() {
-            return this.request && ['held', 'paused'].includes(this.request.status);
-        },
+        // FAIL: any non-terminal state (implies STOP)
         get canFail() {
-            return this.request && ['held', 'partial', 'paused'].includes(this.request.status);
+            return this.request && ['active', 'pilot_running', 'stopping', 'held', 'partial', 'paused'].includes(this.request.status);
         },
-        get canRestart() {
-            return this.request && ['held', 'partial', 'paused', 'aborted', 'failed'].includes(this.request.status);
+        // CLONE: any non-completed state (implies STOP + FAIL)
+        get canClone() {
+            return this.request && !['completed'].includes(this.request.status);
         },
+        // DELETE: only terminal failed/aborted
         get canDelete() {
             return this.request && ['failed', 'aborted'].includes(this.request.status);
         },
         get hasActions() {
-            return this.canStop || this.canRelease || this.canFail || this.canRestart || this.canDelete;
+            return this.canStop || this.canFail || this.canClone || this.canDelete;
         },
 
         get testFraction() {
@@ -120,8 +121,11 @@ document.addEventListener('alpine:init', () => {
         },
 
         get processingVersion() {
+            // Try workflow config_data first, fall back to request_data
             const cd = (this.workflow && this.workflow.config_data) || {};
-            return cd.processing_version || null;
+            if (cd.processing_version) return cd.processing_version;
+            const rd = (this.request && this.request.request_data) || {};
+            return rd.ProcessingVersion || rd.processing_version || null;
         },
 
         get workUnitsPerRound() {
@@ -202,19 +206,6 @@ document.addEventListener('alpine:init', () => {
             }
         },
 
-        async doRelease() {
-            this.actionLoading = true;
-            try {
-                const result = await WMS2_API.releaseRequest(this.name);
-                this.toast('success', result.message);
-                await this.fetchAll();
-            } catch (e) {
-                this.toast('error', 'Release failed: ' + e.message);
-            } finally {
-                this.actionLoading = false;
-            }
-        },
-
         async doFail() {
             this.actionLoading = true;
             try {
@@ -229,20 +220,15 @@ document.addEventListener('alpine:init', () => {
             }
         },
 
-        async doRestart() {
+        async doClone() {
             this.actionLoading = true;
             try {
-                const result = await WMS2_API.restartRequest(this.name);
-                this.toast('success', result.message);
-                this.showRestartDialog = false;
-                // Redirect to the new request
-                if (result.new_request_name) {
-                    window.location.href = '/ui/requests/' + encodeURIComponent(result.new_request_name);
-                } else {
-                    await this.fetchAll();
-                }
+                const result = await WMS2_API.cloneRequest(this.name);
+                this.toast('success', 'Cloned: v' + result.cloned_from_version + ' → v' + result.new_version);
+                this.showCloneDialog = false;
+                await this.fetchAll();
             } catch (e) {
-                this.toast('error', 'Restart failed: ' + e.message);
+                this.toast('error', 'Clone failed: ' + e.message);
             } finally {
                 this.actionLoading = false;
             }

@@ -60,6 +60,7 @@ const WMS2_API = (() => {
         listRequests:      (params='')  => get('/requests' + (params ? '?' + params : '')),
         getRequest:        (name)       => get('/requests/' + encodeURIComponent(name)),
         getRequestErrors:  (name)       => get('/requests/' + encodeURIComponent(name) + '/errors'),
+        getSitePerformance:(name)       => get('/requests/' + encodeURIComponent(name) + '/site-performance'),
 
         // Request actions
         updatePriorityProfile: (name, body) => patch('/requests/' + encodeURIComponent(name) + '/priority-profile', body),
@@ -68,6 +69,7 @@ const WMS2_API = (() => {
         failRequest:       (name)       => post('/requests/' + encodeURIComponent(name) + '/fail'),
         deleteRequest:     (name)       => del('/requests/' + encodeURIComponent(name)),
         restartRequest:    (name)       => post('/requests/' + encodeURIComponent(name) + '/restart'),
+        cloneRequest:      (name)       => post('/requests/' + encodeURIComponent(name) + '/clone'),
 
         // Workflows
         getWorkflowByRequest: (name)    => get('/workflows/by-request/' + encodeURIComponent(name)),

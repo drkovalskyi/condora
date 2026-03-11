@@ -142,12 +142,29 @@
                 <div class="form-help">Number of work units per production round (Round 1+). Leave empty for global default.</div>
             </div>
 
+            <h3 style="margin-top:1.5rem; font-size:1rem;">Pilot (Round 0)</h3>
+
+            <div class="form-group">
+                <label for="pilot-fraction">Pilot Fraction</label>
+                <input id="pilot-fraction" type="number" x-model="pilotFraction"
+                       step="0.01" min="0" max="1" placeholder="Default: 0.01">
+                <div class="form-help">Fraction of events_per_job for round 0. 0.01 = 1% (~35 events). Set to 0 to skip pilot (round 0 = normal production). 1.0 = full events (old behavior).</div>
+            </div>
+
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" x-model="pilotThrowaway">
+                    Pilot Throwaway
+                </label>
+                <div class="form-help">Discard round 0 output after metrics extraction. Events won't count toward target. Adaptive optimization still runs.</div>
+            </div>
+
             <!-- WU estimate (GEN workflows) -->
             <template x-if="preview && preview.is_gen && estimatedTotalWUs !== null">
                 <div class="wu-estimate" style="margin-bottom:1rem;">
                     <strong>Estimated Work Units</strong>
                     <div>Total WUs: <span x-text="estimatedTotalWUs"></span></div>
-                    <div>Round 0 (pilot): <span x-text="preview.defaults.first_round_work_units"></span> WU</div>
+                    <div>Round 0 (pilot): <span x-text="(pilotFraction !== '' && parseFloat(pilotFraction) === 0) ? (parseInt(workUnitsPerRound) || preview.defaults.work_units_per_round) + ' WU (no pilot)' : preview.defaults.first_round_work_units + ' WU'"></span></div>
                     <div>WUs per round: <span x-text="parseInt(workUnitsPerRound) || preview.defaults.work_units_per_round"></span></div>
                     <div>Estimated rounds: <span x-text="estimatedRounds"></span></div>
                 </div>

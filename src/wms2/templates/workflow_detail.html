@@ -11,11 +11,52 @@
 
     <template x-if="workflow">
         <div>
-            <h1 style="font-size:1.3rem;">
-                Processing Details
-                <span x-html="statusBadge(workflow.status)" style="margin-left:0.5rem;"></span>
-            </h1>
+            <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                <h1 style="font-size:1.3rem; margin:0;">
+                    Processing Details
+                    <span x-html="statusBadge(workflow.status)" style="margin-left:0.5rem;"></span>
+                </h1>
+                <template x-if="canStop">
+                    <button class="outline" @click="showStopDialog = true" :disabled="actionLoading"
+                            style="font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;">Stop</button>
+                </template>
+                <template x-if="canFail">
+                    <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showFailDialog = true" :disabled="actionLoading">Fail</button>
+                </template>
+            </div>
             <p style="opacity:0.7; font-size:0.85rem; word-break:break-all;" x-text="workflow.id"></p>
+
+            <!-- Stop dialog -->
+            <dialog :open="showStopDialog || undefined">
+                <h3>Stop Request</h3>
+                <p>Initiate a clean stop. Running jobs will finish; no new jobs will start.</p>
+                <div class="form-group">
+                    <label for="stop-reason">Reason</label>
+                    <textarea id="stop-reason" x-model="stopReason" rows="2" style="width:100%;"></textarea>
+                </div>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showStopDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button @click="doStop()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Stop</span>
+                        <span x-show="actionLoading">Stopping...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Fail dialog -->
+            <dialog :open="showFailDialog || undefined">
+                <h3>Fail Request</h3>
+                <p>This will kill the running DAG and mark the request as failed. This cannot be undone.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showFailDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
+                            @click="doFail()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Fail</span>
+                        <span x-show="actionLoading">Failing...</span>
+                    </button>
+                </div>
+            </dialog>
 
             <template x-if="testFraction">
                 <div class="banner-warning" style="background:#fef08a; border:2px solid #eab308; border-radius:4px; padding:0.5rem 0.75rem; margin-bottom:1rem; font-size:0.9rem; color:#713f12;">
@@ -59,35 +100,6 @@
                     <dd x-text="fmtDateTime(workflow.updated_at)"></dd>
                 </dl>
             </div>
-
-            <!-- Steps -->
-            <template x-if="stepsInfo.length > 0">
-                <div class="section">
-                    <h3>Steps</h3>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>Name</th>
-                                <th>CMSSW</th>
-                                <th>Global Tag</th>
-                                <th>Arch</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <template x-for="s in stepsInfo" :key="s.index">
-                                <tr>
-                                    <td x-text="s.index"></td>
-                                    <td x-text="s.name"></td>
-                                    <td x-text="s.cmssw"></td>
-                                    <td x-text="s.global_tag"></td>
-                                    <td x-text="s.scram_arch"></td>
-                                </tr>
-                            </template>
-                        </tbody>
-                    </table>
-                </div>
-            </template>
 
             <!-- Splitting params -->
             <template x-if="Object.keys(splittingDisplay).length > 0">
@@ -175,7 +187,7 @@
                                 <tbody>
                                     <template x-for="[sn, sd] in Object.entries(adaptiveInfo.per_step).sort((a,b) => Number(a[0]) - Number(b[0]))" :key="sn">
                                         <tr>
-                                            <td x-text="'Step ' + sn"></td>
+                                            <td x-text="stepName(sn)"></td>
                                             <td x-text="sd.cpu_eff != null ? fmtPct(sd.cpu_eff * 100) : '—'"></td>
                                             <td x-text="sd.effective_cores != null ? sd.effective_cores.toFixed(1) : '—'"></td>
                                             <td x-text="sd.tuned_nthreads || '—'"></td>
@@ -214,6 +226,13 @@
                 <div class="progress-bar" style="max-width:500px;">
                     <div class="fill" :style="'width:' + Math.min(100, progressPct) + '%'"></div>
                 </div>
+                <template x-if="dag && dag.total_work_units > 0">
+                    <div style="font-size:0.85rem; margin-top:0.25rem;">
+                        Work Units: <span x-text="fmtNum(dag.total_work_units)"></span> total,
+                        <strong x-text="fmtNum(dag.wus_done)"></strong> done,
+                        <span x-text="fmtNum(dag.wus_failed)"></span> failed
+                    </div>
+                </template>
                 <div style="font-size:0.85rem; opacity:0.7; margin-top:0.25rem;">
                     Nodes: <span x-text="fmtNum(workflow.nodes_done)"></span> done,
                     <span x-text="fmtNum(workflow.nodes_running)"></span> running,
@@ -232,7 +251,7 @@
                             <tr>
                                 <th>Round</th>
                                 <th>Status</th>
-                                <th>WUs</th>
+                                <th>WUs Total/Done/Failed</th>
                                 <th>Nodes Total/Done/Failed</th>
                                 <th>Memory (MB)</th>
                                 <th>Threads</th>
@@ -258,7 +277,7 @@
                                                   title="Multiple DAGs due to rescue resubmission"></span>
                                         </template>
                                     </td>
-                                    <td x-text="r.work_units"></td>
+                                    <td x-text="r.work_units + '/' + r.wus_done + '/' + r.wus_failed"></td>
                                     <td x-text="r.nodes_total + '/' + r.nodes_done + '/' + r.nodes_failed"></td>
                                     <td x-text="fmtNum(r.memory_used)"></td>
                                     <td x-text="r.threads_used"></td>
@@ -330,12 +349,16 @@
                     <h3>Output Datasets</h3>
                     <template x-for="ds in outputDatasets" :key="ds.dataset_name">
                         <div style="margin-bottom:1rem; padding:0.75rem; border:1px solid var(--pico-muted-border-color); border-radius:4px;">
-                            <strong x-text="ds.dataset_name" style="word-break:break-all;"></strong>
+                            <strong x-text="ds.rucio_did || ds.dataset_name" style="word-break:break-all;"></strong>
+                            <template x-if="ds.rucio_did">
+                                <div style="font-size:0.8rem; opacity:0.6; margin-top:0.15rem;"
+                                     x-text="'Production: ' + ds.dataset_name"></div>
+                            </template>
                             <dl class="detail-grid" style="margin-top:0.5rem;">
                                 <dt>Data Tier</dt>
                                 <dd x-text="ds.data_tier || '—'"></dd>
-                                <dt>Output Path</dt>
-                                <dd x-text="ds.output_path || '—'" style="word-break:break-all; font-size:0.85rem;"></dd>
+                                <dt>LFN Base</dt>
+                                <dd x-text="ds.merged_lfn_base || '—'" style="word-break:break-all; font-size:0.85rem;"></dd>
                                 <dt>Events</dt>
                                 <dd x-text="ds.event_count > 0 ? fmtNum(ds.event_count) : '—'"></dd>
                                 <dt>Files</dt>
@@ -345,6 +368,35 @@
                             </dl>
                         </div>
                     </template>
+                </div>
+            </template>
+
+            <!-- Steps -->
+            <template x-if="stepsInfo.length > 0">
+                <div class="section">
+                    <h3>Steps</h3>
+                    <table style="font-size:0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Name</th>
+                                <th>CMSSW</th>
+                                <th>Global Tag</th>
+                                <th>Arch</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in stepsInfo" :key="s.index">
+                                <tr>
+                                    <td x-text="s.index"></td>
+                                    <td x-text="s.name"></td>
+                                    <td x-text="s.cmssw"></td>
+                                    <td x-text="s.global_tag"></td>
+                                    <td x-text="s.scram_arch"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
                 </div>
             </template>
 

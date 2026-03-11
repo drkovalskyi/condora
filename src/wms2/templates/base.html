@@ -37,7 +37,7 @@
                     <option value="60">60s</option>
                     <option value="120">2m</option>
                 </select>
-                <button @click="togglePause()" class="outline" x-text="paused ? 'Resume' : 'Pause'"></button>
+                <button @click="togglePause()" class="outline" x-text="paused ? '▶' : '⏸'" :title="paused ? 'Resume auto-refresh' : 'Pause auto-refresh'" style="padding:0.15rem 0.5rem; font-size:0.9rem;"></button>
                 <button @click="refreshNow()" class="outline">Refresh</button>
                 <span x-show="!paused" style="opacity:0.6" x-text="countdown + 's'"></span>
                 <span x-show="paused" style="opacity:0.6">(paused)</span>
