@@ -78,27 +78,14 @@ instances before enabling.
   representing each task.
 - Add configuration control to enable tmpfs for gridpacks in UI.
 - We hardcoded some site restrictions. This needs to be revised and handled properly
-- **Add `periodic_remove` to submit files** — detect and kill zombie/stuck jobs.
-  Without this, jobs matched to dead glideins stay "Running" with zero wall clock
-  time indefinitely, blocking DAG completion. Reference implementations:
-  - **CRABServer** (`DagmanCreator.py`): bakes enforcement into submit files:
-    ```
-    periodic_remove = (JobStatus==2) && (MaxWallTimeMinsRun*60 < time()-EnteredCurrentStatus)
-                   || (JobStatus==5) && (time()-EnteredCurrentStatus > 7*60)
-                   || (JobStatus==1) && (time()-EnteredCurrentStatus > 7*24*60*60)
-                   || (MemoryUsage > RequestMemory)
-                   || (DiskUsage > 20GB)
-    ```
-    Sets `MaxWallTimeMinsRun` per job (default 21.5h). Also `periodic_release` for
-    transient hold codes (28, 30, 13, 6). Uses `PeriodicRemoveReason` for diagnostics.
-  - **WMAgent** (`SimpleCondorPlugin.py`): application-side polling via StatusPoller
-    every ~3 min. Kills Running>48h, Idle>72h. Also sets `PeriodicRemove` for
-    held jobs >10 min and `JobLeaseDuration=1200` (20 min lease → HTCondor evicts
-    if startd loses contact).
-  - **For WMS2**: CRABServer's submit-level approach fits better since we don't
-    track individual jobs. Need to set `MaxWallTimeMinsRun` based on estimated
-    wall time from request spec, plus a safety margin. Also add `JobLeaseDuration`
-    like WMAgent does.
+- **~~Add `periodic_remove` to submit files~~ (DONE)** — Zombie detection +
+  hard 48h cap replaces estimate-based `MaxWallTimeMinsRun` for proc/merge nodes.
+  Proc/merge: kill if running >30 min with <60s CPU (zombie) or running >48h
+  (hard cap). Landing/cleanup: keep fixed MaxWallTimeMinsRun (30/60 min).
+  POST classifier recognizes periodic_remove kills (zombie → infrastructure,
+  hard cap → permanent; both non-retryable via UNLESS_EXIT 42).
+  Configurable via `zombie_detect_running_sec`, `zombie_detect_cpu_threshold_sec`,
+  `hard_wall_time_limit_sec` in Settings.
 
 ## Security (future)
 

@@ -1217,42 +1217,21 @@ def _compute_max_wall_time_mins(
 ) -> int:
     """Compute MaxWallTimeMinsRun for a given node type.
 
-    For proc nodes: time_per_event × events_per_job / ncpus × safety_factor,
-    with a minimum of 120 min and fallback of 1440 min (24h).
-    For merge: max(merge_min, proc_estimate × 2), minimum 240 min.
-    For landing: fixed (default 30 min).
-    For cleanup: fixed (default 60 min).
+    Proc and merge nodes return 0 (no estimate-based wall time limit).
+    Zombie detection and a hard 48h cap in periodic_remove handle these.
+    Landing: fixed (default 30 min).
+    Cleanup: fixed (default 60 min).
     """
-    rp = resource_params or {}
-    sf = settings.wall_time_safety_factor if settings else 3.0
-
     if node_type == "landing":
         return settings.landing_wall_time_mins if settings else 30
 
     if node_type == "cleanup":
         return settings.cleanup_wall_time_mins if settings else 60
 
-    if node_type == "proc":
-        tpe = rp.get("time_per_event_sec", 0)
-        epj = rp.get("events_per_job", 0)
-        ncpus = rp.get("ncpus", 1) or 1
-        if tpe > 0 and epj > 0:
-            wall_sec = tpe * epj / ncpus * sf
-            return max(120, int(wall_sec / 60) + 1)
-        return 1440  # 24h fallback when no performance data
-
-    if node_type == "merge":
-        merge_min = settings.merge_wall_time_mins_min if settings else 240
-        # Estimate merge time as 2× proc time
-        tpe = rp.get("time_per_event_sec", 0)
-        epj = rp.get("events_per_job", 0)
-        ncpus = rp.get("ncpus", 1) or 1
-        if tpe > 0 and epj > 0:
-            proc_wall_min = tpe * epj / ncpus * sf / 60
-            return max(merge_min, int(proc_wall_min * 2) + 1)
-        return merge_min
-
-    return 1440  # unknown node type fallback
+    # Proc and merge: no MaxWallTimeMinsRun — zombie detection + hard cap
+    # in periodic_remove handle runtime enforcement without needing
+    # inaccurate time_per_event estimates.
+    return 0
 
 
 def _generate_group_dag(
@@ -1453,9 +1432,12 @@ def _generate_group_dag(
     disk_limit = settings.periodic_remove_disk_limit_kb if settings else 20971520
 
     landing_wall = _compute_max_wall_time_mins("landing", rp, settings)
-    proc_wall = _compute_max_wall_time_mins("proc", rp, settings)
-    merge_wall = _compute_max_wall_time_mins("merge", rp, settings)
     cleanup_wall = _compute_max_wall_time_mins("cleanup", rp, settings)
+
+    # Zombie detection + hard cap settings for proc/merge nodes
+    zombie_running = settings.zombie_detect_running_sec if settings else 1800
+    zombie_cpu = settings.zombie_detect_cpu_threshold_sec if settings else 60
+    hard_wall = settings.hard_wall_time_limit_sec if settings else 172800
 
     # Idle timeout tiered by priority level
     # Per-request override takes precedence over tier-based default.
@@ -1512,6 +1494,8 @@ def _generate_group_dag(
             idle_timeout_sec=landing_idle_timeout,
             held_timeout_sec=held_timeout,
             disk_limit_kb=disk_limit,
+            node_type="landing",
+            settings=settings,
         )
         lines.append(f"JOB landing {fp}landing.sub")
         landing_log = f"{fp}landing.log"
@@ -1562,10 +1546,14 @@ def _generate_group_dag(
             priority=job_priority,
             extra_classads=extra_classads,
             output_dir=out_dir,
-            max_wall_time_mins_run=proc_wall,
             idle_timeout_sec=proc_idle_timeout,
             held_timeout_sec=held_timeout,
             disk_limit_kb=disk_limit,
+            node_type="proc",
+            zombie_running_sec=zombie_running,
+            zombie_cpu_sec=zombie_cpu,
+            hard_wall_limit_sec=hard_wall,
+            settings=settings,
         )
         lines.append(f"JOB {node_name} {fp}{node_name}.sub")
         if not skip_site_pinning:
@@ -1620,10 +1608,14 @@ def _generate_group_dag(
         priority=merge_priority,
         extra_classads=extra_classads,
         output_dir=out_dir,
-        max_wall_time_mins_run=merge_wall,
         idle_timeout_sec=merge_idle_timeout,
         held_timeout_sec=held_timeout,
         disk_limit_kb=disk_limit,
+        node_type="merge",
+        zombie_running_sec=zombie_running,
+        zombie_cpu_sec=zombie_cpu,
+        hard_wall_limit_sec=hard_wall,
+        settings=settings,
     )
     lines.append(f"JOB merge {fp}merge.sub")
     if not skip_site_pinning:
@@ -1669,6 +1661,8 @@ def _generate_group_dag(
         idle_timeout_sec=merge_idle_timeout,
         held_timeout_sec=held_timeout,
         disk_limit_kb=disk_limit,
+        node_type="cleanup",
+        settings=settings,
     )
     lines.append(f"JOB cleanup {fp}cleanup.sub")
     if not skip_site_pinning:
@@ -1738,6 +1732,11 @@ def _write_submit_file(
     idle_timeout_sec: int = 43200,
     held_timeout_sec: int = 420,
     disk_limit_kb: int = 20971520,
+    node_type: str = "proc",
+    zombie_running_sec: int = 1800,
+    zombie_cpu_sec: int = 60,
+    hard_wall_limit_sec: int = 172800,
+    settings: Settings | None = None,
 ) -> None:
     stem = Path(path).stem
     out_prefix = f"{output_dir}/" if output_dir else ""
@@ -1798,11 +1797,12 @@ def _write_submit_file(
     # CMS accounting group: the global pool has three groups:
     # highprio, production, analysis. Use "production" to match Tier-0 jobs.
     lines.append("accounting_group = production")
-    if not self.settings.accounting_group_user:
+    acct_user = settings.accounting_group_user if settings else ""
+    if not acct_user:
         raise ValueError(
             "WMS2_ACCOUNTING_GROUP_USER must be set for global pool submission"
         )
-    lines.append(f"accounting_group_user = {self.settings.accounting_group_user}")
+    lines.append(f"accounting_group_user = {acct_user}")
     # Job lease: if the startd (glidein) loses contact, the schedd evicts
     # the job after this many seconds. Without this, zombie jobs can stay
     # "Running" indefinitely when glideins die without clean shutdown.
@@ -1815,31 +1815,64 @@ def _write_submit_file(
     # reads it for site attribution.  MATCH_GLIDEIN_CMSSite (schedd-internal)
     # only appears in condor_history, not in .log files.
     lines.append('+JOB_GLIDEIN_CMSSite = "$$(GLIDEIN_CMSSite:Unknown)"')
-    # Wall time enforcement — periodic_remove kills zombie/runaway jobs.
-    # MaxWallTimeMinsRun is per-node (computed by caller based on node type).
-    if max_wall_time_mins_run > 0:
-        lines.append(f"+MaxWallTimeMinsRun = {max_wall_time_mins_run}")
-    # periodic_remove: kill jobs that exceed wall time, are stuck held/idle, or use too much disk.
-    lines.append(
-        "periodic_remove = "
-        "(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) "
-        "&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus) || "
-        f"(JobStatus == 5 && time() - EnteredCurrentStatus > {held_timeout_sec}) || "
-        f"(JobStatus == 1 && time() - EnteredCurrentStatus > {idle_timeout_sec}) || "
-        f"(DiskUsage > {disk_limit_kb})"
-    )
-    # Diagnostic reason — HTCondor logs this when periodic_remove fires.
-    lines.append(
-        '+PeriodicRemoveReason = strcat("WMS2: ", '
-        'ifThenElse(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) '
-        '&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus, '
-        'strcat("wall time exceeded (", MaxWallTimeMinsRun, " min limit)"), '
-        'ifThenElse(JobStatus == 5, '
-        'strcat("held for ", int((time() - EnteredCurrentStatus)/60), " min"), '
-        f'ifThenElse(JobStatus == 1, '
-        f'strcat("idle for ", int((time() - EnteredCurrentStatus)/3600), " hours"), '
-        f'"disk usage exceeded ({disk_limit_kb} KB limit)"))))'
-    )
+    # periodic_remove: kill zombie/runaway jobs, stuck held/idle, or disk hogs.
+    #
+    # For proc/merge nodes (CMSSW jobs): zombie detection (running >30 min with
+    # <60s cumulative CPU = matched to dead glidein) + hard 48h cap.  No
+    # estimate-based wall time — ReqMgr2 time_per_event is unreliable, and CMS
+    # glideins enforce their own 24-48h lifetimes.
+    #
+    # For landing/cleanup nodes: fixed MaxWallTimeMinsRun (no CMSSW, no CPU to
+    # detect zombies — landing is /bin/true, cleanup is lightweight I/O).
+    if node_type in ("proc", "merge"):
+        lines.append(
+            "periodic_remove = "
+            f"(JobStatus == 2 && time() - EnteredCurrentStatus > {zombie_running_sec} "
+            f"&& RemoteUserCpu + RemoteSysCpu < {zombie_cpu_sec}) || "
+            f"(JobStatus == 2 && time() - EnteredCurrentStatus > {hard_wall_limit_sec}) || "
+            f"(JobStatus == 5 && time() - EnteredCurrentStatus > {held_timeout_sec}) || "
+            f"(JobStatus == 1 && time() - EnteredCurrentStatus > {idle_timeout_sec}) || "
+            f"(DiskUsage > {disk_limit_kb})"
+        )
+        hard_wall_hours = hard_wall_limit_sec // 3600
+        lines.append(
+            '+PeriodicRemoveReason = strcat("WMS2: ", '
+            f'ifThenElse(JobStatus == 2 && time() - EnteredCurrentStatus > {zombie_running_sec} '
+            f'&& RemoteUserCpu + RemoteSysCpu < {zombie_cpu_sec}, '
+            'strcat("zombie detected (running ", '
+            'int((time() - EnteredCurrentStatus)/60), '
+            '" min with ", int(RemoteUserCpu + RemoteSysCpu), "s CPU)"), '
+            f'ifThenElse(JobStatus == 2 && time() - EnteredCurrentStatus > {hard_wall_limit_sec}, '
+            f'"hard wall time limit ({hard_wall_hours} hours)", '
+            'ifThenElse(JobStatus == 5, '
+            'strcat("held for ", int((time() - EnteredCurrentStatus)/60), " min"), '
+            f'ifThenElse(JobStatus == 1, '
+            f'strcat("idle for ", int((time() - EnteredCurrentStatus)/3600), " hours"), '
+            f'"disk usage exceeded ({disk_limit_kb} KB limit)")))))'
+        )
+    else:
+        # Landing/cleanup: fixed wall time via MaxWallTimeMinsRun
+        if max_wall_time_mins_run > 0:
+            lines.append(f"+MaxWallTimeMinsRun = {max_wall_time_mins_run}")
+        lines.append(
+            "periodic_remove = "
+            "(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) "
+            "&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus) || "
+            f"(JobStatus == 5 && time() - EnteredCurrentStatus > {held_timeout_sec}) || "
+            f"(JobStatus == 1 && time() - EnteredCurrentStatus > {idle_timeout_sec}) || "
+            f"(DiskUsage > {disk_limit_kb})"
+        )
+        lines.append(
+            '+PeriodicRemoveReason = strcat("WMS2: ", '
+            'ifThenElse(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) '
+            '&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus, '
+            'strcat("wall time exceeded (", MaxWallTimeMinsRun, " min limit)"), '
+            'ifThenElse(JobStatus == 5, '
+            'strcat("held for ", int((time() - EnteredCurrentStatus)/60), " min"), '
+            f'ifThenElse(JobStatus == 1, '
+            f'strcat("idle for ", int((time() - EnteredCurrentStatus)/3600), " hours"), '
+            f'"disk usage exceeded ({disk_limit_kb} KB limit)"))))'
+        )
     # periodic_release: auto-release jobs held for transient reasons.
     # HoldReasonCode 6=SIGKILL, 13=submit failure, 28=memory exceeded, 30=network error.
     # NumJobStarts < 5 prevents infinite release loops.

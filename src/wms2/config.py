@@ -146,10 +146,13 @@ class Settings(BaseSettings):
     tail_escalation_priority: int = 10       # priority boost for remaining jobs
 
     # Wall time enforcement (periodic_remove)
-    wall_time_safety_factor: float = 3.0     # multiplier on estimated wall time
     landing_wall_time_mins: int = 30         # fixed wall time for landing nodes
-    merge_wall_time_mins_min: int = 240      # minimum wall time for merge nodes
     cleanup_wall_time_mins: int = 60         # fixed wall time for cleanup nodes
+
+    # Zombie detection (periodic_remove for proc/merge nodes)
+    zombie_detect_running_sec: int = 1800      # 30 min grace before checking CPU
+    zombie_detect_cpu_threshold_sec: int = 60  # CPU below this = zombie
+    hard_wall_time_limit_sec: int = 172800     # 48h absolute cap on running time
 
     # Periodic remove thresholds
     periodic_remove_held_timeout_sec: int = 420     # 7 min — kill jobs stuck in held

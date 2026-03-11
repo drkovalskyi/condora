@@ -115,10 +115,13 @@ def classify_error(
     job_exit_code: int,
     error_message: str = "",
     log_tail: str = "",
+    periodic_remove_reason: str = "",
 ) -> dict:
     """Classify an error into category + retryable + action.
 
     Uses CMSSW exit code as primary signal, job exit code as fallback.
+    When ``periodic_remove_reason`` is set, the job was killed by HTCondor's
+    periodic_remove — classify based on the reason (zombie vs hard cap).
     When ``log_tail`` is provided and the initial classification is
     "transient", stageout failure patterns upgrade it to "infrastructure".
 
@@ -132,6 +135,25 @@ def classify_error(
             "memory_exceeded": bool,
         }
     """
+    # periodic_remove override — job was killed by HTCondor, not CMSSW
+    if periodic_remove_reason:
+        if "zombie" in periodic_remove_reason:
+            return {
+                "category": "infrastructure",
+                "retryable": False,
+                "bad_input_files": [],
+                "action": "permanent_failure",
+                "memory_exceeded": False,
+            }
+        if "hard wall time" in periodic_remove_reason:
+            return {
+                "category": "permanent",
+                "retryable": False,
+                "bad_input_files": [],
+                "action": "permanent_failure",
+                "memory_exceeded": False,
+            }
+
     if cmssw_exit_code == 0 and job_exit_code == 0:
         return {
             "category": "success",
@@ -275,8 +297,23 @@ def _is_infra_by_message(msg):
     return any(pat in msg_lower for pat in _INFRA_MESSAGE_PATTERNS)
 
 
-def classify_error(cmssw_exit_code, job_exit_code, error_message=""):
+def classify_error(cmssw_exit_code, job_exit_code, error_message="",
+                   periodic_remove_reason=""):
     """Classify an error into category + retryable + action."""
+    # periodic_remove override — job was killed by HTCondor, not CMSSW
+    if periodic_remove_reason:
+        if "zombie" in periodic_remove_reason:
+            return {
+                "category": "infrastructure", "retryable": False,
+                "bad_input_files": [], "action": "permanent_failure",
+                "memory_exceeded": False,
+            }
+        if "hard wall time" in periodic_remove_reason:
+            return {
+                "category": "permanent", "retryable": False,
+                "bad_input_files": [], "action": "permanent_failure",
+                "memory_exceeded": False,
+            }
     if cmssw_exit_code == 0 and job_exit_code == 0:
         return {
             "category": "success", "retryable": False,
@@ -431,8 +468,9 @@ def parse_fjr(xml_path):
 # ── HTCondor log parsing ────────────────────────────────────────
 
 def parse_condor_log(log_path):
-    """Parse HTCondor job log for site, wall time, memory usage."""
-    info = {"site": "unknown", "wall_time_sec": 0, "memory_mb": 0}
+    """Parse HTCondor job log for site, wall time, memory usage, periodic_remove."""
+    info = {"site": "unknown", "wall_time_sec": 0, "memory_mb": 0,
+            "periodic_remove_reason": ""}
     if not os.path.isfile(log_path):
         return info
     try:
@@ -470,6 +508,16 @@ def parse_condor_log(log_path):
                 info["wall_time_sec"] = int(diff)
         except (ValueError, TypeError):
             pass
+
+    # Detect periodic_remove — HTCondor writes event 009 (Job was aborted)
+    # with PeriodicRemoveReason on the next line.  Look for our "WMS2:" prefix.
+    m = re.search(r'009 \(.*?\).*?Job was aborted', content)
+    if m:
+        # Search for WMS2 reason in lines following the abort event
+        after_abort = content[m.start():]
+        rm = re.search(r'WMS2: (zombie detected.*|hard wall time limit.*)', after_abort)
+        if rm:
+            info["periodic_remove_reason"] = "WMS2: " + rm.group(1).strip()
 
     return info
 
@@ -552,7 +600,10 @@ def main():
 
     # Classify
     error_message = cmssw_data.get("error_message", "") if cmssw_data else ""
-    classification = classify_error(cmssw_exit_code, job_exit_code, error_message)
+    periodic_remove_reason = condor_log.get("periodic_remove_reason", "")
+    classification = classify_error(
+        cmssw_exit_code, job_exit_code, error_message, periodic_remove_reason
+    )
 
     # Upgrade transient -> infrastructure when log_tail reveals stageout failure.
     # Shell exit code 1 from stageout RuntimeError doesn't match any CMSSW code
@@ -597,6 +648,7 @@ def main():
             "memory_mb": condor_log["memory_mb"],
             "site": condor_log["site"],
             "schedd": "",
+            "periodic_remove_reason": periodic_remove_reason,
         },
         "cmssw": {
             "exit_code": cmssw_exit_code,
