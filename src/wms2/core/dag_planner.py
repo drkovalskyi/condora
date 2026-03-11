@@ -1507,6 +1507,7 @@ def _generate_group_dag(
             extra_classads=landing_classads,
             output_dir=out_dir,
             transfer_executable=False,
+            transfer_output_files=[],
             max_wall_time_mins_run=landing_wall,
             idle_timeout_sec=landing_idle_timeout,
             held_timeout_sec=held_timeout,
@@ -1556,6 +1557,7 @@ def _generate_group_dag(
             disk_kb=disk_kb,
             ncpus=ncpus,
             transfer_input_files=proc_transfer_files or None,
+            transfer_output_files=[],
             environment=proc_env or None,
             priority=job_priority,
             extra_classads=extra_classads,
@@ -1608,6 +1610,11 @@ def _generate_group_dag(
         memory_mb=memory_mb,
         disk_kb=disk_kb,
         transfer_input_files=merge_transfer or None,
+        transfer_output_files=[
+            "merge_output.json",
+            "work_unit_metrics.json",
+            "cleanup_manifest.json",
+        ],
         transfer_output_remaps=merge_output_remaps,
         environment=proc_env or None,
         priority=merge_priority,
@@ -1653,6 +1660,7 @@ def _generate_group_dag(
         description="cleanup node",
         desired_sites=all_desired if skip_site_pinning else "",
         transfer_input_files=cleanup_transfer or None,
+        transfer_output_files=[],
         environment=proc_env or None,
         priority=merge_priority,
         extra_classads=extra_classads,
@@ -1717,6 +1725,7 @@ def _write_submit_file(
     disk_kb: int = 0,
     ncpus: int = 0,
     transfer_input_files: list[str] | None = None,
+    transfer_output_files: list[str] | None = None,
     transfer_output_remaps: dict[str, str] | None = None,
     environment: dict[str, str] | None = None,
     banned_sites: list[str] | None = None,
@@ -1767,6 +1776,8 @@ def _write_submit_file(
         lines.append(f"x509userproxy = {proxy_ref}")
     if transfer_input_files:
         lines.append(f"transfer_input_files = {','.join(transfer_input_files)}")
+    if transfer_output_files is not None:
+        lines.append(f"transfer_output_files = {','.join(transfer_output_files)}")
     if transfer_output_remaps:
         remap_str = "; ".join(f"{k} = {v}" for k, v in transfer_output_remaps.items())
         lines.append(f'transfer_output_remaps = "{remap_str}"')
@@ -2424,6 +2435,14 @@ if os.path.isfile(manifest_file):
             if os.path.isfile(cgroup_file):
                 stage_file(cgroup_file, f'{lfn_base}/{cgroup_file}')
             break
+
+# Remove staged ROOT files to prevent spool bloat
+# (defense in depth — transfer_output_files should prevent transfer,
+# but this protects against misconfiguration or rescue DAGs from old code)
+for filename in list(file_map.keys()):
+    if os.path.isfile(filename) and filename.endswith('.root'):
+        os.remove(filename)
+        print(f'Removed after stageout: {filename}')
 "
 }
 
