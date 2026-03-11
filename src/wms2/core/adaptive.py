@@ -381,6 +381,20 @@ def load_cgroup_metrics(
             break  # found files in this dir, don't look further
 
     if num_jobs == 0:
+        # Fallback: read aggregated cgroup data from work_unit_metrics.json
+        # (in spool mode, proc_*_cgroup.json files stay in the merge sandbox
+        # and aren't transferred back, but the merge script aggregates them
+        # into work_unit_metrics.json)
+        for search_dir in search_dirs:
+            wu_path = search_dir / "work_unit_metrics.json"
+            if wu_path.exists():
+                try:
+                    wu_data = json.loads(wu_path.read_text())
+                    cg = wu_data.get("cgroup")
+                    if cg and cg.get("peak_nonreclaim_mb", 0) > 0:
+                        return cg
+                except Exception:
+                    pass
         return None
 
     agg["num_jobs"] = num_jobs
@@ -424,6 +438,7 @@ def compute_per_step_nthreads(
     safety_margin: float = 0.20,
     cgroup: dict | None = None,
     min_threads: int = 2,
+    split_tmpfs: bool = False,
 ) -> dict:
     """Derive optimal nThreads for step 0 parallel splitting and optional overcommit.
 
@@ -493,10 +508,16 @@ def compute_per_step_nthreads(
                 instance_mem = max(instance_mem, 500)
                 memory_source = "cgroup_measured"
             elif probe_rss_mb > 0:
-                instance_mem = probe_rss_mb * margin_mult + TMPFS_PER_INSTANCE_MB
+                instance_mem = probe_rss_mb * margin_mult
+                if split_tmpfs:
+                    gridpack_mb = cgroup.get("gridpack_disk_mb", 0) if cgroup else 0
+                    instance_mem += gridpack_mb if gridpack_mb > 0 else TMPFS_PER_INSTANCE_MB
                 memory_source = "probe"
             else:
-                instance_mem = avg_rss * margin_mult + TMPFS_PER_INSTANCE_MB
+                instance_mem = avg_rss * margin_mult
+                if split_tmpfs:
+                    gridpack_mb = cgroup.get("gridpack_disk_mb", 0) if cgroup else 0
+                    instance_mem += gridpack_mb if gridpack_mb > 0 else TMPFS_PER_INSTANCE_MB
                 memory_source = "theoretical"
 
             # Memory-aware reduction
@@ -703,15 +724,16 @@ def compute_job_split(
         marginal = max(marginal, 500)
         memory_from_measured = int((SANDBOX_OVERHEAD_MB + marginal) * margin_mult)
         memory_source = "probe_peak"
-    elif cgroup is not None and cgroup.get("peak_nonreclaim_mb", 0) > 0:
-        if split_tmpfs and cgroup.get("tmpfs_peak_nonreclaim_mb", 0) > 0:
+    elif split_tmpfs and cgroup is not None and cgroup.get("peak_nonreclaim_mb", 0) > 0:
+        # Tmpfs-specific cgroup branches: gridpack extraction is real additional memory
+        if cgroup.get("tmpfs_peak_nonreclaim_mb", 0) > 0:
             binding = max(
                 cgroup["tmpfs_peak_nonreclaim_mb"],
                 cgroup.get("no_tmpfs_peak_anon_mb", 0),
             )
             memory_from_measured = int(binding * margin_mult)
             memory_source = "cgroup_measured"
-        elif split_tmpfs and cgroup.get("tmpfs_peak_nonreclaim_mb", 0) == 0:
+        else:
             gridpack_mb = cgroup.get("gridpack_disk_mb", 0)
             if gridpack_mb > 0:
                 binding = cgroup["peak_anon_mb"] + gridpack_mb
@@ -720,12 +742,11 @@ def compute_job_split(
             else:
                 memory_from_measured = tuned * max_memory_per_core_mb
                 memory_source = "cgroup_no_tmpfs_data"
-        else:
-            binding = cgroup["peak_nonreclaim_mb"]
-            memory_from_measured = int(binding * margin_mult)
-            memory_source = "cgroup_measured"
     elif probe_rss_mb > 0:
-        memory_from_measured = int(probe_rss_mb * margin_mult + TMPFS_PER_INSTANCE_MB)
+        memory_from_measured = int(probe_rss_mb * margin_mult)
+        if split_tmpfs:
+            gridpack_mb = cgroup.get("gridpack_disk_mb", 0) if cgroup else 0
+            memory_from_measured += gridpack_mb if gridpack_mb > 0 else TMPFS_PER_INSTANCE_MB
         memory_source = "probe_rss"
     elif peak_rss_mb > 0:
         effective_peak = peak_rss_mb
@@ -1207,6 +1228,7 @@ def compute_round_optimization(
     # Deprecated — ignored, kept for call-site compatibility
     adaptive_mode: str = "",
     historical_peak_rss_mb: float = 0.0,
+    split_tmpfs: bool = False,
 ) -> dict:
     """Orchestrate inter-round adaptive optimization.
 
@@ -1305,15 +1327,7 @@ def compute_round_optimization(
         )
         peak_rss = historical_peak_rss_mb
 
-    if cgroup and cgroup.get("peak_nonreclaim_mb", 0) > 0:
-        cgroup_peak = cgroup["peak_nonreclaim_mb"]
-        # Also enforce historical floor on cgroup measurement
-        if historical_peak_rss_mb > cgroup_peak:
-            cgroup_peak = historical_peak_rss_mb
-        measured_memory_mb = round(cgroup_peak)
-        measured_mem = int(cgroup_peak * (1.0 + safety_margin))
-        memory_source = "cgroup"
-    elif peak_rss > 0:
+    if peak_rss > 0:
         measured_memory_mb = round(peak_rss)
         measured_mem = int(peak_rss * (1.0 + safety_margin))
         memory_source = "fjr_rss"
@@ -1321,6 +1335,15 @@ def compute_round_optimization(
         measured_memory_mb = 0
         measured_mem = default_memory_mb
         memory_source = "default"
+    # Store and log cgroup data for diagnostics (not used for sizing)
+    if cgroup and cgroup.get("peak_nonreclaim_mb", 0) > 0:
+        result["metrics_summary"]["cgroup_peak_mb"] = round(
+            cgroup["peak_nonreclaim_mb"]
+        )
+        logger.info(
+            "Cgroup peak_nonreclaim=%.0f MB (diagnostic only, using %s=%.0f MB for sizing)",
+            cgroup["peak_nonreclaim_mb"], memory_source, measured_memory_mb,
+        )
 
     tuned_memory_mb = max(MIN_MEMORY_MB, min(measured_mem, max_memory_mb))
 
@@ -1340,6 +1363,7 @@ def compute_round_optimization(
             safety_margin=safety_margin,
             cgroup=cgroup,
             min_request_cpus=min_request_cpus,
+            split_tmpfs=split_tmpfs,
         )
         if job_split["job_multiplier"] > 1:
             tuned_request_cpus = job_split["new_request_cpus"]
@@ -1357,7 +1381,28 @@ def compute_round_optimization(
         max_memory_mb=max_memory_per_core * tuned_request_cpus,
         safety_margin=safety_margin,
         cgroup=cgroup,
+        split_tmpfs=split_tmpfs,
     )
+
+    # ── 4b. Adjust memory for internal parallelism ──
+    # If a step runs N parallel instances, request_memory must cover all N.
+    # Steps are sequential (only peak step matters), but within a split step
+    # N instances run concurrently so their memory adds up.
+    SPLIT_SANDBOX_OVERHEAD_MB = 3000
+    split_max_memory = max_memory_per_core * tuned_request_cpus
+    for si, step_info in tuning["per_step"].items():
+        n_par = step_info.get("n_parallel", 1)
+        if n_par > 1 and "instance_mem_mb" in step_info:
+            split_need = SPLIT_SANDBOX_OVERHEAD_MB + n_par * step_info["instance_mem_mb"]
+            split_clamped = max(MIN_MEMORY_MB, min(int(split_need), split_max_memory))
+            if split_clamped > tuned_memory_mb:
+                logger.info(
+                    "Internal parallelism (N=%d) increases memory: %d → %d MB",
+                    n_par, tuned_memory_mb, split_clamped,
+                )
+                tuned_memory_mb = split_clamped
+                measured_memory_mb = int(split_need)
+                memory_source = "fjr_rss_split"
 
     # ── 5. Build unified result ──
     result["tuned_nthreads"] = tuned_request_cpus
