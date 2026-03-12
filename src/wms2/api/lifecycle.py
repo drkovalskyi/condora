@@ -30,6 +30,7 @@ EDITABLE_FIELDS = {
     "default_pilot_priority": (int, lambda v: True),
     "stageout_mode": (str, lambda v: v in ("local", "test", "production")),
     "pileup_remote_read": (bool, lambda v: isinstance(v, bool)),
+    "target_wall_time_hours": (float, lambda v: v >= 0),
 }
 
 
@@ -77,6 +78,7 @@ async def lifecycle_settings(request: Request):
         "site_ban_failure_ratio": s.site_ban_failure_ratio,
         "log_level": s.log_level,
         "default_pilot_priority": s.default_pilot_priority,
+        "target_wall_time_hours": s.target_wall_time_hours,
         "database_url": _mask_password(s.database_url),
     }
 

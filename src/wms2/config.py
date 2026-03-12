@@ -177,6 +177,7 @@ class Settings(BaseSettings):
     max_memory_per_core: int = 3000        # MB, ceiling for request_memory
     safety_margin: float = 0.20            # fractional margin on measured memory
     min_request_cpus: int = 4              # floor for job splitting (avoids pool fragmentation)
+    target_wall_time_hours: float = 8.0    # target wall clock time per proc job (0 = disabled)
 
     # API
     api_prefix: str = "/api/v1"

@@ -22,6 +22,7 @@ document.addEventListener('alpine:init', () => {
             'default_memory_per_core', 'max_memory_per_core', 'safety_margin',
             'site_ban_duration_days', 'site_ban_min_failures', 'site_ban_failure_ratio',
             'log_level', 'default_pilot_priority', 'stageout_mode', 'pileup_remote_read',
+            'target_wall_time_hours',
         ]),
 
         init() {

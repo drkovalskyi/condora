@@ -802,6 +802,93 @@ def compute_job_split(
     }
 
 
+def compute_throughput_optimization(
+    merged: dict,
+    current_events_per_job: int,
+    target_wall_time_sec: float,
+    startup_overhead_sec: float = 600.0,
+    max_change_factor: float = 2.0,
+    min_events_per_job: int = 100,
+) -> dict | None:
+    """Scale events_per_job to target a wall clock time per proc job.
+
+    Uses median wall time per step (robust to outliers) from completed
+    work unit metrics to estimate throughput, then scales events_per_job
+    so total wall time approaches target_wall_time_sec.
+
+    Args:
+        merged: Output of merge_round_metrics() — contains steps with wall_sec arrays.
+        current_events_per_job: Events per job in the round that produced these metrics.
+        target_wall_time_sec: Desired total wall time per proc job (seconds).
+        startup_overhead_sec: Fixed startup overhead per job (default 600s = 10 min).
+        max_change_factor: Maximum multiplicative change per round (default 2×).
+        min_events_per_job: Floor for events_per_job (default 100).
+
+    Returns:
+        Dict with tuned_events_per_job, measured_wall_per_event_sec,
+        estimated_total_wall_sec, or None if insufficient data.
+    """
+    if current_events_per_job <= 0 or target_wall_time_sec <= 0:
+        return None
+
+    steps = merged.get("steps", {})
+    if not steps:
+        return None
+
+    # Compute median wall time per step, sum across steps
+    total_median_wall_sec = 0.0
+    steps_with_data = 0
+    for si in sorted(steps, key=lambda k: int(k)):
+        wall_vals = steps[si].get("wall_sec", [])
+        if not wall_vals:
+            continue
+        sorted_vals = sorted(wall_vals)
+        n = len(sorted_vals)
+        if n % 2 == 1:
+            median_wall = sorted_vals[n // 2]
+        else:
+            median_wall = (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+        total_median_wall_sec += median_wall
+        steps_with_data += 1
+
+    if steps_with_data == 0 or total_median_wall_sec <= 0:
+        return None
+
+    measured_wall_per_event = total_median_wall_sec / current_events_per_job
+    available_sec = target_wall_time_sec - startup_overhead_sec
+    if available_sec <= 0:
+        return None
+
+    ideal_epj = available_sec / measured_wall_per_event
+
+    # Clamp to max 2× change per round
+    lower = current_events_per_job / max_change_factor
+    upper = current_events_per_job * max_change_factor
+    clamped_epj = max(lower, min(ideal_epj, upper))
+
+    # Round to nearest 100, enforce minimum
+    tuned_epj = max(min_events_per_job, round(clamped_epj / 100) * 100)
+
+    # Estimate total wall time at new epj
+    estimated_wall = measured_wall_per_event * tuned_epj + startup_overhead_sec
+
+    logger.info(
+        "Throughput optimization: measured %.2f s/ev, "
+        "epj %d → %d (target %.1fh wall, estimated %.1fh)",
+        measured_wall_per_event,
+        current_events_per_job, tuned_epj,
+        target_wall_time_sec / 3600,
+        estimated_wall / 3600,
+    )
+
+    return {
+        "tuned_events_per_job": tuned_epj,
+        "measured_wall_per_event_sec": round(measured_wall_per_event, 4),
+        "estimated_total_wall_sec": round(estimated_wall, 1),
+        "total_median_wall_sec": round(total_median_wall_sec, 1),
+    }
+
+
 def rewrite_wu_for_job_split(
     group_dir: Path,
     split_result: dict,
@@ -1229,6 +1316,8 @@ def compute_round_optimization(
     adaptive_mode: str = "",
     historical_peak_rss_mb: float = 0.0,
     split_tmpfs: bool = False,
+    target_wall_time_sec: float = 0.0,
+    current_round: int = 0,
 ) -> dict:
     """Orchestrate inter-round adaptive optimization.
 
@@ -1373,6 +1462,18 @@ def compute_round_optimization(
             tuned_memory_mb = job_split["new_request_memory_mb"]
             memory_source = job_split.get("memory_source", memory_source)
 
+    # ── 3b. Throughput-based events_per_job optimization (round 1+) ──
+    throughput_opt = None
+    if (current_round >= 1 and target_wall_time_sec > 0
+            and tuned_events_per_job > 0):
+        throughput_opt = compute_throughput_optimization(
+            merged,
+            current_events_per_job=tuned_events_per_job,
+            target_wall_time_sec=target_wall_time_sec,
+        )
+        if throughput_opt:
+            tuned_events_per_job = throughput_opt["tuned_events_per_job"]
+
     # ── 4. Compute internal parallelism (per-step nThreads) ──
     tuning = compute_per_step_nthreads(
         merged, original_nthreads,
@@ -1413,8 +1514,10 @@ def compute_round_optimization(
     result["measured_memory_mb"] = measured_memory_mb
     result["per_step"] = {str(k): v for k, v in tuning["per_step"].items()}
 
-    if job_multiplier > 1:
+    if tuned_events_per_job != events_per_job:
         result["tuned_events_per_job"] = tuned_events_per_job
+    if throughput_opt:
+        result["throughput_optimization"] = throughput_opt
 
     logger.info(
         "Adaptive optimization: cpus=%d→%d, memory=%d MB [%s], "

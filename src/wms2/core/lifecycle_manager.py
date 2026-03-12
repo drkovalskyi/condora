@@ -143,6 +143,13 @@ def _compute_adaptive_params(config, dag, workflow, new_metrics, settings):
                 if val > historical_peak_rss_mb:
                     historical_peak_rss_mb = val
 
+    # ── Resolve target wall time (per-request override > global setting) ──
+    target_wt_hours = config.get("target_wall_time_hours",
+                                 settings.target_wall_time_hours)
+    target_wall_time_sec = target_wt_hours * 3600 if target_wt_hours > 0 else 0.0
+
+    current_round = getattr(workflow, "current_round", 0) or 0
+
     try:
         return compute_round_optimization(
             submit_dir=dag.submit_dir,
@@ -157,6 +164,8 @@ def _compute_adaptive_params(config, dag, workflow, new_metrics, settings):
             min_request_cpus=settings.min_request_cpus,
             historical_peak_rss_mb=historical_peak_rss_mb,
             split_tmpfs=config.get("split_tmpfs", False),
+            target_wall_time_sec=target_wall_time_sec,
+            current_round=current_round,
         )
     except Exception:
         logger.exception("Adaptive optimization failed — using defaults")
@@ -290,6 +299,16 @@ async def complete_round(repo, settings, workflow, dag):
                 "weighted_cpu_eff", 0
             ) * 100,
         )
+        tp_opt = adaptive_params.get("throughput_optimization")
+        if isinstance(tp_opt, dict):
+            logger.info(
+                "Workflow %s: throughput optimization — "
+                "epj=%d, measured=%.2f s/ev, estimated_wall=%.1fh",
+                workflow.request_name,
+                tp_opt.get("tuned_events_per_job", 0),
+                tp_opt.get("measured_wall_per_event_sec", 0),
+                tp_opt.get("estimated_total_wall_sec", 0) / 3600,
+            )
 
     # ── Advance offset and round ──
     new_round = current_round + 1

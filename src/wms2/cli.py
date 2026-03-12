@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Override ProcessingVersion (changes -vN in output dataset paths)")
     imp.add_argument("--work-units-per-round", type=int, default=None,
                      help="Work units per production round (round 1+). Default: global setting.")
+    imp.add_argument("--target-wall-time-hours", type=float, default=None,
+                     help="Target wall clock time per proc job in hours (0=disabled). Default: global setting.")
     imp.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
     # ── delete subcommand ──
@@ -433,6 +435,8 @@ async def run_import(args: argparse.Namespace) -> None:
                 config_data["processing_version"] = args.processing_version
             if args.work_units_per_round is not None:
                 config_data["work_units_per_round"] = args.work_units_per_round
+            if args.target_wall_time_hours is not None:
+                config_data["target_wall_time_hours"] = args.target_wall_time_hours
 
             # Priority profile
             config_data["priority_profile"] = {

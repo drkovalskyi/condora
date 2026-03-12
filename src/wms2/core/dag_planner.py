@@ -393,6 +393,13 @@ class DAGPlanner:
                 if isinstance(per_step, dict):
                     resource_params["_per_step_tuning"] = per_step
 
+                # Throughput optimization — pass measured wall data for MaxWallTimeMinsRun
+                tp_opt = adaptive_params.get("throughput_optimization")
+                if isinstance(tp_opt, dict):
+                    mwpe = tp_opt.get("measured_wall_per_event_sec")
+                    if mwpe and mwpe > 0:
+                        resource_params["measured_wall_per_event_sec"] = float(mwpe)
+
         # Plan merge groups (after resource_params is fully built)
         jobs_per_wu = resource_params.pop("_jobs_per_wu_override", None)
 
@@ -1296,9 +1303,17 @@ def _compute_max_wall_time_mins(
     if node_type == "cleanup":
         return settings.cleanup_wall_time_mins if settings else 60
 
-    # Proc and merge: no MaxWallTimeMinsRun — zombie detection + hard cap
-    # in periodic_remove handle runtime enforcement without needing
-    # inaccurate time_per_event estimates.
+    # Proc and merge: use measured throughput data if available (1.5× safety),
+    # otherwise return 0 (zombie detection + hard cap handle enforcement).
+    if resource_params and node_type in ("proc", "merge"):
+        measured_wpe = resource_params.get("measured_wall_per_event_sec", 0)
+        epj = resource_params.get("events_per_job", 0)
+        if measured_wpe > 0 and epj > 0:
+            startup_overhead = 600  # 10 min startup
+            wall_sec = measured_wpe * epj + startup_overhead
+            # 1.5× safety factor (vs 3× for spec estimates) — measured data
+            # is accurate, margin covers site-to-site variation
+            return max(120, int(wall_sec * 1.5 / 60) + 1)
     return 0
 
 
@@ -1504,6 +1519,8 @@ def _generate_group_dag(
 
     landing_wall = _compute_max_wall_time_mins("landing", rp, settings)
     cleanup_wall = _compute_max_wall_time_mins("cleanup", rp, settings)
+    proc_wall = _compute_max_wall_time_mins("proc", rp, settings)
+    merge_wall = _compute_max_wall_time_mins("merge", rp, settings)
 
     # Zombie detection + hard cap settings for proc/merge nodes
     zombie_running = settings.zombie_detect_running_sec if settings else 1800
@@ -1617,6 +1634,7 @@ def _generate_group_dag(
             priority=job_priority,
             extra_classads=extra_classads,
             output_dir=out_dir,
+            max_wall_time_mins_run=proc_wall,
             idle_timeout_sec=proc_idle_timeout,
             held_timeout_sec=held_timeout,
             disk_limit_kb=disk_limit,
@@ -1683,6 +1701,7 @@ def _generate_group_dag(
         priority=merge_priority,
         extra_classads=extra_classads,
         output_dir=out_dir,
+        max_wall_time_mins_run=merge_wall,
         idle_timeout_sec=merge_idle_timeout,
         held_timeout_sec=held_timeout,
         disk_limit_kb=merge_periodic_disk,
@@ -1900,8 +1919,25 @@ def _write_submit_file(
     # For landing/cleanup nodes: fixed MaxWallTimeMinsRun (no CMSSW, no CPU to
     # detect zombies — landing is /bin/true, cleanup is lightweight I/O).
     if node_type in ("proc", "merge"):
+        # When measured throughput data is available, set MaxWallTimeMinsRun
+        # with 1.5× safety factor for tighter enforcement than the hard cap.
+        if max_wall_time_mins_run > 0:
+            lines.append(f"+MaxWallTimeMinsRun = {max_wall_time_mins_run}")
+            wall_check = (
+                "(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) "
+                "&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus) || "
+            )
+            wall_reason = (
+                'ifThenElse(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) '
+                '&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus, '
+                'strcat("measured wall time exceeded (", MaxWallTimeMinsRun, " min limit)"), '
+            )
+        else:
+            wall_check = ""
+            wall_reason = ""
         lines.append(
             "periodic_remove = "
+            f"{wall_check}"
             f"(JobStatus == 2 && time() - EnteredCurrentStatus > {zombie_running_sec} "
             f"&& RemoteUserCpu + RemoteSysCpu < {zombie_cpu_sec}) || "
             f"(JobStatus == 2 && time() - EnteredCurrentStatus > {hard_wall_limit_sec}) || "
@@ -1912,6 +1948,7 @@ def _write_submit_file(
         hard_wall_hours = hard_wall_limit_sec // 3600
         lines.append(
             '+PeriodicRemoveReason = strcat("WMS2: ", '
+            f'{wall_reason}'
             f'ifThenElse(JobStatus == 2 && time() - EnteredCurrentStatus > {zombie_running_sec} '
             f'&& RemoteUserCpu + RemoteSysCpu < {zombie_cpu_sec}, '
             'strcat("zombie detected (running ", '
@@ -1924,6 +1961,7 @@ def _write_submit_file(
             f'ifThenElse(JobStatus == 1, '
             f'strcat("idle for ", int((time() - EnteredCurrentStatus)/3600), " hours"), '
             f'"disk usage exceeded ({disk_limit_kb} KB limit)")))))'
+            f'{")" if max_wall_time_mins_run > 0 else ""}'
         )
     else:
         # Landing/cleanup: fixed wall time via MaxWallTimeMinsRun
@@ -2523,8 +2561,8 @@ export CMS_PATH=$WORK_DIR/_siteconf
 export SCRAM_ARCH=$arch
 export X509_CERT_DIR="${X509_CERT_DIR:-/cvmfs/grid.cern.ch/etc/grid-security/certificates}"
 # Copy proxy to working dir with 600 perms (xrootd 5.4.x rejects world-readable certs)
-if [[ -n "${X509_USER_PROXY:-}" && -f "${X509_USER_PROXY}" ]]; then
-    cp "$X509_USER_PROXY" "$WORK_DIR/_x509up"
+if [[ -n "${X509_USER_PROXY:-}" && -f "${X509_USER_PROXY:-}" ]]; then
+    cp "${X509_USER_PROXY:-}" "$WORK_DIR/_x509up"
     chmod 600 "$WORK_DIR/_x509up"
     export X509_USER_PROXY="$WORK_DIR/_x509up"
 fi
@@ -2826,8 +2864,8 @@ export CMS_PATH=$WORK_DIR/_siteconf
 export SCRAM_ARCH=$arch
 export X509_CERT_DIR="${X509_CERT_DIR:-/cvmfs/grid.cern.ch/etc/grid-security/certificates}"
 # Copy proxy to working dir with 600 perms (xrootd 5.4.x rejects world-readable certs)
-if [[ -n "${X509_USER_PROXY:-}" && -f "${X509_USER_PROXY}" ]]; then
-    cp "$X509_USER_PROXY" "$WORK_DIR/_x509up"
+if [[ -n "${X509_USER_PROXY:-}" && -f "${X509_USER_PROXY:-}" ]]; then
+    cp "${X509_USER_PROXY:-}" "$WORK_DIR/_x509up"
     chmod 600 "$WORK_DIR/_x509up"
     export X509_USER_PROXY="$WORK_DIR/_x509up"
 fi
@@ -3125,8 +3163,8 @@ export CMS_PATH=$WORK_DIR/_siteconf
 export SCRAM_ARCH=$arch
 export X509_CERT_DIR="${X509_CERT_DIR:-/cvmfs/grid.cern.ch/etc/grid-security/certificates}"
 # Copy proxy to working dir with 600 perms (xrootd 5.4.x rejects world-readable certs)
-if [[ -n "${X509_USER_PROXY:-}" && -f "${X509_USER_PROXY}" ]]; then
-    cp "$X509_USER_PROXY" "$WORK_DIR/_x509up"
+if [[ -n "${X509_USER_PROXY:-}" && -f "${X509_USER_PROXY:-}" ]]; then
+    cp "${X509_USER_PROXY:-}" "$WORK_DIR/_x509up"
     chmod 600 "$WORK_DIR/_x509up"
     export X509_USER_PROXY="$WORK_DIR/_x509up"
 fi
