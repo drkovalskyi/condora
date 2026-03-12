@@ -74,6 +74,27 @@ class CondorAdapter(ABC):
         """Query a job's initial working directory (Iwd classad)."""
         return None
 
+    async def edit_dag_payload_attr(
+        self, cluster_id: str, attr: str, value: str,
+        schedd_name: str | None = None,
+    ) -> int:
+        """Edit a ClassAd attribute on payload jobs in a two-level DAG.
+
+        Finds inner sub-DAGMan cluster IDs under the outer DAGMan, then
+        edits non-DAGMan jobs under each. Returns count of jobs edited.
+        """
+        return 0
+
+    async def query_dag_landing_jobs(
+        self, cluster_id: str, schedd_name: str | None = None,
+    ) -> list[dict]:
+        """Find idle landing jobs across sub-DAGMans in a two-level DAG.
+
+        Returns list of dicts with keys: cluster_id, proc_id, dag_node_name,
+        sub_dagman_id, requirements (current value).
+        """
+        return []
+
     async def query_dag_site_summary(
         self, cluster_id: str, schedd_name: str | None = None,
     ) -> dict[str, dict[str, int]]:

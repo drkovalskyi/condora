@@ -6,6 +6,122 @@
 
 ---
 
+## 2026-03-12 — Per-batch merge + oversized file remote copy
+
+### What was done
+
+Refactored the merge script's grid-mode flow from "download all → merge all →
+upload all" to per-batch processing: download one batch (~4 GB) → merge → upload →
+clean scratch → next batch. Peak scratch ≈ 8 GB regardless of WU size.
+
+Oversized files (>= 75% of target merge size) are remote-copied directly between
+storage endpoints via `gfal-copy` (supports third-party copy / TPC). They never
+touch worker node scratch.
+
+**Motivation**: Grid worker nodes have limited scratch disk (~2.5 GB/core at
+T2_CH_CERN, ~20 GB for an 8-core slot). The old approach downloaded ALL proc
+outputs to scratch before merging — for multi-tier workflows like StepChain 5-step
+(AODSIM 14 GB + MINI 1 GB + NANO 15 MB per job), this quickly exceeded scratch
+capacity. The disk cap on WU sizing (previously 100 GB budget → 3 procs/WU)
+severely limited throughput.
+
+**Changes**:
+
+1. **Grid discovery** — No longer downloads ROOT files during discovery phase.
+   Records `unmerged_root_lfns` (basename → LFN) for deferred per-batch download.
+   JSON manifests (proc_NNN_outputs.json, metrics) still downloaded immediately.
+
+2. **Per-batch merge** — For each tier's merge candidates:
+   - `batch_by_size()` groups files into ~4 GB batches using manifest `size_bytes`
+   - For each batch: download files → merge (cmsRun/hadd/uproot) → compute checksum
+     → upload merged output → delete scratch files
+   - `merge_output.json` metadata collected during upload (not from post-hoc dir scan)
+
+3. **Oversized file remote copy** — Files with `size_bytes >= max_merge_size * 0.75`
+   are classified per-file (not per-tier). `stageout.remote_copy()` copies between
+   remote PFNs via `gfal-copy` (TPC when storage supports it). Added `size_bytes`
+   to proc output manifest for runtime classification.
+
+4. **WU sizing** — Removed `MERGE_DISK_FACTOR` and disk cap from
+   `_compute_jobs_per_wu_from_write_mb`. WU size driven purely by target merged
+   file size. Merge disk estimate = 2x target (per-batch peak). Oversized tiers
+   still excluded from min_write_mb calculation for correct sizing.
+
+**Result for request 00057-like workflow**: Full scale → 273 jobs/WU (was 3 with
+disk cap). merge_disk = 8 GB. AODSIM remote-copied, MINI+NANO merged per-batch.
+
+Files:
+- `dag_planner.py:926`: removed `merge_disk_limit_kb`, `MERGE_DISK_FACTOR`,
+  disk cap; `merge_disk_kb = target_mb * 2 * 1024`
+- `dag_planner.py:4690`: grid discovery records LFNs instead of downloading
+- `dag_planner.py:4918`: per-dataset loop: classify oversized/merge, per-batch
+  download/merge/upload/cleanup, collect metadata for merge_output.json
+- `dag_planner.py:5131`: merge_output.json uses `grid_merged_meta` in grid mode
+
+### Verification
+
+- WU sizing unit test: 273 jobs/WU at full scale, 3 at 0.01 test fraction
+- Matrix smoke tests: 4/5 passed (150.0 simulator merge, 500.0/501.0/510.0 faults)
+- Pre-existing 100.0 synthetic failure unchanged
+
+---
+
+## 2026-03-12 — WU-level recovery + proactive site exclusion
+
+### What was done
+
+Three changes to improve error recovery when a site has infrastructure problems
+(e.g. stageout permission errors). Previously, failed WUs were permanently lost
+and new WUs kept landing at the broken site until the entire DAG completed.
+
+**1. Bug fix: Tail escalation two-level DAG constraint**
+
+The tail priority escalation used `DAGManJobId == {outer_cluster} && JobUniverse != 7`
+which matched nothing in a two-level DAG (outer DAGMan's children are all inner
+sub-DAGMans with JobUniverse == 7). Added `edit_dag_payload_attr()` to the condor
+adapter that first queries sub-DAGMan cluster IDs, then edits payload jobs under each.
+
+Files: `adapters/condor.py`, `adapters/base.py`, `adapters/mock.py`, `lifecycle_manager.py:1218`
+
+**2. WU-level recovery via outer DAG RETRY + POST script**
+
+When an inner SUBDAG fails due to site-specific infrastructure issues, the outer
+DAG can now retry the WU at a different site. Each SUBDAG EXTERNAL node gets:
+- `SCRIPT POST` running `wu_post.sh` which analyzes inner post.json files
+- `RETRY N UNLESS-EXIT 42` (default N=1, configurable via `wu_retry_count`)
+
+wu_post.sh logic:
+- Exit 0 on success (pass-through)
+- Exit 42 (non-retryable) on permanent/data failures or unclear patterns
+- Exit 1 (retryable) when ≥2 infra failures at one site with ≥80% rate:
+  rewrites landing.sub to exclude the site, cleans rescue files and elected_site
+
+Config: `wu_retry_count` setting (default 1, 0 to disable).
+
+Files: `dag_planner.py` (wu_post.sh generation + outer DAG wiring), `config.py`
+
+**3. Proactive mid-DAG site exclusion**
+
+During each lifecycle poll cycle, after polling a running DAG with failed WUs,
+the lifecycle manager now:
+1. Reads post.json files from failed WUs (via sshfs, in thread pool)
+2. Calls `ErrorHandler.analyze_site_failures()` to identify problem sites
+3. Uses `condor_edit` on idle landing jobs to add Requirements exclusions
+
+Exclusion state is cached in `dag.node_counts["_mid_dag_excluded_sites"]` to
+avoid repeating the analysis each cycle.
+
+Files: `lifecycle_manager.py` (`_check_mid_dag_site_exclusions`), `adapters/condor.py`
+(`query_dag_landing_jobs`), `adapters/base.py`, `adapters/mock.py`
+
+### Verification
+
+- Generated outer DAG verified: each SUBDAG has POST script and RETRY lines
+- Unit tests pass (56 passing, pre-existing failures unchanged)
+- Matrix smoke tests: DAG generation and submission successful for all workflow types
+
+---
+
 ## 2026-03-11 — Fix site detection + stageout error classification for auto-ban
 
 ### What was done

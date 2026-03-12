@@ -533,6 +533,99 @@ class HTCondorAdapter(CondorAdapter):
                     _add("unmatched", status_key)
         return result
 
+    def _edit_dag_payload_attr_sync(
+        self, cluster_id: str, attr: str, value: str,
+        schedd_name: str | None = None,
+    ) -> int:
+        """Two-level DAG edit: find sub-DAGMans, then edit payload jobs."""
+        schedd = self._get_schedd(schedd_name)
+        sub_dagman_ads = schedd.query(
+            constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
+            projection=["ClusterId"],
+        )
+        if not sub_dagman_ads:
+            return 0
+
+        count = 0
+        for sub_ad in sub_dagman_ads:
+            sub_id = int(sub_ad["ClusterId"])
+            constraint = (
+                f"DAGManJobId == {sub_id} "
+                f"&& JobUniverse =!= 7 "
+                f"&& JobStatus =!= 4"
+            )
+            try:
+                schedd.edit(constraint, attr, value)
+                # Count matching jobs
+                matched = schedd.query(
+                    constraint=f"DAGManJobId == {sub_id} && JobUniverse =!= 7",
+                    projection=["ClusterId"],
+                )
+                count += len(matched)
+            except Exception:
+                logger.debug(
+                    "Failed to edit attr %s on sub-DAG %d", attr, sub_id
+                )
+        return count
+
+    async def edit_dag_payload_attr(
+        self, cluster_id: str, attr: str, value: str,
+        schedd_name: str | None = None,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._edit_dag_payload_attr_sync, cluster_id, attr, value,
+            schedd_name,
+        )
+
+    def _query_dag_landing_jobs_sync(
+        self, cluster_id: str, schedd_name: str | None = None,
+    ) -> list[dict]:
+        """Find idle landing jobs across sub-DAGMans."""
+        schedd = self._get_schedd(schedd_name)
+        sub_dagman_ads = schedd.query(
+            constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
+            projection=["ClusterId"],
+        )
+        if not sub_dagman_ads:
+            return []
+
+        results = []
+        for sub_ad in sub_dagman_ads:
+            sub_id = int(sub_ad["ClusterId"])
+            constraint = (
+                f"DAGManJobId == {sub_id} "
+                f"&& DAGNodeName == \"landing\" "
+                f"&& JobStatus == 1"
+            )
+            try:
+                ads = schedd.query(
+                    constraint=constraint,
+                    projection=[
+                        "ClusterId", "ProcId", "DAGNodeName",
+                        "Requirements",
+                    ],
+                )
+                for ad in ads:
+                    results.append({
+                        "cluster_id": int(ad["ClusterId"]),
+                        "proc_id": int(ad.get("ProcId", 0)),
+                        "dag_node_name": str(ad.get("DAGNodeName", "")),
+                        "sub_dagman_id": sub_id,
+                        "requirements": str(ad.get("Requirements", "")),
+                    })
+            except Exception:
+                logger.debug(
+                    "Failed to query landing jobs under sub-DAG %d", sub_id,
+                )
+        return results
+
+    async def query_dag_landing_jobs(
+        self, cluster_id: str, schedd_name: str | None = None,
+    ) -> list[dict]:
+        return await asyncio.to_thread(
+            self._query_dag_landing_jobs_sync, cluster_id, schedd_name,
+        )
+
     async def query_dag_site_summary(
         self, cluster_id: str, schedd_name: str | None = None,
     ) -> dict[str, dict[str, int]]:

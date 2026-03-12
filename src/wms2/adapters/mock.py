@@ -70,6 +70,19 @@ class MockCondorAdapter(CondorAdapter):
         self.calls.append(("get_job_iwd", (cluster_id,), {}))
         return None
 
+    async def edit_dag_payload_attr(
+        self, cluster_id: str, attr: str, value: str,
+        schedd_name: str | None = None,
+    ) -> int:
+        self.calls.append(("edit_dag_payload_attr", (cluster_id, attr, value), {}))
+        return 0
+
+    async def query_dag_landing_jobs(
+        self, cluster_id: str, schedd_name: str | None = None,
+    ) -> list[dict]:
+        self.calls.append(("query_dag_landing_jobs", (cluster_id,), {}))
+        return getattr(self, "_landing_jobs", [])
+
     async def query_dag_site_summary(
         self, cluster_id: str, schedd_name: str | None = None,
     ) -> dict[str, dict[str, int]]:

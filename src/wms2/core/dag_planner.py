@@ -405,7 +405,7 @@ class DAGPlanner:
                 current_epj = int(
                     sp.get("events_per_job") or sp.get("eventsPerJob") or 0
                 )
-                computed = _compute_jobs_per_wu_from_write_mb(
+                result = _compute_jobs_per_wu_from_write_mb(
                     step_metrics,
                     self.settings.target_merged_size_kb,
                     self.settings.max_jobs_per_work_unit,
@@ -415,11 +415,14 @@ class DAGPlanner:
                         "pilot_fraction", self.settings.pilot_fraction
                     ),
                 )
-                if computed is not None:
-                    jobs_per_wu = computed
+                if result is not None:
+                    jobs_per_wu, merge_disk_kb = result
+                    resource_params["merge_disk_kb"] = merge_disk_kb
                     logger.info(
-                        "Output-size WU sizing: %d jobs/WU (target %d KB merged)",
-                        computed, self.settings.target_merged_size_kb,
+                        "Output-size WU sizing: %d jobs/WU "
+                        "(target %d KB merged, merge disk %d KB)",
+                        jobs_per_wu, self.settings.target_merged_size_kb,
+                        merge_disk_kb,
                     )
 
         merge_groups = _plan_merge_groups(
@@ -926,13 +929,21 @@ def _compute_jobs_per_wu_from_write_mb(
     test_fraction: float = 1.0,
     current_events_per_job: int = 0,
     pilot_fraction: float = 0.01,
-) -> int | None:
+) -> tuple[int, int] | None:
     """Compute optimal jobs_per_work_unit from measured write_mb in step_metrics.
 
     Uses the smallest output tier's write_mb.mean to calculate how many jobs
     produce a target merged file size. When test_fraction < 1, the target is
     scaled down proportionally (e.g. 4 GB * 0.01 = 40 MB) so that merged files
     stay proportional to the test run. Returns None if no write_mb data found.
+
+    Tiers where write_mb >= 75% of target_merged_size are classified as
+    "oversized" — they skip scratch during merge (remote-copied directly).
+    Only non-oversized tiers are used for target merge sizing.
+
+    Returns (jobs_per_wu, merge_disk_kb) tuple — merge_disk_kb is the estimated
+    per-batch merge disk (2x target, since merge downloads one batch at a time).
+    Returns None if no write_mb data found.
 
     If current_events_per_job is set and differs from the round's
     effective_events_per_job (e.g. pilot fraction scaling), the measured
@@ -943,27 +954,38 @@ def _compute_jobs_per_wu_from_write_mb(
     if not rounds:
         return None
 
-    # Find the minimum write_mb.mean across all steps from the most recent round
-    min_write_mb = None
+    # Collect per-step write_mb from the most recent round with data.
+    # We need both the minimum (for target merge sizing) and the sum
+    # (for merge disk constraint).
+    step_write_avgs: dict[str, float] = {}  # step_key -> avg write_mb across WUs
     round_epj = 0
     source_round = None
     for round_num in sorted(rounds.keys(), key=int, reverse=True):
         round_data = rounds[round_num]
         round_epj = round_data.get("effective_events_per_job", 0)
         wu_metrics = round_data.get("wu_metrics", [])
+
+        # Collect per-step write_mb across all WUs
+        step_values: dict[str, list[float]] = {}  # step_key -> [mean_write from each WU]
         for wu in wu_metrics:
             per_step = wu.get("per_step", {})
-            for step_data in per_step.values():
+            for step_key, step_data in per_step.items():
                 write_info = step_data.get("write_mb", {})
                 mean_write = write_info.get("mean")
                 if mean_write and mean_write > 0:
-                    if min_write_mb is None or mean_write < min_write_mb:
-                        min_write_mb = mean_write
-        if min_write_mb is not None:
+                    step_values.setdefault(step_key, []).append(mean_write)
+
+        if step_values:
+            # Average each step's write_mb across WUs
+            for step_key, values in step_values.items():
+                step_write_avgs[step_key] = sum(values) / len(values)
             source_round = int(round_num)
             break  # Use most recent round only
 
-    if min_write_mb is None or min_write_mb <= 0:
+    if not step_write_avgs:
+        return None
+
+    if min(step_write_avgs.values()) <= 0:
         return None
 
     # Fallback: if effective_events_per_job was not stored (old round data),
@@ -989,23 +1011,55 @@ def _compute_jobs_per_wu_from_write_mb(
                 round_epj, eff_frac, source_round,
             )
 
-    # Scale write_mb if the round used a different events_per_job than current
+    # Scale step_write_avgs if the round used a different events_per_job than current
     # (e.g. pilot round with 40 epj → production with 4000 epj)
     if current_events_per_job > 0 and round_epj > 0 and round_epj != current_events_per_job:
         scale = current_events_per_job / round_epj
         logger.info(
-            "Scaling write_mb %.2f MB by %.1fx (epj %d→%d)",
-            min_write_mb, scale, round_epj, current_events_per_job,
+            "Scaling write_mb by %.1fx (epj %d→%d), per-step: %s",
+            scale, round_epj, current_events_per_job,
+            {k: f"{v:.1f}->{v*scale:.1f}" for k, v in step_write_avgs.items()},
         )
-        min_write_mb *= scale
+        step_write_avgs = {k: v * scale for k, v in step_write_avgs.items()}
 
     # target_merged_size_kb is in KB, write_mb is in MB
     # Scale target by test_fraction so test runs get proportionally smaller merges
     target_mb = target_merged_size_kb / 1024.0 * test_fraction
+    oversized_threshold_mb = target_mb * 0.75
+
+    # Classify steps: oversized tiers won't transit scratch during merge
+    # (they're remote-copied directly from unmerged to merged storage)
+    merge_steps = {}  # step_key -> write_mb (needs merging, transits scratch)
+    oversized_steps = {}  # step_key -> write_mb (skip merge, remote copy)
+    for step_key, write_mb in step_write_avgs.items():
+        if write_mb >= oversized_threshold_mb:
+            oversized_steps[step_key] = write_mb
+        else:
+            merge_steps[step_key] = write_mb
+
+    if oversized_steps:
+        logger.info(
+            "Oversized tiers (remote-copied, skip scratch): %s",
+            {k: f"{v:.0f} MB" for k, v in oversized_steps.items()},
+        )
+
+    # For merge sizing, use only non-oversized tiers
+    if merge_steps:
+        min_write_mb = min(merge_steps.values())
+    else:
+        # All tiers oversized — fall back to smallest for WU sizing
+        min_write_mb = min(step_write_avgs.values())
+
     optimal = round(target_mb / min_write_mb)
 
     # Clamp to [1, max_jobs]
-    return max(1, min(optimal, max_jobs))
+    jobs = max(1, min(optimal, max_jobs))
+
+    # Per-batch merge disk: merge downloads one batch at a time, so peak
+    # scratch = batch inputs (~target_mb) + merged output (~target_mb) = 2x target.
+    merge_disk_kb = int(target_mb * 2 * 1024)  # MB -> KB
+
+    return (jobs, merge_disk_kb)
 
 
 # ── Merge Group Planning ───────────────────────────────────────
@@ -1099,6 +1153,7 @@ def _generate_dag_files(
     _write_elect_site_script(str(submit_path / "elect_site.sh"))
     _write_pin_site_script(str(submit_path / "pin_site.sh"))
     _write_post_script(str(submit_path / "post_script.sh"))
+    _write_wu_post_script(str(submit_path / "wu_post.sh"))
     _write_post_collector(str(submit_path / "wms2_post_collect.py"))
     _write_proc_script(str(submit_path / "wms2_proc.sh"))
     _write_merge_script(str(submit_path / "wms2_merge.py"))
@@ -1132,6 +1187,9 @@ def _generate_dag_files(
             "",
         ]
 
+    # WU-level retry count (outer DAG retries failed SUBDAGs at a different site)
+    wu_retry = settings.wu_retry_count if settings else 1
+
     for mg in merge_groups:
         mg_name = f"mg_{mg.group_index:06d}"
         mg_dir = submit_path / mg_name
@@ -1143,6 +1201,9 @@ def _generate_dag_files(
             # mg_name/ prefix.  No symlinks (they don't transfer in spool).
             outer_lines.append(
                 f"SUBDAG EXTERNAL {mg_name} {mg_name}/group.dag"
+            )
+            outer_lines.append(
+                f"SCRIPT POST {mg_name} wu_post.sh $JOB $RETURN {mg_name}"
             )
         else:
             # Local mode: symlink shared scripts into mg_dir so inner DAG
@@ -1156,6 +1217,13 @@ def _generate_dag_files(
             abs_mg = f"{abs_submit}/{mg_name}"
             outer_lines.append(
                 f"SUBDAG EXTERNAL {mg_name} {abs_mg}/group.dag DIR {abs_mg}"
+            )
+            outer_lines.append(
+                f"SCRIPT POST {mg_name} {abs_submit}/wu_post.sh $JOB $RETURN {abs_mg}"
+            )
+        if wu_retry > 0:
+            outer_lines.append(
+                f"RETRY {mg_name} {wu_retry} UNLESS-EXIT 42"
             )
 
         # Write pileup_files.json if pileup datasets were resolved
@@ -1287,6 +1355,9 @@ def _generate_group_dag(
     memory_mb = rp.get("memory_mb", 0)
     disk_kb = rp.get("disk_kb", 0)
     ncpus = rp.get("ncpus", 0)
+    # Merge-specific disk: estimated from WU sizing (all proc outputs + merged output).
+    # When set, the merge node gets its own request_disk and periodic_remove limit.
+    merge_disk_kb = rp.get("merge_disk_kb", 0)
 
     # Build transfer_input_files list for processing nodes.
     # In local mode paths are relative to group_dir (../ prefix for parent).
@@ -1589,6 +1660,10 @@ def _generate_group_dag(
             "merge_output.json": f"{mg_name}/merge_output.json",
             "work_unit_metrics.json": f"{mg_name}/work_unit_metrics.json",
         }
+    # Use merge-specific disk if estimated from WU sizing; otherwise fallback to generic
+    merge_request_disk = merge_disk_kb if merge_disk_kb > 0 else disk_kb
+    # periodic_remove limit for merge: use estimate + 20% margin, or generic limit
+    merge_periodic_disk = int(merge_disk_kb * 1.2) if merge_disk_kb > 0 else disk_limit
     _write_submit_file(
         str(group_dir / "merge.sub"),
         executable=merge_exe,
@@ -1596,7 +1671,7 @@ def _generate_group_dag(
         description="merge node",
         desired_sites=all_desired if skip_site_pinning else "",
         memory_mb=memory_mb,
-        disk_kb=disk_kb,
+        disk_kb=merge_request_disk,
         transfer_input_files=merge_transfer or None,
         transfer_output_files=[
             "merge_output.json",
@@ -1610,7 +1685,7 @@ def _generate_group_dag(
         output_dir=out_dir,
         idle_timeout_sec=merge_idle_timeout,
         held_timeout_sec=held_timeout,
-        disk_limit_kb=disk_limit,
+        disk_limit_kb=merge_periodic_disk,
         node_type="merge",
         zombie_running_sec=zombie_running,
         zombie_cpu_sec=zombie_cpu,
@@ -2102,6 +2177,120 @@ case "$CLASSIFICATION" in
     *)
         exit 1 ;;
 esac
+""")
+    os.chmod(path, 0o755)
+
+
+def _write_wu_post_script(path: str) -> None:
+    """Generate a POST script for outer DAG SUBDAG nodes (WU-level recovery).
+
+    Runs on the schedd after an inner SUBDAG completes or fails.
+    Analyzes inner post.json files to decide whether the WU should be retried
+    at a different site (exit 1) or marked as non-retryable (exit 42).
+    """
+    _write_file(path, """\
+#!/bin/bash
+# wu_post.sh — POST script for outer DAG SUBDAG nodes (WU-level recovery)
+# Called by DAGMan: SCRIPT POST mg_XXXXXX wu_post.sh $JOB $RETURN mg_XXXXXX
+# $1 = node name (mg_XXXXXX), $2 = inner DAG exit code, $3 = group dir
+NODE_NAME=$1; RETURN_CODE=$2; GROUP_DIR=${3:-.}
+
+UNLESS_EXIT=42
+
+# Success — no action needed
+if [ "$RETURN_CODE" -eq 0 ]; then
+    exit 0
+fi
+
+# Read all inner POST data files
+permanent_count=0
+data_count=0
+declare -A site_infra_count
+declare -A site_total_count
+total_failures=0
+
+for pj in "${GROUP_DIR}"/proc_*.post.json; do
+    [ -f "$pj" ] || continue
+    eval "$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+cat = d.get('classification', {}).get('category', 'unknown')
+site = d.get('job', {}).get('site', 'unknown')
+print('pj_cat=%s' % cat)
+print('pj_site=%s' % site)
+" "$pj" 2>/dev/null || echo "pj_cat=unknown"$'\\n'"pj_site=unknown")"
+
+    case "$pj_cat" in
+        permanent) permanent_count=$((permanent_count + 1)) ;;
+        data)      data_count=$((data_count + 1)) ;;
+        infrastructure|infrastructure_memory)
+            site_infra_count[$pj_site]=$(( ${site_infra_count[$pj_site]:-0} + 1 ))
+            ;;
+    esac
+    site_total_count[$pj_site]=$(( ${site_total_count[$pj_site]:-0} + 1 ))
+    total_failures=$((total_failures + 1))
+done
+
+# Permanent or data failures are non-retryable
+if [ "$permanent_count" -gt 0 ] || [ "$data_count" -gt 0 ]; then
+    echo "WU $NODE_NAME: $permanent_count permanent + $data_count data failures — non-retryable" >&2
+    exit $UNLESS_EXIT
+fi
+
+# No post.json files found — inner DAG failed without POST data (e.g. DAGMan crash)
+if [ "$total_failures" -eq 0 ]; then
+    echo "WU $NODE_NAME: inner DAG failed with no POST data — retrying" >&2
+    # Clean up for fresh retry
+    rm -f "${GROUP_DIR}/group.dag.rescue"*
+    rm -f "${NODE_NAME}_elected_site" "${GROUP_DIR}/elected_site"
+    rm -f "${GROUP_DIR}"/proc_*.post.json "${GROUP_DIR}"/merge.post.json
+    exit 1
+fi
+
+# Find dominant failure site
+best_site=""
+best_infra=0
+for site in "${!site_infra_count[@]}"; do
+    infra=${site_infra_count[$site]}
+    total=${site_total_count[$site]:-0}
+    if [ "$infra" -ge 2 ] && [ "$total" -gt 0 ]; then
+        ratio=$((infra * 100 / total))
+        if [ "$ratio" -ge 80 ] && [ "$infra" -gt "$best_infra" ]; then
+            best_site="$site"
+            best_infra="$infra"
+        fi
+    fi
+done
+
+if [ -z "$best_site" ]; then
+    echo "WU $NODE_NAME: no clear site failure pattern ($total_failures failures) — non-retryable" >&2
+    exit $UNLESS_EXIT
+fi
+
+echo "WU $NODE_NAME: $best_infra infrastructure failures at $best_site — excluding and retrying" >&2
+
+# Rewrite landing.sub to exclude the failed site
+LANDING_SUB="${GROUP_DIR}/landing.sub"
+if [ -f "$LANDING_SUB" ]; then
+    EXCLUSION='TARGET.GLIDEIN_CMSSite =!= "'"$best_site"'"'
+    # Remove existing Requirements line
+    sed -i '/^Requirements\\s*=/d' "$LANDING_SUB"
+    # Add exclusion before queue
+    sed -i "s/^queue/Requirements = $EXCLUSION\\nqueue/" "$LANDING_SUB"
+
+    # Also remove the excluded site from +DESIRED_Sites
+    sed -i "s/${best_site},//g" "$LANDING_SUB"
+    sed -i "s/${best_site}//g" "$LANDING_SUB"
+    # Clean trailing comma in DESIRED_Sites
+    sed -i 's/,\\s*"/"/g' "$LANDING_SUB"
+fi
+
+# Clean up for fresh retry: remove rescue files, elected site, stale post.json
+rm -f "${GROUP_DIR}/group.dag.rescue"*
+rm -f "${NODE_NAME}_elected_site" "${GROUP_DIR}/elected_site"
+rm -f "${GROUP_DIR}"/proc_*.post.json "${GROUP_DIR}"/merge.post.json
+
+exit 1
 """)
     os.chmod(path, 0o755)
 
@@ -3525,14 +3714,15 @@ for f in sorted(os.listdir('.')):
             if pipe_m:
                 info = orig_to_info.get(pipe_m.group(1))
         if info:
+            info['size_bytes'] = os.path.getsize(f) if os.path.isfile(f) else 0
             files[f] = info
         else:
             # Fallback: try to extract from filename pattern (stepN_TIER.root)
             m2 = re.match(r'step(\d+)_(.+)\.root', orig)
             if m2:
-                files[f] = {'tier': m2.group(2), 'step_index': int(m2.group(1)) - 1}
+                files[f] = {'tier': m2.group(2), 'step_index': int(m2.group(1)) - 1, 'size_bytes': os.path.getsize(f) if os.path.isfile(f) else 0}
             else:
-                files[f] = {'tier': 'unknown', 'step_index': -1}
+                files[f] = {'tier': 'unknown', 'step_index': -1, 'size_bytes': os.path.getsize(f) if os.path.isfile(f) else 0}
 
 with open('proc_${NODE_INDEX}_outputs.json', 'w') as fh:
     json.dump(files, fh, indent=2)
@@ -4319,7 +4509,7 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
 
     Batches files by max_merge_size and produces multiple outputs if needed.
     Uses UUID filenames (like WMAgent) for each output file.
-    For tiers where individual files are already large (>= max_merge_size/2),
+    For tiers where individual files are already large (>= max_merge_size*0.75),
     skips merge entirely and copies each file with a UUID name.
     Falls back to hadd if cmsRun fails, then to uproot merge for simulator mode.
     """
@@ -4364,9 +4554,9 @@ def merge_root_tier(tier, tier_files, tier_step_index, out_dir, manifest, work_d
             total_size += sz
     if file_sizes:
         avg_size = total_size / len(file_sizes)
-        if avg_size >= max_merge_size / 2:
+        if avg_size >= max_merge_size * 0.75:
             print(f"  Tier {tier}: avg file size {avg_size / (1024**2):.0f} MB >= "
-                  f"{max_merge_size / (2 * 1024**2):.0f} MB — skipping merge, "
+                  f"{max_merge_size * 0.75 / (1024**2):.0f} MB — skipping merge, "
                   f"copying {len(tier_files)} files with UUID names")
             merged_files = []
             for f in tier_files:
@@ -4496,9 +4686,12 @@ def merge_text_files(datasets, text_files, pfn_prefix, group_index):
 
 # Read proc output manifests and ROOT files from unmerged site storage
 # Each dataset has an unmerged_lfn_base; files are at PFN = pfn_prefix + unmerged_lfn/{group:06d}/
-unmerged_root_files = []  # local paths or root:// URLs
+unmerged_root_files = []  # local paths (local mode or fallback)
+unmerged_root_lfns = {}  # basename -> LFN (grid mode — not downloaded during discovery)
 unmerged_manifests = []
 unmerged_metrics = []
+_manifest_sizes = {}  # basename -> size_bytes (from proc output manifests)
+oversized_threshold = int(max_merge_size * 0.75)
 has_unmerged = any(ds.get("unmerged_lfn_base") for ds in datasets)
 
 if has_unmerged and stageout_mode == "grid" and stageout is not None:
@@ -4531,12 +4724,15 @@ if has_unmerged and stageout_mode == "grid" and stageout is not None:
                     pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
                     stageout.download_file(pfn, local, cmd)
                     unmerged_manifests.append(local)
-                    # Parse the manifest to discover ROOT file names
+                    # Parse the manifest to discover ROOT file names and sizes
                     with open(local) as _mf:
                         _manifest_data = json.load(_mf)
                     for fname in _manifest_data:
                         if fname.endswith(".root"):
                             entries.append(fname)
+                        _mval = _manifest_data[fname]
+                        if isinstance(_mval, dict) and "size_bytes" in _mval:
+                            _manifest_sizes[fname] = _mval["size_bytes"]
                 except Exception as _e:
                     print(f"  Probe failed for proc_{ni}: {_e}")
                 # Also try metrics
@@ -4562,6 +4758,15 @@ if has_unmerged and stageout_mode == "grid" and stageout is not None:
                     local = os.path.join(os.getcwd(), entry)
                     stageout.download_file(pfn, local, cmd)
                     unmerged_manifests.append(local)
+                    # Parse for size info (used for oversized file detection)
+                    try:
+                        with open(local) as _sf:
+                            _sraw = json.load(_sf)
+                        for _sfn, _sval in _sraw.items():
+                            if isinstance(_sval, dict) and "size_bytes" in _sval:
+                                _manifest_sizes[_sfn] = _sval["size_bytes"]
+                    except Exception:
+                        pass
                 elif entry.endswith("_metrics.json") or entry.endswith("_cgroup.json"):
                     lfn = f"{unmerged_lfn_dir}/{entry}"
                     pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
@@ -4570,26 +4775,12 @@ if has_unmerged and stageout_mode == "grid" and stageout is not None:
                     if entry.endswith("_metrics.json"):
                         unmerged_metrics.append(local)
 
-        # Download ROOT files locally via write protocol (davs:/gfal-copy).
-        # root:// direct access fails at some sites (RAL, KIT) — downloading
-        # via the write protocol is reliable since that's how files were staged.
+        # Record ROOT file LFNs — no download during discovery.
+        # Files are downloaded per-batch during the merge phase to limit scratch usage.
         for entry in entries:
             if entry.endswith(".root"):
                 lfn = f"{unmerged_lfn_dir}/{entry}"
-                try:
-                    pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
-                    local = os.path.join(os.getcwd(), entry)
-                    stageout.download_file(pfn, local, cmd)
-                    unmerged_root_files.append(local)
-                except Exception as e:
-                    print(f"WARNING: Could not download {entry}: {e}")
-                    # Fallback: try direct root:// access
-                    try:
-                        read_pfn, _ = stageout.resolve_read_pfn(lfn, siteconfig)
-                        unmerged_root_files.append(read_pfn)
-                        print(f"  Falling back to direct access: {read_pfn}")
-                    except Exception:
-                        print(f"  Skipping {entry} — no access method available")
+                unmerged_root_lfns[entry] = lfn
 
 elif has_unmerged:
     # Local mode: read from unmerged site storage via filesystem
@@ -4615,7 +4806,7 @@ elif has_unmerged:
             unmerged_metrics.append(mf)
 
 # Fallback: read from group dir (backward compat with old format)
-if not unmerged_root_files:
+if not unmerged_root_files and not unmerged_root_lfns:
     unmerged_root_files = sorted(glob.glob(os.path.join(group_dir, "proc_*_*.root")))
     if not unmerged_root_files:
         unmerged_root_files = sorted(glob.glob(os.path.join(group_dir, "*.root")))
@@ -4625,10 +4816,12 @@ if not unmerged_root_files:
 # Also check group dir for text files (transferred by HTCondor)
 text_files = sorted(glob.glob(os.path.join(group_dir, "proc_*.out")))
 
-root_files = unmerged_root_files
+# Determine root entries to group by tier
+# Grid mode: basenames from LFN map; local mode: full paths
+root_entries = sorted(unmerged_root_lfns.keys()) if unmerged_root_lfns else unmerged_root_files
 
-if root_files:
-    print(f"Detected {len(root_files)} ROOT file(s) — using cmsRun merge mode")
+if root_entries:
+    print(f"Detected {len(root_entries)} ROOT file(s) — using cmsRun merge mode")
 
     # Load manifest for CMSSW version info
     manifest = {}
@@ -4654,10 +4847,10 @@ if root_files:
         except Exception:
             pass
 
-    # Group files by tier
-    tier_to_files = {}  # tier -> [paths]
+    # Group entries by tier (basenames in grid mode, paths in local mode)
+    tier_to_files = {}  # tier -> [entries]
     tier_to_step = {}   # tier -> step_index (first seen)
-    for f in root_files:
+    for f in root_entries:
         basename = os.path.basename(f)
         finfo = file_info_map.get(basename)
         if finfo:
@@ -4682,11 +4875,15 @@ if root_files:
 
     # Track unmerged directories for cleanup
     cleanup_dirs = set()
+    # Track merged file metadata for merge_output.json (grid mode: files are
+    # uploaded and deleted from scratch per-batch, so we can't scan local dirs)
+    grid_merged_meta = {}  # dataset_name -> [{"lfn": str, "size": int, "adler32": str}]
 
     for ds in datasets:
         merged_base = ds.get("merged_lfn_base", "")
         unmerged_base = ds.get("unmerged_lfn_base", "")
         ds_tier = ds.get("data_tier", "unknown")
+        ds_name = ds.get("dataset_name", "")
 
         # Match dataset tier to discovered file tiers
         tier_files = tier_to_files.get(ds_tier, [])
@@ -4721,34 +4918,110 @@ if root_files:
         merged_lfn_dir = f"{merged_base}/{group_index:06d}"
 
         if stageout_mode == "grid" and stageout is not None:
-            # Grid mode: write to local temp dir, then upload
-            out_dir = os.path.join(work_dir, f"_merged_{ds_tier}")
-            os.makedirs(out_dir, exist_ok=True)
-            print(f"Tier {ds_tier}: {len(tier_files)} files to merge (step_index={step_idx})")
-            print(f"  Local output: {out_dir} (will upload to grid)")
+            # Classify files by manifest size: oversized → remote copy, rest → merge
+            oversized = []
+            merge_candidates = []
+            for entry in tier_files:
+                basename = os.path.basename(entry)
+                sz = _manifest_sizes.get(basename, 0)
+                if sz > 0 and sz >= oversized_threshold:
+                    oversized.append(basename)
+                else:
+                    merge_candidates.append(basename)
 
-            if manifest.get("mode") in ("cmssw", "simulator"):
-                merge_root_tier(ds_tier, tier_files, step_idx, out_dir, manifest, work_dir)
-            else:
-                print(f"  Non-CMSSW mode: downloading {len(tier_files)} ROOT files to {out_dir}")
-                for rf in tier_files:
-                    dest = os.path.join(out_dir, os.path.basename(rf))
-                    if rf.startswith("root://") or rf.startswith("davs://"):
-                        stageout.download_file(rf, dest, grid_write_cmd)
-                    elif os.path.isfile(rf):
-                        shutil.copy2(rf, dest)
-                    print(f"    Fetched: {dest}")
+            # Remote-copy oversized files directly (skip scratch entirely)
+            if oversized:
+                print(f"Tier {ds_tier}: {len(oversized)} oversized file(s) — remote copy (skip scratch)")
+                for basename in oversized:
+                    out_name = f"{uuid.uuid4()}.root"
+                    src_lfn = unmerged_root_lfns[basename]
+                    dst_lfn = f"{merged_lfn_dir}/{out_name}"
+                    src_pfn, _ = stageout.resolve_write_pfn(src_lfn, siteconfig)
+                    dst_pfn, dst_cmd = stageout.resolve_write_pfn(dst_lfn, siteconfig)
+                    stageout.mkdir_p(os.path.dirname(dst_pfn), dst_cmd)
+                    stageout.remote_copy(src_pfn, dst_pfn, dst_cmd)
+                    sz = _manifest_sizes.get(basename, 0)
+                    print(f"    {basename} -> {out_name} ({sz / (1024**3):.1f} GB)")
+                    grid_merged_meta.setdefault(ds_name, []).append({
+                        "lfn": f"{merged_lfn_dir}/{out_name}",
+                        "size": sz,
+                        "adler32": "",
+                    })
 
-            # Upload merged files to grid
-            print(f"  Uploading merged output to grid...")
-            for fname in sorted(os.listdir(out_dir)):
-                local_file = os.path.join(out_dir, fname)
-                if os.path.isfile(local_file):
-                    lfn = f"{merged_lfn_dir}/{fname}"
-                    pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
-                    pfn_dir = os.path.dirname(pfn)
-                    stageout.mkdir_p(pfn_dir, cmd)
-                    stageout.upload_file(local_file, pfn, cmd)
+            # Merge candidates: batch by size → download → merge → upload → cleanup scratch
+            if merge_candidates:
+                file_sizes_map = {b: _manifest_sizes.get(b, 0) for b in merge_candidates}
+                batches = batch_by_size(merge_candidates, max_merge_size, file_sizes=file_sizes_map)
+                print(f"Tier {ds_tier}: {len(merge_candidates)} files in {len(batches)} batch(es) "
+                      f"(step_index={step_idx})")
+
+                out_dir = os.path.join(work_dir, f"_merged_{ds_tier}")
+                for batch_idx, batch in enumerate(batches):
+                    # Download batch to scratch
+                    local_files = []
+                    for basename in batch:
+                        lfn = unmerged_root_lfns[basename]
+                        pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
+                        local = os.path.join(work_dir, basename)
+                        try:
+                            stageout.download_file(pfn, local, cmd)
+                            local_files.append(local)
+                        except Exception as e:
+                            print(f"    WARNING: download failed for {basename}: {e}")
+                            try:
+                                read_pfn, _ = stageout.resolve_read_pfn(lfn, siteconfig)
+                                local_files.append(read_pfn)
+                                print(f"    Falling back to direct access: {read_pfn}")
+                            except Exception:
+                                print(f"    Skipping {basename}")
+
+                    if not local_files:
+                        print(f"  Batch {batch_idx+1}/{len(batches)}: no files available, skipping")
+                        continue
+
+                    # Merge
+                    os.makedirs(out_dir, exist_ok=True)
+                    if manifest.get("mode") in ("cmssw", "simulator"):
+                        merge_root_tier(ds_tier, local_files, step_idx, out_dir, manifest, work_dir)
+                    else:
+                        for rf in local_files:
+                            if os.path.isfile(rf):
+                                out_name = f"{uuid.uuid4()}.root"
+                                dest = os.path.join(out_dir, out_name)
+                                shutil.copy2(rf, dest)
+
+                    # Upload merged outputs, collect metadata, and free scratch
+                    for fname in sorted(os.listdir(out_dir)):
+                        local_file = os.path.join(out_dir, fname)
+                        if os.path.isfile(local_file):
+                            lfn = f"{merged_lfn_dir}/{fname}"
+                            # Compute checksum before upload
+                            cksum = 1
+                            fsize = os.path.getsize(local_file)
+                            with open(local_file, "rb") as cf:
+                                while True:
+                                    chunk = cf.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    cksum = zlib.adler32(chunk, cksum) & 0xFFFFFFFF
+                            grid_merged_meta.setdefault(ds_name, []).append({
+                                "lfn": lfn,
+                                "size": fsize,
+                                "adler32": "%08x" % cksum,
+                            })
+                            pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
+                            stageout.mkdir_p(os.path.dirname(pfn), cmd)
+                            stageout.upload_file(local_file, pfn, cmd)
+                            os.remove(local_file)
+
+                    # Cleanup downloaded inputs
+                    for lf in local_files:
+                        if os.path.isfile(lf):
+                            os.remove(lf)
+
+                    batch_sz = sum(file_sizes_map.get(b, 0) for b in batch)
+                    print(f"  Batch {batch_idx+1}/{len(batches)}: {len(local_files)} files "
+                          f"({batch_sz / (1024**2):.0f} MB) merged & uploaded")
         else:
             # Local mode: write directly to local PFN path
             out_dir = lfn_to_pfn(local_pfn_prefix, merged_lfn_dir)
@@ -4877,29 +5150,31 @@ if root_files:
         tier = ds.get("data_tier", "")
         merged_base = ds.get("merged_lfn_base", "")
         ds_name = ds.get("dataset_name", "")
-        # In grid mode, merged files are in local temp dir; in local mode, at PFN path
         if stageout_mode == "grid":
-            merged_dir = os.path.join(work_dir, f"_merged_{tier}")
+            # Grid mode: metadata collected during per-batch upload (files already
+            # uploaded and deleted from scratch)
+            files = grid_merged_meta.get(ds_name, [])
         else:
-            merged_dir = lfn_to_pfn(local_pfn_prefix, f"{merged_base}/{group_index:06d}")
-        if os.path.isdir(merged_dir):
+            # Local mode: scan local PFN directory
             files = []
-            for f in sorted(os.listdir(merged_dir)):
-                fp = os.path.join(merged_dir, f)
-                if os.path.isfile(fp):
-                    # Compute adler32 checksum for Rucio registration
-                    cksum = 1  # adler32 initial value
-                    with open(fp, "rb") as cf:
-                        while True:
-                            chunk = cf.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            cksum = zlib.adler32(chunk, cksum) & 0xFFFFFFFF
-                    files.append({
-                        "lfn": f"{merged_base}/{group_index:06d}/{f}",
-                        "size": os.path.getsize(fp),
-                        "adler32": "%08x" % cksum,
-                    })
+            merged_dir = lfn_to_pfn(local_pfn_prefix, f"{merged_base}/{group_index:06d}")
+            if os.path.isdir(merged_dir):
+                for f in sorted(os.listdir(merged_dir)):
+                    fp = os.path.join(merged_dir, f)
+                    if os.path.isfile(fp):
+                        cksum = 1
+                        with open(fp, "rb") as cf:
+                            while True:
+                                chunk = cf.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                cksum = zlib.adler32(chunk, cksum) & 0xFFFFFFFF
+                        files.append({
+                            "lfn": f"{merged_base}/{group_index:06d}/{f}",
+                            "size": os.path.getsize(fp),
+                            "adler32": "%08x" % cksum,
+                        })
+        if files:
             merge_output["datasets"][ds_name] = {
                 "data_tier": tier,
                 "files": files,
@@ -5372,6 +5647,24 @@ def download_file(pfn, local_path, command):
         )
     else:
         raise ValueError(f"Unknown stageout command: {command}")
+
+
+def remote_copy(src_pfn, dst_pfn, command):
+    """Copy between two remote PFNs (server-side TPC when possible)."""
+    command = _normalize_cmd(command)
+    if command == "cp":
+        os.makedirs(os.path.dirname(dst_pfn), exist_ok=True)
+        shutil.copy2(src_pfn, dst_pfn)
+        print(f"  cp: {src_pfn} -> {dst_pfn}")
+    elif command in ("xrdcp", "gfal-copy"):
+        _run_cmd(
+            ["gfal-copy", "-f", src_pfn, dst_pfn],
+            description=f"remote copy {os.path.basename(src_pfn)}",
+            timeout=1200,
+        )
+        print(f"  gfal-copy (remote): {os.path.basename(src_pfn)} -> {os.path.basename(dst_pfn)}")
+    else:
+        raise ValueError(f"Unknown command: {command}")
 
 
 def list_dir(pfn_dir, command):

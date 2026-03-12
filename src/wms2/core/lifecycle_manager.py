@@ -836,6 +836,12 @@ class RequestLifecycleManager:
                 # No error_handler or completion.action == "hold"
                 await self.transition(request, RequestStatus.HELD)
                 return
+            # Proactive site exclusion: when WUs have failed, check if a
+            # site is consistently broken and exclude it from idle landings.
+            dag = await self.db.get_dag(dag.id)
+            if dag:
+                await self._check_mid_dag_site_exclusions(dag, workflow)
+
             # Tail WU escalation: when most WUs are done, bump remaining
             # jobs' priority so the last few WUs don't block round completion.
             await self._maybe_escalate_tail_priority(dag, workflow, result)
@@ -1174,6 +1180,118 @@ class RequestLifecycleManager:
         result["bad_input_files"] = sorted(bad_files)
         return result
 
+    # ── Proactive Mid-DAG Site Exclusion ─────────────────────
+
+    async def _check_mid_dag_site_exclusions(self, dag, workflow):
+        """Detect failing sites during a running DAG and exclude them from
+        idle landing jobs so new WUs don't land at broken sites.
+
+        Reads post.json files from already-failed WUs, identifies problem
+        sites via ErrorHandler.analyze_site_failures(), then uses condor_edit
+        to add Requirements exclusions on idle landing jobs.
+        """
+        if not dag.submit_dir or not dag.dagman_cluster_id:
+            return
+
+        nc = dag.node_counts or {}
+        # Check if we already ran exclusion analysis for the current set of failures
+        wus_failed = nc.get("wus_failed", 0)
+        if wus_failed < 1:
+            return
+        last_exclusion_at = nc.get("_mid_dag_exclusion_wus_failed", 0)
+        if wus_failed <= last_exclusion_at:
+            return  # no new failures since last check
+
+        already_excluded = nc.get("_mid_dag_excluded_sites", [])
+
+        # Read post.json files from filesystem (may be on sshfs — run in thread pool)
+        from wms2.core.error_handler import ErrorHandler
+        eh = ErrorHandler(None, self.condor, self.settings)
+        loop = asyncio.get_running_loop()
+        try:
+            post_data = await loop.run_in_executor(
+                None, eh.read_post_data, dag.submit_dir
+            )
+        except Exception:
+            logger.debug(
+                "Mid-DAG exclusion: failed to read post data for %s",
+                workflow.request_name, exc_info=True,
+            )
+            return
+
+        if not post_data:
+            return
+
+        problem_sites = eh.analyze_site_failures(post_data)
+        # Only consider newly detected sites
+        new_sites = [s for s in problem_sites if s not in already_excluded]
+
+        # Record that we checked at this failure count (even if no new sites)
+        nc["_mid_dag_exclusion_wus_failed"] = wus_failed
+        if not new_sites:
+            await self.db.update_dag(dag.id, node_counts=nc)
+            return
+
+        # Find idle landing jobs and add exclusion Requirements
+        try:
+            landing_jobs = await self.condor.query_dag_landing_jobs(
+                dag.dagman_cluster_id,
+                schedd_name=dag.schedd_name,
+            )
+        except Exception:
+            logger.debug(
+                "Mid-DAG exclusion: failed to query landing jobs for %s",
+                workflow.request_name, exc_info=True,
+            )
+            return
+
+        if not landing_jobs:
+            logger.debug(
+                "Mid-DAG exclusion: no idle landing jobs for %s",
+                workflow.request_name,
+            )
+            nc["_mid_dag_excluded_sites"] = already_excluded + new_sites
+            await self.db.update_dag(dag.id, node_counts=nc)
+            return
+
+        # Build exclusion clause for all problem sites (existing + new)
+        all_excluded = already_excluded + new_sites
+        exclusion_clauses = " && ".join(
+            f'TARGET.GLIDEIN_CMSSite =!= "{site}"' for site in all_excluded
+        )
+        # Also remove excluded sites from DESIRED_Sites
+        excluded_set = set(all_excluded)
+
+        edited_count = 0
+        for job in landing_jobs:
+            cid = job["cluster_id"]
+            pid = job["proc_id"]
+            try:
+                constraint = f"ClusterId == {cid} && ProcId == {pid}"
+                await self.condor.edit_job_attr(
+                    constraint,
+                    "Requirements",
+                    f"({exclusion_clauses}) && ({job['requirements']})"
+                    if job.get("requirements") else exclusion_clauses,
+                    schedd_name=dag.schedd_name,
+                )
+                edited_count += 1
+            except Exception:
+                logger.debug(
+                    "Mid-DAG exclusion: failed to edit landing job %d.%d",
+                    cid, pid,
+                )
+
+        nc["_mid_dag_excluded_sites"] = all_excluded
+        await self.db.update_dag(dag.id, node_counts=nc)
+
+        logger.info(
+            "Mid-DAG site exclusion: excluded %s from %d idle landing jobs "
+            "for %s (DAG %s)",
+            new_sites, edited_count, workflow.request_name,
+            dag.dagman_cluster_id,
+        )
+
     # ── Tail WU Priority Escalation ──────────────────────────
 
     async def _maybe_escalate_tail_priority(self, dag, workflow, poll_result):
@@ -1209,21 +1327,17 @@ class RequestLifecycleManager:
 
         try:
             # Edit all non-completed payload jobs under this DAG hierarchy.
-            # We bump their HTCondor priority by the configured boost.
-            constraint = (
-                f"DAGManJobId == {dag.dagman_cluster_id} "
-                f"&& JobUniverse =!= 7 "
-                f"&& JobStatus =!= 4"  # not completed
-            )
-            await self.condor.edit_job_attr(
-                constraint, "Priority",
+            # Two-level DAG: outer DAGMan's children are inner sub-DAGMans
+            # (JobUniverse == 7), payload jobs sit under those.
+            count = await self.condor.edit_dag_payload_attr(
+                dag.dagman_cluster_id, "Priority",
                 str(boost),
                 schedd_name=dag.schedd_name,
             )
             logger.info(
-                "Tail escalation: bumped priority to %d for remaining jobs "
+                "Tail escalation: bumped priority to %d for %d payload jobs "
                 "in DAG %s (%d/%d WUs done) [%s]",
-                boost, dag.dagman_cluster_id, wus_done, total_wus,
+                boost, count, dag.dagman_cluster_id, wus_done, total_wus,
                 workflow.request_name,
             )
             # Mark escalation so we don't repeat

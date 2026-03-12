@@ -4,9 +4,9 @@
 
 | Field | Value |
 |---|---|
-| **Spec Version** | 2.13.0 |
+| **Spec Version** | 2.14.0 |
 | **Status** | DRAFT |
-| **Date** | 2026-03-10 |
+| **Date** | 2026-03-12 |
 | **Authors** | CMS Computing |
 | **Supersedes** | WMCore / WMAgent |
 
@@ -1454,10 +1454,14 @@ class DAGPlanner:
         Two modes (see docs/processing.md §4.2):
         - Fixed count (Round 0 / non-adaptive): jobs_per_work_unit from config
         - Measured sizing (Round 1+): use measured per-tier output sizes to
-          target min_merge_size..max_merge_size for the largest tier
+          target ~max_merge_size for the smallest non-oversized tier.
+          Tiers where per-job output >= 75% of max_merge_size are "oversized"
+          and excluded from sizing (they are remote-copied directly during
+          merge, not downloaded to scratch). Merge disk is not a constraint —
+          the merge script processes one batch at a time (see DD-19).
         """
         if measured_sizes:
-            # Target: largest-tier merged file in [min_merge_size, max_merge_size]
+            # Target: smallest non-oversized tier → max_merge_size
             largest_tier_per_job = max(measured_sizes.values())
             jobs_per_group = max(1, int(
                 target_merge_size / largest_tier_per_job
@@ -1760,7 +1764,16 @@ WMS2 supports three stageout modes, selected at import time (`stageout_mode` in 
 
 **LFN→PFN resolution**: Each CMS site publishes a `storage.json` file (fetched from SITECONF via CVMFS) that maps logical file names to physical locations. The resolution supports three formats: prefix (simple concatenation, used by CERN), rules (regex-based rewriting, used by FNAL), and chained rules (virtual protocol resolution followed by rules, used by KIT/DESY). The `wms2_stageout.py` utility, transferred to worker nodes alongside the sandbox, implements all three formats.
 
-**Merge output metadata**: The merge job writes `merge_output.json` containing per-dataset file lists with LFN, size, adler32 checksum, and the execution site (`GLIDEIN_CMSSite`). This bridges the DAG execution layer to the Output Manager for Rucio registration.
+**Per-batch merge execution**: The merge job processes files one batch at a time to limit scratch disk usage. For each output tier, the merge script classifies files from the proc output manifest:
+
+- **Oversized files** (individual `size_bytes` >= 75% of `max_merge_size`): remote-copied directly between storage endpoints via `gfal-copy` (third-party copy when the storage supports it). These files never touch worker node scratch — they are already larger than the merge target and would not benefit from merging.
+- **Merge candidates**: grouped into batches of up to `max_merge_size` (~4 GB default) using manifest `size_bytes`. Each batch is processed sequentially: download from unmerged storage → merge via `cmsRun mergeProcess()` (with hadd/uproot fallback) → compute adler32 checksum → upload to merged storage → delete batch files from scratch. Peak scratch usage is approximately 2× target merge size (~8 GB) regardless of work unit size.
+
+This per-batch approach decouples work unit sizing from merge disk capacity. Grid worker nodes typically have limited scratch (2–3 GB/core, ~20 GB for an 8-core slot). Previously the merge job downloaded all proc outputs at once, making scratch disk the binding constraint on work unit size. With per-batch processing, work unit size is determined purely by the target merged file size.
+
+In local mode, files are read directly from the local filesystem and merged in place — no download/upload cycle is needed.
+
+**Merge output metadata**: The merge job writes `merge_output.json` containing per-dataset file lists with LFN, size, adler32 checksum, and the execution site (`GLIDEIN_CMSSite`). In grid mode, metadata is collected during each batch's upload (since files are deleted from scratch after upload). This bridges the DAG execution layer to the Output Manager for Rucio registration.
 
 #### 4.5.2 Splitting Algorithms
 
@@ -3570,6 +3583,16 @@ FJR RSS, while it only samples at event boundaries and misses intra-event peaks,
 **Rejected alternative**: *Cgroup peak as primary source* (the previous design). Produces wildly variable `request_memory` across rounds (oscillating between 7 GB and 14 GB for the same workload), over-allocates slot resources on most jobs, and narrows the pool of matching sites unnecessarily.
 
 **Rejected alternative**: *P90 or median of cgroup peaks across jobs*. More stable than MAX, but still higher than necessary for most jobs and still subject to sampling artifacts. The fundamental problem is that 2-second sampling of a 24-second transient creates a biased estimator — no percentile choice fixes this.
+
+### DD-19: Per-batch merge with oversized file remote copy
+
+**Decision**: The merge script downloads and merges one batch (~4 GB) at a time, cleaning scratch between batches. Files that are individually >= 75% of the target merge size are remote-copied directly between storage endpoints (never downloaded to scratch).
+
+**Why**: Grid worker nodes have limited scratch disk — typically 2–3 GB per core (e.g. ~20 GB for an 8-core slot at T2_CH_CERN). Multi-tier StepChain workflows can produce 15+ GB per proc job (e.g. 14 GB AODSIM + 1 GB MINIAODSIM + 15 MB NANOAODSIM). Under the previous approach (download all proc outputs, then merge), a work unit with even 3 proc jobs required ~96 GB of scratch, far exceeding the ~20 GB available. This made merge disk the binding constraint on work unit size, limiting throughput to 3 jobs per work unit. With per-batch processing, peak scratch is ~8 GB regardless of work unit size, and WU sizing is driven purely by the target merged file size.
+
+**Rejected alternative**: *Download all files to scratch, merge all at once* (the previous design). Simple but unscalable — scratch disk becomes the bottleneck for multi-tier workflows with large output tiers. Requires either very small work units (poor throughput) or very large scratch requests (limits site matching).
+
+**Rejected alternative**: *Per-tier merge jobs* (one merge job per output tier, like WMAgent). Would solve the disk problem but fundamentally changes the DAG structure — one merge group would need N merge nodes instead of one. Increases DAGMan complexity, scheduling overhead, and makes site pinning harder (all N merge jobs must land at the same site). Per-batch processing within a single merge job achieves the same disk efficiency without DAG restructuring.
 
 ---
 

@@ -214,6 +214,13 @@ spec. DBS writes remain disabled.
   "N non-terminal request(s)" at INFO level. DAG polling details are DEBUG-only.
   Fix: add one-line per-request progress summary at INFO level.
   File: `src/wms2/core/lifecycle_manager.py:719`.
+- **~~WU sizing ignores merge disk footprint~~ (FIXED)** — Merge script
+  refactored to per-batch processing: downloads one batch (~4 GB) at a time,
+  merges, uploads, cleans scratch before next batch. Peak scratch ≈ 8 GB
+  regardless of WU size. Oversized files (>= 75% of target) are remote-copied
+  directly (gfal-copy TPC) without touching scratch. WU sizing no longer
+  capped by merge disk — sized purely by target merged file size.
+  File: `src/wms2/core/dag_planner.py`.
 - **SyntaxWarnings in dag_planner.py** — Invalid escape sequences `\s`, `\d` in
   embedded bash script at line ~1941 and regex at line ~4560. Will become errors
   in future Python versions. Fix: escape backslashes in the Python string.
@@ -255,24 +262,20 @@ spec. DBS writes remain disabled.
 
 ### Current status
 
-**Global pool commissioning — debugging merge failures.** Two bugs found
-and fixed in source: (1) `num_proc_jobs` NameError in merge script metrics
-aggregation crashes all WUs after successful merge; (2) NANOEDMAODSIM1 tier
-not matched by stageout regex, so NanoAOD outputs silently discarded.
-Both fixes applied to `dag_planner.py` but existing deployed DAGs on
-read-only spool cannot be updated — affected rounds will fail and need
-fresh replan.
+**Global pool commissioning — per-batch merge + oversized file skip.**
+Merge script refactored to per-batch processing: downloads one batch (~4 GB)
+at a time to scratch, merges, uploads merged output, cleans scratch before
+next batch. Peak scratch ≈ 8 GB regardless of WU size. Files >= 75% of target
+merge size are remote-copied directly (gfal-copy TPC), never touching scratch.
+WU sizing no longer capped by merge disk — sized purely by target file size.
+Merge node request_disk = 8 GB (2x target).
+
+Also deployed: WU-level recovery (RETRY on outer SUBDAG + site exclusion
+in wu_post.sh), proactive mid-DAG site exclusion, tail escalation fix for
+two-level DAGs.
 
 Active requests:
-- **00002**: active, round 1, 250 WUs — global pool (GS+DRPremix 5-step
-  StepChain). All WUs failing at merge metrics aggregation (`num_proc_jobs`
-  bug). AODSIM+MINIAODSIM merged and uploaded to EOS, but WUs marked failed.
-  66/300,000 events. Will need fresh replan after DAG failure.
-  Sites: T2_CH_CERN (112), T1_US_FNAL (28), T2_IT_Pisa (21), others.
-- **00057**: active, round 1, 31 WUs — global pool (LHEGen+DRPremix).
-  Early stage: landing nodes done, proc jobs running. Will hit same
-  merge bugs when merges start. 0/3,000,000 events.
-  Sites: T2_CH_CERN (26), T1_DE_KIT (2), others.
+- **00057**: needs resubmission with fixed WU sizing (3 procs/WU instead of 8)
 - **00058**: completed — global pool
 - **00059**: completed — local pool
 - **00060**: paused (HELD), round 2, 32910/60,000 events — global pool

@@ -131,6 +131,9 @@ class Settings(BaseSettings):
     error_hold_threshold: float = 0.20
     error_max_rescue_attempts: int = 3
 
+    # WU-level recovery — outer DAG retries failed SUBDAGs at a different site
+    wu_retry_count: int = 1  # RETRY count on outer SUBDAG nodes (0 = disabled)
+
     # Site Banning
     site_ban_duration_days: int = 7
     site_ban_promotion_threshold: int = 3
@@ -156,7 +159,13 @@ class Settings(BaseSettings):
 
     # Periodic remove thresholds
     periodic_remove_held_timeout_sec: int = 420     # 7 min — kill jobs stuck in held
-    periodic_remove_disk_limit_kb: int = 20971520   # 20 GB
+    periodic_remove_disk_limit_kb: int = 20971520   # 20 GB — for proc/landing/cleanup nodes
+
+    # Merge disk budget — maximum scratch disk a merge job may use (KB).
+    # Limits jobs_per_work_unit so that the merge job's total disk footprint
+    # (all proc outputs + merged outputs) stays within budget.
+    # Merge request_disk and periodic_remove are set to this dynamically.
+    max_merge_disk_kb: int = 104857600  # 100 GB
 
     # Idle timeout tiers (seconds) — selected by job priority level
     idle_timeout_high_sec: int = 14400       # 4h for high-priority jobs
