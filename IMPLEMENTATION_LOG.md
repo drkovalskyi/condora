@@ -6,6 +6,93 @@
 
 ---
 
+## 2026-03-13 — Throughput-based events_per_job optimization
+
+### What was done
+
+Added adaptive throughput optimization that scales `events_per_job` to target a
+configurable wall clock time per proc job. After round 1+ completes, median wall
+time per step is measured from WU metrics and used to compute optimal
+`events_per_job` for the next round. When measured data is available,
+`MaxWallTimeMinsRun` is set on proc/merge submit files with a 1.5× safety factor
+for tighter wall time enforcement than the generic 48h hard cap.
+
+**Motivation**: The pilot round (40 events at test_fraction=0.01) gives inflated
+time_per_event (16.68 s/ev measured vs 5.0 s/ev actual at 4000 events) due to
+startup overhead dominating. Without throughput optimization, `events_per_job`
+remains static at the import-time value even when measured data shows jobs finish
+much faster or slower than desired. Additionally, `MaxWallTimeMinsRun` previously
+used the spec's CPU-time-based `TimePerEvent` with a 3× safety factor (unreliable),
+or was disabled entirely (relying on zombie detection + 48h hard cap).
+
+**Changes**:
+
+1. **New setting `target_wall_time_hours`** (default 8.0, 0 = disabled) — added to
+   `Settings`, API `EDITABLE_FIELDS`, GET `/lifecycle/settings`, web UI
+   `editableFields`, and CLI `--target-wall-time-hours`. Per-request override via
+   `config_data["target_wall_time_hours"]`.
+
+2. **`compute_throughput_optimization()`** in `adaptive.py` — core algorithm:
+   - For each step, computes median of `wall_sec` array (robust to outliers)
+   - Sums medians across steps → `total_median_wall_sec`
+   - `measured_wall_per_event = total_median_wall_sec / current_events_per_job`
+   - `ideal_epj = (target_wall_time_sec - startup_overhead) / measured_wall_per_event`
+   - Clamped to max 2× change per round, minimum 100 events, rounded to nearest 100
+   - Returns `{tuned_events_per_job, measured_wall_per_event_sec, estimated_total_wall_sec}`
+
+3. **Wired into `compute_round_optimization()`** — called after job splitting (uses
+   post-split epj), only for round >= 1 (pilot data unreliable). Result stored as
+   `throughput_optimization` in adaptive output. Fixed `tuned_events_per_job` emission:
+   was only set when `job_multiplier > 1`, now emits whenever value differs from input.
+
+4. **Lifecycle manager** — `_compute_adaptive_params()` resolves per-request override
+   and passes `target_wall_time_sec` + `current_round` to optimizer. `complete_round()`
+   logs throughput optimization results.
+
+5. **Measured-data `MaxWallTimeMinsRun`** — `_compute_max_wall_time_mins()` for
+   proc/merge nodes uses `measured_wall_per_event_sec × events_per_job + 600s` with
+   1.5× safety factor when available. Passed to `_write_submit_file()` which adds
+   `+MaxWallTimeMinsRun` classad and wall-time check in `periodic_remove` alongside
+   existing zombie detection + hard cap.
+
+**Example (request 00057)**: 4000 events/job, median wall ~19,000s (5.3h), target 8h:
+- `measured_wall_per_event = 19000/4000 = 4.75 s/ev`
+- `ideal_epj = (28800-600)/4.75 = 5937 → 5900`
+- `MaxWallTimeMinsRun = (4.75×5900+600)×1.5/60 = 716 min (11.9h)`
+
+Files:
+- `config.py`: `target_wall_time_hours` setting
+- `api/lifecycle.py`: editable field + GET response
+- `static/js/components/settings.js`: UI editableFields
+- `cli.py`: `--target-wall-time-hours` arg → `config_data`
+- `adaptive.py`: `compute_throughput_optimization()`, wired into orchestrator
+- `lifecycle_manager.py`: resolve override, pass params, log results
+- `dag_planner.py`: measured-data `MaxWallTimeMinsRun` for proc/merge nodes
+
+### Design decisions
+
+- **Round 0 skipped**: Pilot data is unreliable due to startup overhead dominating
+  at few events. Throughput optimization only activates at round >= 1.
+- **Median, not mean**: Robust to outliers (e.g. one job stuck at a slow site).
+- **Max 2× change per round**: Prevents oscillation; converges over 2-3 rounds.
+- **1.5× safety factor for measured wall time**: Measured data is accurate, margin
+  covers site-to-site variation. Compared to 3× for spec-based estimates.
+- **Composition with job splitting**: Job splitting runs first (may reduce threads
+  and divide epj), throughput optimization runs second using actual measured data
+  that already reflects the threading configuration.
+
+### Verification
+
+- All modified files compile without errors
+- Unit tests: `compute_throughput_optimization()` tested with basic, 2× clamp
+  (up/down), disabled, no-data, and min-events scenarios — all pass
+- Unit tests: `_compute_max_wall_time_mins()` tested with/without measured data,
+  proc/merge/landing/cleanup — all pass, matches plan's example (716 min = 11.9h)
+- Matrix smoke tests: 3/5 passed (fault tests); 2 pre-existing failures (DAG
+  timeout + rescue, unrelated to this change)
+
+---
+
 ## 2026-03-12 — Per-batch merge + oversized file remote copy
 
 ### What was done
