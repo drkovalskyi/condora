@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     test_lfn_user: str = ""            # LFN path component (e.g. "username.wms2")
     rucio_test_account: str = ""       # Rucio account for test mode
 
+    # Singularity/Apptainer container image for job execution.
+    # "" = disabled (no +SingularityImage classad).
+    # "auto" = derive from first step's SCRAM_ARCH (e.g. el8 → cmssw/el8:x86_64).
+    # Explicit path = use directly (e.g. /cvmfs/unpacked.cern.ch/.../cmssw/el8:x86_64).
+    singularity_image: str = ""
+
     # HTCondor
     condor_host: str = ""  # collector address (e.g. "localhost:9618")
     schedd_name: str | None = None  # explicit schedd; auto-discovered if None

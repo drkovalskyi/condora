@@ -27,6 +27,34 @@ PILEUP_CACHE_TTL = 7 * 24 * 3600  # 7 days
 PILEUP_CACHE_FILE = "/mnt/shared/tmp/wms2/pileup_cache.json"
 _pileup_cache_loaded = False
 
+# CVMFS base for unpacked CMS container images
+_CMS_IMAGE_BASE = "/cvmfs/unpacked.cern.ch/registry.hub.docker.com/cmssw"
+
+
+def _resolve_singularity_image(
+    setting: str, manifest_steps: list[dict[str, Any]]
+) -> str | None:
+    """Resolve the singularity_image setting to a concrete image path.
+
+    Returns None if disabled (""), or a CVMFS image path for "auto"
+    (derived from the first step's SCRAM_ARCH), or the explicit path.
+    """
+    if not setting:
+        return None
+    if setting != "auto":
+        return setting
+    # Auto: derive from first step's SCRAM_ARCH (e.g. el8_amd64_gcc11 → el8)
+    if not manifest_steps:
+        return None
+    arch = manifest_steps[0].get("scram_arch", "")
+    os_tag = arch.split("_")[0] if arch else ""
+    # Map slc7 → el7 for the container name
+    if os_tag == "slc7":
+        os_tag = "el7"
+    if not os_tag:
+        return None
+    return f"{_CMS_IMAGE_BASE}/{os_tag}:x86_64"
+
 
 def _load_pileup_cache() -> None:
     """Load pileup cache from disk on first access."""
@@ -573,6 +601,15 @@ class DAGPlanner:
                 logger.info("Test mode: restricted to Rucio-enabled sites (%d): %s",
                             len(effective_allowed), effective_allowed)
 
+        # Resolve container image from settings + SCRAM_ARCH
+        resolved_extra = dict(config.get("extra_classads") or {})
+        sing_image = _resolve_singularity_image(
+            self.settings.singularity_image, manifest_steps,
+        )
+        if sing_image:
+            resolved_extra["SingularityImage"] = f'"{sing_image}"'
+            logger.info("Plan %s: SingularityImage = %s", workflow.request_name, sing_image)
+
         dag_file_path = _generate_dag_files(
             submit_dir=submit_dir,
             workflow_id=str(workflow.id),
@@ -589,7 +626,7 @@ class DAGPlanner:
             banned_sites=banned_sites or None,
             pileup_files=pileup_files or None,
             job_priority=job_priority,
-            extra_classads=config.get("extra_classads"),
+            extra_classads=resolved_extra or None,
             stageout_mode=effective_stageout,
             pileup_remote_read=self.settings.pileup_remote_read,
             spool_mode=use_spool,

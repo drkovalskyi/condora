@@ -1075,6 +1075,7 @@ class MatrixRunner:
             cleanup_executable="/bin/true",
             local_pfn_prefix="/mnt/shared",
             max_input_files=0,
+            pilot_fraction=0,  # tests are always round 0; skip pilot event reduction
         )
 
     async def run_workflow(self, wf: WorkflowDef) -> WorkflowResult:
@@ -1144,12 +1145,13 @@ class MatrixRunner:
             jpwu = max(wf.num_jobs // wf.num_work_units, 1)
         else:
             jpwu = max(wf.num_jobs, 1)
-        settings = self._settings.model_copy(
-            update={
-                "submit_base_dir": submit_dir,
-                "jobs_per_work_unit": jpwu,
-            }
-        )
+        settings_update = {
+            "submit_base_dir": submit_dir,
+            "jobs_per_work_unit": jpwu,
+        }
+        if wf.singularity_image:
+            settings_update["singularity_image"] = wf.singularity_image
+        settings = self._settings.model_copy(update=settings_update)
 
         planner = DAGPlanner(
             repository=repo,
