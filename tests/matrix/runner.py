@@ -1318,7 +1318,8 @@ class MatrixRunner:
             probe_node_name = _inject_probe_node(wf, mg_dirs[0])
 
         # Step 2: Generate replan nodes — one between each consecutive pair
-        venv_python = str(Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python")
+        repo_root = str(Path(__file__).resolve().parents[2])
+        venv_python = str(Path(repo_root) / ".venv" / "bin" / "python")
         dag_path = wf_dir / "workflow.dag"
         dag_content = dag_path.read_text()
         dag_content += "\n# Adaptive replan nodes between work units\n"
@@ -1360,6 +1361,7 @@ class MatrixRunner:
                 "universe = local",
                 f"executable = {venv_python}",
                 f"arguments = {replan_args}",
+                f"initialdir = {repo_root}",
                 f"output = {wf_dir}/{node_name}.out",
                 f"error = {wf_dir}/{node_name}.err",
                 f"log = {wf_dir}/{node_name}.log",

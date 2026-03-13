@@ -5178,6 +5178,13 @@ if root_entries:
                 json.dump(work_unit, f, indent=2)
             print(f"Wrote work_unit_metrics.json: {len(per_step)} step(s), {len(all_proc_metrics)} jobs")
 
+    # Ensure work_unit_metrics.json exists (transfer_output_files requires it)
+    wu_path = os.path.join(group_dir, "work_unit_metrics.json")
+    if not os.path.isfile(wu_path):
+        with open(wu_path, "w") as f:
+            json.dump({"group_index": group_index, "num_proc_jobs": 0, "per_step": {}}, f, indent=2)
+        print("Wrote work_unit_metrics.json: empty (no proc metrics found)")
+
     # Write merge_output.json for DAGMonitor → OutputManager bridge
     merge_output = {
         "group_index": group_index,
