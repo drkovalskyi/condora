@@ -150,6 +150,18 @@ def _compute_adaptive_params(config, dag, workflow, new_metrics, settings):
 
     current_round = getattr(workflow, "current_round", 0) or 0
 
+    # ── Collect inline WU metrics from enriched completed_work_units ──
+    # In spool mode the schedd cleans up proc_*_metrics.json before we
+    # get here.  The DAG monitor captured the data into the DB at WU
+    # completion time — pass it through so the optimizer doesn't depend
+    # on disk files.
+    inline_wu_metrics = []
+    for item in (dag.completed_work_units or []):
+        if isinstance(item, dict) and item.get("metrics"):
+            m = item["metrics"]
+            if m.get("num_proc_jobs", 0) > 0:
+                inline_wu_metrics.append(m)
+
     try:
         return compute_round_optimization(
             submit_dir=dag.submit_dir,
@@ -166,6 +178,7 @@ def _compute_adaptive_params(config, dag, workflow, new_metrics, settings):
             split_tmpfs=config.get("split_tmpfs", False),
             target_wall_time_sec=target_wall_time_sec,
             current_round=current_round,
+            inline_wu_metrics=inline_wu_metrics or None,
         )
     except Exception:
         logger.exception("Adaptive optimization failed — using defaults")

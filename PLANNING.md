@@ -245,6 +245,13 @@ spec. DBS writes remain disabled.
   `complete_round()` reads from enriched DB data, falls back to disk.
   `wu_names()` helper handles both old (str) and new (dict) formats.
   Files: `models/dag.py`, `dag_monitor.py`, `lifecycle_manager.py`.
+- **~~Adaptive optimizer ignores enriched WU metrics~~ (FIXED)** —
+  `compute_round_optimization()` read `proc_*_metrics.json` from disk
+  independently of the enriched DB data, so in spool mode it always fell
+  back to default memory (`2000 × ncores`), ignoring measured FJR RSS.
+  Fixed by adding `wu_metrics_to_analyzed()` converter and passing inline
+  metrics from `_compute_adaptive_params()` through to the optimizer.
+  Files: `adaptive.py`, `lifecycle_manager.py`.
 
 ## Technical debt
 

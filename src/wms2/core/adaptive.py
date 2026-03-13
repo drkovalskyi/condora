@@ -14,6 +14,7 @@ Round 0 is the probe — controlled by first_round_work_units (default 1).
 No separate probe node design needed.
 
 Functions:
+  wu_metrics_to_analyzed   — convert inline work_unit_metrics.json to analyzed format
   analyze_wu_metrics       — read proc_*_metrics.json from a completed merge group
   load_cgroup_metrics      — read proc_*_cgroup.json for subprocess memory data
   merge_round_metrics      — merge metrics across rounds with normalization
@@ -37,6 +38,116 @@ logger = logging.getLogger(__name__)
 
 
 # ── Metrics analysis ─────────────────────────────────────────
+
+
+def wu_metrics_to_analyzed(wu_data: dict) -> dict:
+    """Convert work_unit_metrics.json format to analyze_wu_metrics() result format.
+
+    The merge script aggregates per-job metrics into min/max/mean summaries.
+    This function reconstructs the per-step array format that the adaptive
+    optimizer expects, allowing it to use metrics stored inline in the DB
+    (enriched completed_work_units) when the spool directory has been cleaned up.
+    """
+    per_step = wu_data.get("per_step", {})
+    num_jobs = wu_data.get("num_proc_jobs", 0)
+    if num_jobs == 0:
+        raise ValueError("No proc jobs in work_unit_metrics")
+
+    steps: dict[int, dict[str, list]] = {}
+    nthreads = 1
+
+    for step_key, step_data in per_step.items():
+        si = int(step_key)
+        s: dict[str, list] = {
+            "wall_sec": [], "cpu_eff": [], "peak_rss_mb": [],
+            "events": [], "throughput": [], "cpu_time_sec": [],
+            "nthreads": [],
+        }
+
+        def _get_mean(metric_name: str) -> list:
+            val = step_data.get(metric_name)
+            if isinstance(val, dict):
+                m = val.get("mean", 0)
+                return [m] if m else []
+            elif isinstance(val, (int, float)) and val:
+                return [val]
+            return []
+
+        def _get_peak(metric_name: str) -> list:
+            """For metrics where both average and peak matter."""
+            val = step_data.get(metric_name)
+            if isinstance(val, dict):
+                mx = val.get("max", 0)
+                mn = val.get("mean", mx)
+                if mx and mn and mn != mx:
+                    return [mn, mx]
+                return [mx] if mx else []
+            elif isinstance(val, (int, float)) and val:
+                return [val]
+            return []
+
+        s["wall_sec"] = _get_mean("wall_time_sec")
+        s["cpu_eff"] = _get_mean("cpu_efficiency")
+        # Use [mean, max] so max() gives true peak for memory sizing
+        # while avg() stays close to mean for instance_mem calculation
+        s["peak_rss_mb"] = _get_peak("peak_rss_mb")
+        s["throughput"] = _get_mean("throughput_ev_s")
+        s["cpu_time_sec"] = _get_mean("cpu_time_sec")
+        s["nthreads"] = _get_mean("num_threads")
+
+        # events_processed is a count metric (has total, not mean)
+        ev = step_data.get("events_processed")
+        if isinstance(ev, dict):
+            total = ev.get("total", 0)
+            s["events"] = [total // num_jobs] if total else []
+        elif isinstance(ev, (int, float)) and ev:
+            s["events"] = [int(ev)]
+        else:
+            s["events"] = []
+
+        nt_vals = s["nthreads"]
+        if nt_vals:
+            max_nt = max(int(v) for v in nt_vals)
+            if max_nt > nthreads:
+                nthreads = max_nt
+
+        steps[si] = s
+
+    # Compute aggregates (same logic as analyze_wu_metrics)
+    peak_rss_all = 0.0
+    weighted_eff_num = 0.0
+    weighted_eff_den = 0.0
+
+    for si in sorted(steps):
+        s = steps[si]
+        rss_vals = s["peak_rss_mb"]
+        if rss_vals:
+            peak_rss_all = max(peak_rss_all, max(rss_vals))
+        wall_vals = s["wall_sec"]
+        eff_vals = s["cpu_eff"]
+        if wall_vals and eff_vals:
+            mean_wall = sum(wall_vals) / len(wall_vals)
+            mean_eff = sum(eff_vals) / len(eff_vals)
+            weighted_eff_num += mean_eff * mean_wall
+            weighted_eff_den += mean_wall
+
+    weighted_cpu_eff = (weighted_eff_num / weighted_eff_den
+                        if weighted_eff_den > 0 else 0.5)
+
+    result = {
+        "steps": steps,
+        "peak_rss_mb": peak_rss_all,
+        "weighted_cpu_eff": weighted_cpu_eff,
+        "effective_cores": weighted_cpu_eff * nthreads,
+        "num_jobs": num_jobs,
+        "nthreads": nthreads,
+    }
+
+    cgroup = wu_data.get("cgroup")
+    if cgroup:
+        result["cgroup"] = cgroup
+
+    return result
 
 
 def analyze_wu_metrics(group_dir: Path, exclude_nodes: set[str] | None = None) -> dict:
@@ -1318,6 +1429,7 @@ def compute_round_optimization(
     split_tmpfs: bool = False,
     target_wall_time_sec: float = 0.0,
     current_round: int = 0,
+    inline_wu_metrics: list[dict] | None = None,
 ) -> dict:
     """Orchestrate inter-round adaptive optimization.
 
@@ -1343,6 +1455,10 @@ def compute_round_optimization(
         min_request_cpus: Floor for request_cpus to avoid pool fragmentation
         historical_peak_rss_mb: Max peak RSS observed across all previous rounds.
             Memory sizing uses max(current, historical) to prevent regression.
+        inline_wu_metrics: Pre-collected work_unit_metrics.json dicts from
+            enriched completed_work_units in the DB.  Used when the spool
+            directory has been cleaned up and proc_*_metrics.json files are
+            no longer on disk.
 
     Returns:
         Dict with tuning results including:
@@ -1357,23 +1473,40 @@ def compute_round_optimization(
     submit_path = Path(submit_dir)
 
     # ── 1. Collect metrics from all completed work units ──
+    # Try inline metrics first (spool may be cleaned up by the time we run)
     round_metrics = []
-    for wu_name in completed_wus:
-        wu_dir = submit_path / wu_name
-        if not wu_dir.is_dir():
-            logger.warning("WU dir not found: %s", wu_dir)
-            continue
-        try:
-            metrics = analyze_wu_metrics(wu_dir)
-            round_metrics.append(metrics)
-            logger.info(
-                "WU %s: %d jobs, cpu_eff=%.1f%%, peak_rss=%.0f MB",
-                wu_name, metrics["num_jobs"],
-                metrics["weighted_cpu_eff"] * 100,
-                metrics["peak_rss_mb"],
-            )
-        except ValueError as exc:
-            logger.warning("No metrics for WU %s: %s", wu_name, exc)
+    if inline_wu_metrics:
+        for i, wu_data in enumerate(inline_wu_metrics):
+            try:
+                metrics = wu_metrics_to_analyzed(wu_data)
+                round_metrics.append(metrics)
+                logger.info(
+                    "WU (inline %d): %d jobs, cpu_eff=%.1f%%, peak_rss=%.0f MB",
+                    i, metrics["num_jobs"],
+                    metrics["weighted_cpu_eff"] * 100,
+                    metrics["peak_rss_mb"],
+                )
+            except ValueError as exc:
+                logger.warning("Inline WU metrics %d unusable: %s", i, exc)
+
+    # Fall back to disk if inline metrics unavailable or empty
+    if not round_metrics:
+        for wu_name in completed_wus:
+            wu_dir = submit_path / wu_name
+            if not wu_dir.is_dir():
+                logger.warning("WU dir not found: %s", wu_dir)
+                continue
+            try:
+                metrics = analyze_wu_metrics(wu_dir)
+                round_metrics.append(metrics)
+                logger.info(
+                    "WU %s: %d jobs, cpu_eff=%.1f%%, peak_rss=%.0f MB",
+                    wu_name, metrics["num_jobs"],
+                    metrics["weighted_cpu_eff"] * 100,
+                    metrics["peak_rss_mb"],
+                )
+            except ValueError as exc:
+                logger.warning("No metrics for WU %s: %s", wu_name, exc)
 
     if not round_metrics:
         logger.warning("No WU metrics found — using defaults")
