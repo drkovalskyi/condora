@@ -1675,16 +1675,20 @@ fi
         os.chmod(elect_script, 0o755)
 
         # pin_site.sh — PRE script for processing/merge/cleanup nodes
-        # Rewrites +DESIRED_Sites in the submit file to the elected site
+        # Pins to elected site and applies machine exclusions from POST script
         pin_script = os.path.join(submit_dir, "pin_site.sh")
         with open(pin_script, "w") as f:
             f.write("""#!/bin/bash
 # pin_site.sh — called as PRE script before each node in the group
 # $1 = submit file path, $2 = elected site file path
+# Pins job to elected site and excludes machines that caused transient
+# failures (recorded by post_script.sh in excluded_machines.txt).
 SUBMIT_FILE=$1
 ELECTED_SITE_FILE=$2
 SITE=$(cat "$ELECTED_SITE_FILE")
 sed -i "s/+DESIRED_Sites = .*/+DESIRED_Sites = \\"${SITE}\\"/" "$SUBMIT_FILE"
+# Build Requirements: site pinning + machine exclusions (if any)
+# ... (reads excluded_machines.txt, adds TARGET.Machine != clauses)
 exit 0
 """)
         os.chmod(pin_script, 0o755)
@@ -2662,6 +2666,7 @@ The multi-round lifecycle means every workflow benefits from measured data for t
 - POST script classifies errors (transient / permanent / data / infrastructure)
 - POST script writes `{node_name}.post.json` side files for Level 2 consumption
 - Implements cool-off delays, parameter adjustment (e.g., memory increase), and retry/stop decisions
+- Machine avoidance: on transient failures, POST script records the failed machine hostname; the PRE script (`pin_site.sh`) adds `Machine != "hostname"` exclusions to Requirements on retry
 - `UNLESS-EXIT` code stops retries for permanent failures; `ABORT-DAG-ON` kills the entire DAG for catastrophic errors
 - Lives in the sandbox, can be iterated independently
 
@@ -2823,18 +2828,23 @@ fi
 # Classify error and write post.json (includes FJR data, classads, log tail)
 CLASSIFICATION=$(python3 classify_and_collect.py "$NODE_NAME" "$EXIT_CODE" "$RETRY_NUM")
 
+## Machine avoidance: record failed machine for PRE script exclusion on retry
+#if [ "$CLASSIFICATION" = "transient" ]; then
+#    MACHINE=$(python3 -c "..." ${NODE_NAME}.post.json)
+#    echo "$MACHINE" >> excluded_machines.txt
+#fi
+
 case $CLASSIFICATION in
     "transient")
         SLEEP_TIME=$((60 * (2 ** RETRY_NUM)))
         sleep $SLEEP_TIME
-        exit 1  # Failed, eligible for RETRY
+        exit 1  # Failed, eligible for RETRY (PRE script excludes failed machine)
         ;;
     "permanent"|"data")
         exit $UNLESS_EXIT  # Stop retrying this node
         ;;
     "infrastructure")
-        sleep 300
-        exit 1  # Retry — may land on different site
+        exit $UNLESS_EXIT  # Site-pinned: retrying same broken site is pointless
         ;;
     "catastrophic")
         exit $ABORT_EXIT  # Kill entire DAG (ABORT-DAG-ON)

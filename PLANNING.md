@@ -18,6 +18,12 @@ to be acceptable.
 Make sure that running in the global pool works reliably. Focus on
 debugging.
 
+Ensure that the merge job downloads only the files it needs for
+merging and not downloading all of them.
+
+For tests, ensure that the target file sizes are scaled down if
+partial processing is used.
+
 ### Things to review
 
 - pilot concept needs to be clarified. there should be no "pilot",
@@ -279,7 +285,8 @@ Merge node request_disk = 8 GB (2x target).
 
 Also deployed: WU-level recovery (RETRY on outer SUBDAG + site exclusion
 in wu_post.sh), proactive mid-DAG site exclusion, tail escalation fix for
-two-level DAGs.
+two-level DAGs, machine avoidance on transient failures (post_script.sh
+records failed machine, pin_site.sh adds Machine != exclusion).
 
 Active requests:
 - **00057**: needs resubmission with fixed WU sizing (3 procs/WU instead of 8)
@@ -302,6 +309,7 @@ Active requests:
 - Autonomous lifecycle manager operation in global pool
 
 **Not yet validated:**
+- Machine avoidance on transient failures (deployed, not yet observed in action)
 - Merge at European sites using `davs://` protocol (KIT, NCBJ, DESY) —
   `proc_node_indices` probe fallback deployed but untested at those sites
 - Production-scale requests (current tests use test_fraction=0.01)

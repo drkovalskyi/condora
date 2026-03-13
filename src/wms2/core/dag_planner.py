@@ -2106,6 +2106,8 @@ def _write_pin_site_script(path: str) -> None:
 #!/bin/bash
 # pin_site.sh — PRE script for processing/merge/cleanup nodes
 # Pins the job to the elected site by setting Requirements and DESIRED_Sites.
+# Also applies machine exclusions from excluded_machines.txt (written by
+# post_script.sh when transient failures occur on specific machines).
 # Skips pinning when site is "local" (dev environments without glidein).
 SUBMIT_FILE=$1
 SITE=$(cat "$2")
@@ -2117,11 +2119,35 @@ if grep -q '+DESIRED_Sites' "$SUBMIT_FILE"; then
 else
     sed -i "/^queue/i +DESIRED_Sites = \\"${SITE}\\"" "$SUBMIT_FILE"
 fi
-if grep -q '^Requirements' "$SUBMIT_FILE"; then
-    sed -i "s/^Requirements = .*/Requirements = (TARGET.GLIDEIN_CMSSite == \\"${SITE}\\")/" "$SUBMIT_FILE"
-else
-    sed -i "/^queue/i Requirements = (TARGET.GLIDEIN_CMSSite == \\"${SITE}\\")" "$SUBMIT_FILE"
-fi
+# Build Requirements: site pinning + machine exclusions (if any).
+# Uses python3 to avoid sed quoting issues with nested double quotes.
+EXCL_FILE="$(dirname "$SUBMIT_FILE")/excluded_machines.txt"
+python3 -c "
+import sys, os
+site, sub_file, excl_file = sys.argv[1], sys.argv[2], sys.argv[3]
+req = '(TARGET.GLIDEIN_CMSSite == \\"%s\\")' % site
+if os.path.isfile(excl_file):
+    seen = set()
+    for line in open(excl_file):
+        m = line.strip()
+        if m and m not in seen:
+            seen.add(m)
+            req += ' && (TARGET.Machine != \\"%s\\")' % m
+lines = open(sub_file).readlines()
+with open(sub_file, 'w') as f:
+    found = False
+    for line in lines:
+        if line.startswith('Requirements'):
+            f.write('Requirements = %s\\n' % req)
+            found = True
+        elif line.startswith('queue'):
+            if not found:
+                f.write('Requirements = %s\\n' % req)
+                found = True
+            f.write(line)
+        else:
+            f.write(line)
+" "$SITE" "$SUBMIT_FILE" "$EXCL_FILE"
 exit 0
 """)
     os.chmod(path, 0o755)
@@ -2190,6 +2216,15 @@ done
 if [ "$match_count" -ge "$IDENTICAL_THRESHOLD" ]; then
     echo "ABORT: $match_count nodes exhausted retries with exit code $CURRENT_EXIT — systemic failure" >&2
     exit $ABORT_EXIT
+fi
+
+# Machine avoidance: on transient failures, record the failed machine so
+# pin_site.sh can exclude it from Requirements on the next retry attempt.
+if [ "$CLASSIFICATION" = "transient" ]; then
+    FAILED_MACHINE=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('job',{}).get('machine',''))" "${GROUP_DIR}/${NODE_NAME}.post.json" 2>/dev/null)
+    if [ -n "$FAILED_MACHINE" ]; then
+        echo "$FAILED_MACHINE" >> "${GROUP_DIR}/excluded_machines.txt"
+    fi
 fi
 
 case "$CLASSIFICATION" in
@@ -2282,6 +2317,7 @@ if [ "$total_failures" -eq 0 ]; then
     rm -f "${GROUP_DIR}/group.dag.rescue"*
     rm -f "${NODE_NAME}_elected_site" "${GROUP_DIR}/elected_site"
     rm -f "${GROUP_DIR}"/proc_*.post.json "${GROUP_DIR}"/merge.post.json
+    rm -f "${GROUP_DIR}/excluded_machines.txt"
     exit 1
 fi
 
@@ -2323,10 +2359,12 @@ if [ -f "$LANDING_SUB" ]; then
     sed -i 's/,\\s*"/"/g' "$LANDING_SUB"
 fi
 
-# Clean up for fresh retry: remove rescue files, elected site, stale post.json
+# Clean up for fresh retry: remove rescue files, elected site, stale post.json,
+# and machine exclusions (new site = fresh slate for machine avoidance)
 rm -f "${GROUP_DIR}/group.dag.rescue"*
 rm -f "${NODE_NAME}_elected_site" "${GROUP_DIR}/elected_site"
 rm -f "${GROUP_DIR}"/proc_*.post.json "${GROUP_DIR}"/merge.post.json
+rm -f "${GROUP_DIR}/excluded_machines.txt"
 
 exit 1
 """)
@@ -4324,17 +4362,19 @@ def batch_by_size(files, max_size, file_sizes=None):
     """Group files into batches, each <= max_size total bytes.
 
     file_sizes: optional dict mapping filename to size (for remote files).
+    Uses max_size // 4 as conservative estimate for unknown-size remote files
+    to avoid putting everything in one batch (which can exceed disk limits).
     """
     batches = []
     current_batch = []
     current_size = 0
     for f in files:
-        if file_sizes and f in file_sizes:
+        if file_sizes and f in file_sizes and file_sizes[f] > 0:
             fsize = file_sizes[f]
         elif os.path.isfile(f):
             fsize = os.path.getsize(f)
         else:
-            fsize = 0  # Unknown size for remote files; put all in one batch
+            fsize = max_size // 4  # Conservative estimate for unknown-size remote files
         if current_batch and current_size + fsize > max_size:
             batches.append(current_batch)
             current_batch = [f]
@@ -4988,7 +5028,11 @@ if root_entries:
 
             # Merge candidates: batch by size → download → merge → upload → cleanup scratch
             if merge_candidates:
-                file_sizes_map = {b: _manifest_sizes.get(b, 0) for b in merge_candidates}
+                # Use manifest sizes; fall back to conservative estimate so batching
+                # still limits disk usage when proc manifests lack size_bytes
+                _default_file_size = max_merge_size // 4
+                file_sizes_map = {b: _manifest_sizes.get(b, 0) or _default_file_size
+                                  for b in merge_candidates}
                 batches = batch_by_size(merge_candidates, max_merge_size, file_sizes=file_sizes_map)
                 print(f"Tier {ds_tier}: {len(merge_candidates)} files in {len(batches)} batch(es) "
                       f"(step_index={step_idx})")

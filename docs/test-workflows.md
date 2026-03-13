@@ -22,6 +22,7 @@ python scripts/fetch-workflow-info.py \
 | GEN-QCD | `GEN-RunIII2024Summer24GS-00002`        | StepChain |     5 |     8 |  16 GB |   0.0028  |   110,104 | AODSIM, MINIAODSIM, NANOAODSIM|
 | DY2L    | `GEN-Run3Summer22EEwmLHEGS-00600`       | StepChain |     5 |     4 |   8 GB |   0.1023  |    17,971 | AODSIM, MINIAODSIM, NANOAODSIM|
 | DY2Mu   | `GEN-Run3Summer23wmLHEGS-00058`          | StepChain |     5 |     4 |   8 GB |   1.0     |     2,255 | AODSIM, MINIAODSIM, NANOAODSIM|
+| DY2Mu-low | `GEN-Run3Summer23wmLHEGS-00057`        | StepChain |     5 |     4 |   8 GB |   1.0     |     1,037 | AODSIM, MINIAODSIM, NANOAODSIM|
 | JME     | `JME-Run3Summer22DRPremix-01052`         | StepChain |     4 |     4 |   8 GB |   1.0     |     2,074 | AODSIM, MINIAODSIM, NANOAODSIM|
 | BPH     | `BPH-RunIISummer20UL18GEN-00292`         | StepChain |     7 |    16 |  32 GB |   0.00034 |   171,637 | MINIAODSIM, NANOAODSIM, AODSIM|
 
@@ -200,6 +201,41 @@ of generated events is RequestNumEvents / FilterEfficiency.
 ```
 
 **What it exercises**: Medium-size wmLHEGS workflow (6M events, 2.3k CPU-days) with a single CMSSW version (13_0_13) across all 5 steps. No filter efficiency loss. Lower multicore (4 cores, 7.9 GB) than the 8-core workflows. Uses Run3Summer23 campaign (2023 conditions). Good middle-ground test — larger than B2G but still manageable, with uniform CMSSW simplifying debugging.
+
+**Tested modes**: not yet tested
+
+---
+
+## DY2Mu-low
+
+**Request name**: `cmsunified_task_GEN-Run3Summer23wmLHEGS-00057__v1_T_230922_115605_1852`
+
+- **Type**: StepChain, 5-step (GEN)
+- **Multicore**: 4
+- **Memory**: 7,900 MB
+- **TimePerEvent**: 7.46 s
+- **SizePerEvent**: 1,468.0 KB
+- **FilterEfficiency**: 1.0
+- **RequestNumEvents**: 3,000,000
+- **CPU-days**: 1,036.5
+- **Output tiers**: AODSIM, MINIAODSIM, NANOAODSIM
+
+| Step | Name                                    | CMSSW         | Arch            | Keep | GlobalTag                              |
+|------|-----------------------------------------|---------------|-----------------|------|----------------------------------------|
+|    1 | GEN-Run3Summer23wmLHEGS-00057_0        | CMSSW_13_0_13 | el8_amd64_gcc11 | no   | 130X_mcRun3_2023_realistic_v14         |
+|    2 | GEN-Run3Summer23DRPremix-00034_0       | CMSSW_13_0_13 | el8_amd64_gcc11 | no   | 130X_mcRun3_2023_realistic_v14         |
+|    3 | GEN-Run3Summer23DRPremix-00034_1       | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_v14         |
+|    4 | GEN-Run3Summer23MiniAODv4-00034_0      | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_v14         |
+|    5 | GEN-Run3Summer23NanoAODv12-00034_0     | CMSSW_13_0_13 | el8_amd64_gcc11 | yes  | 130X_mcRun3_2023_realistic_v14         |
+
+**Output datasets**:
+```
+/DYto2Mu_MLL-10to50_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23DRPremix-130X_mcRun3_2023_realistic_v14-v2/AODSIM
+/DYto2Mu_MLL-10to50_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23MiniAODv4-130X_mcRun3_2023_realistic_v14-v2/MINIAODSIM
+/DYto2Mu_MLL-10to50_TuneCP5_13p6TeV_powheg-pythia8/Run3Summer23NanoAODv12-130X_mcRun3_2023_realistic_v14-v2/NANOAODSIM
+```
+
+**What it exercises**: Sibling of DY2Mu (-00058) with lower mass range (MLL-10to50 vs MLL-50to120). Same single CMSSW version (13_0_13) across all 5 steps, same Run3Summer23 campaign, same 4-core / 7.9 GB profile. Smaller than DY2Mu (3M vs 6M events, 1k vs 2.3k CPU-days). No filter efficiency loss. Good for testing a second concurrent request with the same CMSSW environment.
 
 **Tested modes**: not yet tested
 

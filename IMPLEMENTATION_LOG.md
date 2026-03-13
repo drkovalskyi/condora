@@ -6,6 +6,62 @@
 
 ---
 
+## 2026-03-13 — Machine avoidance on transient failures
+
+### What was done
+
+Added machine-level exclusion for transient failure retries within site-pinned
+work units. When a job fails transiently (e.g., CVMFS outage on one worker),
+the POST script records the failed machine's hostname, and the PRE script
+excludes it from Requirements on the next retry attempt.
+
+**Motivation**: In request 00057 round 1, a single machine (`b9p34p1001.cern.ch`)
+at T2_CH_CERN had a 26-minute CVMFS outage. Because all WU nodes are
+site-pinned, DAGMan retries kept landing on the same broken machine (37/45
+CERN attempts). No mechanism existed to avoid previously-failed machines.
+
+**Changes**:
+
+1. **`post_classifier.py`** — `parse_condor_log()` extracts machine hostname
+   from the `alias=` field in the execute event (event 001) sinful string in
+   the HTCondor userlog. Added `machine` field to `post.json["job"]`.
+
+2. **`post_script.sh`** (dag_planner.py) — On `transient` classification,
+   reads `machine` from `post.json` and appends to
+   `{group_dir}/excluded_machines.txt`. Only transient — OOM retries same
+   machine with memory bump, infrastructure exits with UNLESS_EXIT (no retry).
+
+3. **`pin_site.sh`** (dag_planner.py) — Reads `excluded_machines.txt` if
+   present and adds `TARGET.Machine != "hostname"` clauses to the submit
+   file's Requirements expression. Uses embedded python3 for reliable quoting.
+   Deduplicates machine names.
+
+4. **`wu_post.sh`** (dag_planner.py) — Clears `excluded_machines.txt` on
+   WU-level retry (new site = fresh slate for machine avoidance).
+
+**Example Requirements after two transient failures**:
+```
+Requirements = (TARGET.GLIDEIN_CMSSite == "T2_CH_CERN") && (TARGET.Machine != "b9p34p1001.cern.ch") && (TARGET.Machine != "b9p34p1002.cern.ch")
+```
+
+### Verification
+
+- Generated `pin_site.sh` manually tested with site pinning + 0, 1, 2 machine
+  exclusions + duplicate deduplication — all produce correct Requirements
+- Smoke tests: 5/5 passed (100.0, 150.0, 500.0, 501.0, 510.0) including
+  fault injection tests that exercise the POST script
+
+### Also fixed
+
+- **Adaptive optimizer ignoring enriched WU metrics**: `compute_round_optimization()`
+  read `proc_*_metrics.json` from disk independently. In spool mode, files were
+  cleaned up → fell back to default memory (2000 × ncores = 8000 MB instead of
+  measured 5207 × 1.20 = 6248 MB). Fixed by adding `wu_metrics_to_analyzed()`
+  converter in `adaptive.py` and `inline_wu_metrics` parameter that passes
+  enriched DB data from `_compute_adaptive_params()` in `lifecycle_manager.py`.
+
+---
+
 ## 2026-03-13 — Throughput-based events_per_job optimization
 
 ### What was done

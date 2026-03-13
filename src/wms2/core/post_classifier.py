@@ -468,9 +468,9 @@ def parse_fjr(xml_path):
 # ── HTCondor log parsing ────────────────────────────────────────
 
 def parse_condor_log(log_path):
-    """Parse HTCondor job log for site, wall time, memory usage, periodic_remove."""
+    """Parse HTCondor job log for site, wall time, memory usage, periodic_remove, machine."""
     info = {"site": "unknown", "wall_time_sec": 0, "memory_mb": 0,
-            "periodic_remove_reason": ""}
+            "periodic_remove_reason": "", "machine": ""}
     if not os.path.isfile(log_path):
         return info
     try:
@@ -508,6 +508,17 @@ def parse_condor_log(log_path):
                 info["wall_time_sec"] = int(diff)
         except (ValueError, TypeError):
             pass
+
+    # Machine hostname from execute event sinful string.
+    # Event 001: "Job executing on host: <IP:PORT?...&alias=hostname&...>"
+    # Use last match (most recent attempt) for the machine of the final run.
+    execute_hosts = re.findall(
+        r'001 \([^)]+\).*?Job executing on host:\s*<([^>]+)>', content)
+    if execute_hosts:
+        sinful = execute_hosts[-1]
+        alias_m = re.search(r'alias=([^&>\s]+)', sinful)
+        if alias_m:
+            info["machine"] = alias_m.group(1)
 
     # Detect periodic_remove — HTCondor writes event 009 (Job was aborted)
     # with PeriodicRemoveReason on the next line.  Look for our "WMS2:" prefix.
@@ -647,6 +658,7 @@ def main():
             "cpu_time_sec": 0,
             "memory_mb": condor_log["memory_mb"],
             "site": condor_log["site"],
+            "machine": condor_log.get("machine", ""),
             "schedd": "",
             "periodic_remove_reason": periodic_remove_reason,
         },

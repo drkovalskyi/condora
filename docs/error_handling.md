@@ -102,6 +102,7 @@ This file is the primary data exchange between Level 1 (POST script) and Level 2
     "cpu_time_sec": 3200,
     "memory_mb": 4096,
     "site": "T2_US_Purdue",
+    "machine": "worker01.purdue.edu",
     "schedd": "schedd01.fnal.gov"
   },
 
@@ -139,6 +140,7 @@ This file is the primary data exchange between Level 1 (POST script) and Level 2
 |---|---|---|
 | `job.*` | HTCondor job classads | `condor_q -json` or job ad file in submit directory |
 | `job.site` | `MATCH_GLIDEIN_CMSSite` classad | From job ad or userlog |
+| `job.machine` | Execute host hostname | Parsed from `alias=` in execute event sinful string in userlog |
 | `cmssw.*` | Framework Job Report (FJR) | Parse `FrameworkJobReport.xml` from job sandbox |
 | `cmssw.exit_code` | FJR `ExitCode` element | Direct FJR parse |
 | `cmssw.input_files` | FJR `<InputFile>` entries | Direct FJR parse |
@@ -154,7 +156,7 @@ The POST script classifies each failure into one of four categories and takes an
 
 | Category | Criteria | POST Exit | Effect |
 |---|---|---|---|
-| **Transient** | Known temporary errors (network timeout, temporary file access failure, schedd flap) | Non-zero (not 42) | Allow RETRY; optional short cooloff via `sleep` |
+| **Transient** | Known temporary errors (network timeout, temporary file access failure, schedd flap) | Non-zero (not 42) | Allow RETRY with cooloff; failed machine recorded for exclusion on retry |
 | **Permanent** | Non-retryable errors (CMSSW config error, missing software, authentication failure) | 42 (UNLESS-EXIT) | Stop retrying this node |
 | **Data** | Input file is unreadable or corrupt (FileReadError, checksum mismatch) | 42 (UNLESS-EXIT) | Stop retrying; record bad file in `classification.bad_input_files` |
 | **Infrastructure** | Site-level issue (storage failure, worker node misconfiguration) | Non-zero (not 42) | Allow RETRY with cooloff; job may land on different site |
@@ -192,6 +194,8 @@ if [ "$CMSSW_EXIT" -eq 50660 ]; then
     exit 1  # Retryable
 fi
 ```
+
+**Machine avoidance on transient retries**: Within a site-pinned work unit, transient failures often hit the same broken machine on retry (e.g., one worker with a CVMFS outage). The POST script records the failed machine's hostname (from `job.machine` in `post.json`) to `{group_dir}/excluded_machines.txt`. On the next retry, the PRE script (`pin_site.sh`) reads this file and adds `TARGET.Machine != "hostname"` clauses to the submit file's `Requirements` expression. This avoids the broken machine while keeping the job at the same site. Machine exclusions accumulate across retries (deduplicated) and are cleared when the work unit is retried at a different site via Level 2 recovery.
 
 ### 2.5 ABORT-DAG-ON
 
