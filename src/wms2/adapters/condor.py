@@ -316,6 +316,12 @@ class HTCondorAdapter(CondorAdapter):
             "RequestCpus", "RequestMemory", "JobStartDate", "ServerTime",
             "MATCH_GLIDEIN_CMSSite", "JobPrio",
             "HoldReason", "HoldReasonCode",
+            "MachineAttrCpuModelName0", "MachineAttrDIRACBenchmark0",
+            "MachineAttrMicroarch0",
+            # Chirp-based step progress (set by proc script)
+            "WMS2_CurrentStep", "WMS2_NumSteps", "WMS2_StepDone",
+            "WMS2_StepName", "WMS2_StepWallSec",
+            "WMS2_Phase", "WMS2_StageoutStart",
         ]
         ads = schedd.query(constraint=constraint, projection=projection)
 
@@ -358,7 +364,16 @@ class HTCondorAdapter(CondorAdapter):
                 "disk_mb": int(ad["DiskUsage_RAW"]) // 1024 if ad.get("DiskUsage_RAW") is not None else None,
                 "request_disk_mb": int(ad["RequestDisk"]) // 1024 if ad.get("RequestDisk") is not None else None,
                 "site": ad.get("MATCH_GLIDEIN_CMSSite"),
+                "cpu_model": ad.get("MachineAttrCpuModelName0", "").replace("_", " ") if ad.get("MachineAttrCpuModelName0") else None,
+                "benchmark": round(float(ad["MachineAttrDIRACBenchmark0"]), 1) if ad.get("MachineAttrDIRACBenchmark0") is not None else None,
+                "microarch": ad.get("MachineAttrMicroarch0"),
                 "priority": int(ad.get("JobPrio", 0)),
+                "current_step": ad.get("WMS2_CurrentStep"),
+                "num_steps": ad.get("WMS2_NumSteps"),
+                "step_done": ad.get("WMS2_StepDone"),
+                "step_name": str(ad.get("WMS2_StepName", "")).strip('"') or None,
+                "phase": str(ad.get("WMS2_Phase", "")).strip('"') or None,
+                "stageout_start": ad.get("WMS2_StageoutStart"),
             }
             if status_int == 5:
                 job["hold_reason"] = str(ad.get("HoldReason", ""))

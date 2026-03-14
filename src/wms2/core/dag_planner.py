@@ -1961,6 +1961,11 @@ def _write_submit_file(
     # "Running" indefinitely when glideins die without clean shutdown.
     # WMAgent uses 1200s (20 min). We use the same.
     lines.append("+JobLeaseDuration = 1200")
+    # Enable chirp classad updates for proc nodes so that the proc script
+    # can report step progress (WMS2_CurrentStep, WMS2_Phase, etc.) back
+    # to the schedd in real time, queryable via condor_q / API.
+    if node_type == "proc":
+        lines.append("+WantRemoteUpdates = true")
     # Capture CMS site name at match time into the job classad.
     # GLIDEIN_CMSSite is a slot attribute (e.g. "T2_US_Nebraska"); $$() is
     # HTCondor's match-time substitution.  The resulting JOB_GLIDEIN_CMSSite
@@ -3467,11 +3472,17 @@ run_cmssw_mode() {
         # Parallel step 0: fork N_PARALLEL cmsRun instances with firstEvent partitioning
         if [[ $step_idx -eq 0 && "$N_PARALLEL" -gt 1 ]]; then
             echo "  n_parallel: $N_PARALLEL"
+            condor_chirp set_job_attr WMS2_CurrentStep "1" 2>/dev/null || true
+            condor_chirp set_job_attr WMS2_StepName "\"$STEP_NAME\"" 2>/dev/null || true
+            condor_chirp set_job_attr WMS2_NumSteps "$NUM_STEPS" 2>/dev/null || true
+            condor_chirp set_job_attr WMS2_Phase "\"cmsRun\"" 2>/dev/null || true
             STEP_START=$(date +%s)
             run_step0_parallel "$N_PARALLEL" "$NTHREADS" "$CMSSW_VER" "$STEP_ARCH" "$PSET_PATH" "$STEP_NAME" "$SPLIT_TMPFS"
             STEP_END=$(date +%s)
             STEP_WALL=$((STEP_END - STEP_START))
             echo "  Step $STEP_NAME completed in ${STEP_WALL}s (parallel, $N_PARALLEL instances)"
+            condor_chirp set_job_attr WMS2_StepDone "1" 2>/dev/null || true
+            condor_chirp set_job_attr WMS2_StepWallSec "$STEP_WALL" 2>/dev/null || true
             continue
         fi
 
@@ -3623,6 +3634,11 @@ with open(pset, 'a') as f:
         fi
 
         echo "  cmsRun $CMSRUN_ARGS"
+        # Chirp step progress to schedd (queryable via condor_q / API)
+        condor_chirp set_job_attr WMS2_CurrentStep "$step_num" 2>/dev/null || true
+        condor_chirp set_job_attr WMS2_StepName "\"$STEP_NAME\"" 2>/dev/null || true
+        condor_chirp set_job_attr WMS2_NumSteps "$NUM_STEPS" 2>/dev/null || true
+        condor_chirp set_job_attr WMS2_Phase "\"cmsRun\"" 2>/dev/null || true
         STEP_START=$(date +%s)
 
         # Pre-measure gridpack uncompressed size from CVMFS (before step 0)
@@ -3707,6 +3723,8 @@ except Exception:
         fi
 
         echo "  Step $STEP_NAME completed in ${STEP_WALL}s"
+        condor_chirp set_job_attr WMS2_StepDone "$step_num" 2>/dev/null || true
+        condor_chirp set_job_attr WMS2_StepWallSec "$STEP_WALL" 2>/dev/null || true
 
         # Parse FrameworkJobReport for output file (strip file: prefix)
         # When a step produces multiple outputs (e.g. GEN-SIM + LHE), prefer
@@ -4072,6 +4090,8 @@ else:
     done
 
     # Stage out to unmerged site storage
+    condor_chirp set_job_attr WMS2_Phase "\"stageout\"" 2>/dev/null || true
+    condor_chirp set_job_attr WMS2_StageoutStart "$(date +%s)" 2>/dev/null || true
     stage_out_to_unmerged
 }
 

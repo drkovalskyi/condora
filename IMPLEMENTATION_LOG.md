@@ -2,6 +2,37 @@
 
 <!-- Entries are in reverse chronological order (newest first). -->
 
+## Chirp-Based Job Progress Reporting (2026-03-14)
+
+**What**: Added `condor_chirp set_job_attr` calls to the proc script so that
+running jobs report their current step and phase (cmsRun vs stageout) back to
+the schedd in real time. These classads are queryable via `condor_q` and the
+WMS2 API without firewall issues.
+
+**Why**: A proc job at T1_US_FNAL ran for 17+ hours with no way to determine
+which step it was on. `condor_tail` was blocked by firewall, `StreamErr` is
+prohibited by CERN policy. CMSSW's own chirp classads (`ChirpCMSSWDone`) only
+cover per-cmsRun invocation, not stageout. We needed per-step visibility.
+
+**Changes**:
+- `dag_planner.py` — Submit file: `+WantRemoteUpdates = true` on proc nodes
+  only (enables chirp classad propagation to schedd)
+- `dag_planner.py` — Proc script: chirps `WMS2_CurrentStep`, `WMS2_StepName`,
+  `WMS2_NumSteps`, `WMS2_Phase` before each cmsRun step; `WMS2_StepDone`,
+  `WMS2_StepWallSec` after; `WMS2_Phase="stageout"`, `WMS2_StageoutStart`
+  before stageout. Covers both parallel step 0 and sequential step paths.
+  All calls use `2>/dev/null || true` for sites without `condor_chirp`.
+- `condor.py` — Jobs API: added 7 chirp classads to projection, 6 fields
+  to job dict (`current_step`, `num_steps`, `step_done`, `step_name`,
+  `phase`, `stageout_start`)
+- `dag-detail.js` — Added `fmtStepProgress(j)` helper: renders
+  "Step 2/5 DRPremix" or "stageout (15m)" with elapsed time
+- `dag_detail.html` — Added "Progress" column to HTCondor Jobs table,
+  stageout phase highlighted in amber
+
+**Verification**: Matrix smoke tests pass (6/6). `+WantRemoteUpdates` confirmed
+in generated proc submit files only (not landing/merge/cleanup).
+
 ## Pipelined Rounds, Multi-Schedd, Spool-Free Retrieval (2026-03-14)
 
 **What**: Implemented four interconnected architectural changes from the spec

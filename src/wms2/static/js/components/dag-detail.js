@@ -130,6 +130,24 @@ document.addEventListener('alpine:init', () => {
             return s + 's';
         },
 
+        /** Format chirp-based step progress for a job. */
+        fmtStepProgress(j) {
+            if (!j.current_step) return null;
+            if (j.phase === 'stageout') {
+                let label = 'stageout';
+                if (j.stageout_start && j.wall_time != null) {
+                    const now = Math.floor(Date.now() / 1000);
+                    const elapsed = now - j.stageout_start;
+                    if (elapsed > 0) label += ' (' + this.fmtWallTime(elapsed) + ')';
+                }
+                return label;
+            }
+            let s = 'Step ' + j.current_step;
+            if (j.num_steps) s += '/' + j.num_steps;
+            if (j.step_name) s += ' ' + j.step_name;
+            return s;
+        },
+
         // ── Performance ──
 
         get hasPerformance() {

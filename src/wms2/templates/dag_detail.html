@@ -194,6 +194,8 @@
                                     x-text="'CPUs' + sortIcon(jobSort, 'cpus')"></th>
                                 <th data-sort @click="toggleSort(jobSort, 'site')"
                                     x-text="'Site' + sortIcon(jobSort, 'site')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'current_step')"
+                                    x-text="'Progress' + sortIcon(jobSort, 'current_step')"></th>
                                 <th>Details</th>
                             </tr>
                         </thead>
@@ -212,6 +214,9 @@
                                     <td x-text="j.cpu_efficiency != null ? j.cpu_efficiency + '%' : '—'"></td>
                                     <td x-text="j.cpus"></td>
                                     <td x-text="j.site || '—'"></td>
+                                    <td style="font-size:0.8rem; white-space:nowrap;"
+                                        :style="j.phase === 'stageout' ? 'color:#f59e0b; font-weight:600;' : ''"
+                                        x-text="fmtStepProgress(j) || '—'"></td>
                                     <td style="font-size:0.8rem; max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
                                         :title="j.hold_reason || ''"
                                         x-text="j.hold_reason || '—'"></td>
