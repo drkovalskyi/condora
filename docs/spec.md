@@ -6,7 +6,7 @@
 |---|---|
 | **Spec Version** | 2.14.0 |
 | **Status** | DRAFT |
-| **Date** | 2026-03-12 |
+| **Date** | 2026-03-14 |
 | **Authors** | CMS Computing |
 | **Supersedes** | WMCore / WMAgent |
 
@@ -174,6 +174,18 @@ Expected operating parameters:
 Per-DAG throttling via `DAGMAN_MAX_JOBS_IDLE` and `DAGMAN_MAX_JOBS_SUBMITTED` provides basic pacing. Global idle throttling across all concurrent DAGs is a required HTCondor feature (see Section 12). If not available at launch, WMS2 will use conservative static per-DAG limits as an interim measure.
 
 The negotiator scales with the number of idle + running jobs (not total managed population). Schedds scale with total managed jobs but can be added horizontally. DAGMan processes are lightweight (~few MB each for 10K-node DAGs).
+
+### 2.5 Multi-Schedd Architecture
+
+A single HTCondor schedd handles ~50–100K concurrent jobs before performance degrades. CMS production at scale requires millions of jobs. WMS2 distributes DAGs across a pool of schedds.
+
+**Schedd pool**: WMS2 maintains a configured list of schedds with capacity and status metadata. Each schedd is independently managed — it can be drained, taken down for maintenance, or added without affecting other schedds.
+
+**Assignment granularity**: Each DAG is assigned to a schedd at submission time using capacity-weighted selection. Different rounds of the same request may use different schedds — rounds are independent DAGs with no shared state on the schedd. This allows WMS2 to route new work away from a schedd that needs maintenance, even if earlier rounds of the same request are still running there.
+
+**Schedd selection policy**: When submitting a new DAG, the lifecycle manager queries the schedd pool for enabled schedds with capacity and selects by policy (e.g., least loaded, capacity-weighted random). The `dags.schedd_name` column records which schedd each DAG was submitted to. All subsequent operations (polling, condor_rm, rescue DAG) use the DAG's recorded schedd.
+
+**Spool-free operation**: WMS2 does not read job output from the schedd's spool directory. Job results (metrics, manifests, error data) are retrieved via HTCondor's `condor_transfer_data` API on demand and stored in the database. This eliminates the need for sshfs mounts, avoids spool cleanup races, and works across any number of schedds without additional infrastructure. See §4.6 for details.
 
 ---
 
@@ -1768,12 +1780,12 @@ WMS2 supports three stageout modes, selected at import time (`stageout_mode` in 
 
 **LFN→PFN resolution**: Each CMS site publishes a `storage.json` file (fetched from SITECONF via CVMFS) that maps logical file names to physical locations. The resolution supports three formats: prefix (simple concatenation, used by CERN), rules (regex-based rewriting, used by FNAL), and chained rules (virtual protocol resolution followed by rules, used by KIT/DESY). The `wms2_stageout.py` utility, transferred to worker nodes alongside the sandbox, implements all three formats.
 
-**Per-batch merge execution**: The merge job processes files one batch at a time to limit scratch disk usage. For each output tier, the merge script classifies files from the proc output manifest:
+**Direct XRootD merge**: In grid mode, the merge job reads proc output files directly from site storage via `root://` URLs — cmsRun's native XRootD support streams the data without downloading to local scratch first. For each output tier, the merge script classifies files from the proc output manifest:
 
 - **Oversized files** (individual `size_bytes` >= 75% of `max_merge_size`): remote-copied directly between storage endpoints via `gfal-copy` (third-party copy when the storage supports it). These files never touch worker node scratch — they are already larger than the merge target and would not benefit from merging.
-- **Merge candidates**: grouped into batches of up to `max_merge_size` (~4 GB default) using manifest `size_bytes`. Each batch is processed sequentially: download from unmerged storage → merge via `cmsRun mergeProcess()` (with hadd/uproot fallback) → compute adler32 checksum → upload to merged storage → delete batch files from scratch. Peak scratch usage is approximately 2× target merge size (~8 GB) regardless of work unit size.
+- **Merge candidates**: grouped into batches of up to `max_merge_size` (~4 GB default) using manifest `size_bytes`. Each batch is merged via `cmsRun mergeProcess()` reading `root://` URLs directly (with hadd/uproot fallback). The merged output is written locally, checksummed (adler32), uploaded to merged storage, then deleted from scratch. Peak scratch usage is approximately the target merge size (~4 GB) — only the merged output file, no input downloads.
 
-This per-batch approach decouples work unit sizing from merge disk capacity. Grid worker nodes typically have limited scratch (2–3 GB/core, ~20 GB for an 8-core slot). Previously the merge job downloaded all proc outputs at once, making scratch disk the binding constraint on work unit size. With per-batch processing, work unit size is determined purely by the target merged file size.
+This direct-read approach eliminates the download bottleneck that dominated merge wall time. All CMS T1/T2 sites provide XRootD endpoints (AAA requirement), so cmsRun can read proc outputs natively via `root://` protocol. Work unit sizing is determined purely by the target merged file size, independent of merge scratch capacity.
 
 In local mode, files are read directly from the local filesystem and merged in place — no download/upload cycle is needed.
 
@@ -1842,9 +1854,11 @@ class EventBasedSplitter:
 
 ### 4.6 DAG Monitor
 
-The DAG Monitor reads DAGMan's status file to determine per-node and aggregate progress. For merge group detection, it tracks which SUBDAG nodes have completed since the last poll by comparing against a persistent set of already-reported completions stored in the database.
+The DAG Monitor polls DAG status via `condor_q` and detects completed work units. For merge group detection, it tracks which SUBDAG nodes have completed since the last poll by comparing against a persistent set of already-reported completions stored in the database.
 
-DAGMan writes a JSON status file (`<dagfile>.status`) that includes per-node status. The top-level DAG's nodes include the SUBDAG EXTERNAL entries — each merge group appears as a single node. When a SUBDAG node transitions to `STATUS_DONE`, its merge output is ready for the Output Manager.
+The DAG Monitor connects to the correct schedd for each DAG using the `dags.schedd_name` column. In a multi-schedd deployment, different DAGs may be on different schedds; the monitor polls each DAG on its assigned schedd.
+
+**Spool-free data retrieval.** When the DAG Monitor detects a newly completed work unit, it retrieves the WU's output files (metrics, merge manifest) using HTCondor's `condor_transfer_data` API and stores the data in the database. This replaces reading from the schedd's spool directory via sshfs, which was fragile (spool cleanup races), didn't scale to multiple schedds, and required persistent mounts. All job result data is stored in the database at detection time, so downstream consumers (`complete_round()`, adaptive optimizer, output manager) read from the DB, not from disk.
 
 ```python
 class NodeSummary(BaseModel):
@@ -2474,7 +2488,9 @@ else:
 ### 5.3 Execution Rounds
 
 The adaptive lifecycle uses multiple processing rounds, each as a separate
-DAG. See `docs/processing.md` §6.2–6.5 for the complete specification.
+DAG. Rounds can overlap — a new round starts without waiting for the
+previous round's DAG to complete. See `docs/processing.md` §6.2–6.5 for
+the complete specification.
 
 **Effective fraction.** Each round has an `effective_fraction` that scales
 `events_per_job` relative to its nominal value. The planner is the single
@@ -2490,20 +2506,23 @@ fraction is stored in `node_counts["effective_fraction"]` and persisted per
 round in `step_metrics` so that adaptive optimization can correctly scale
 pilot-round measurements to production events_per_job.
 
-**Round 0** (pilot, `current_round=0`, `adaptive=true`):
+**Round 0** (typical pilot usage):
 - Uses request resource defaults (Memory, TimePerEvent)
 - `events_per_job` scaled by `effective_fraction` (see above). This prevents
   a small test run (`test_fraction=0.01`) from getting a disproportionately
   large pilot (`pilot_fraction=0.5 × 2000 = 1000` events/job), or vice versa.
 - Fixed `jobs_per_work_unit` (default 8) for merge group sizing
-- Produces `first_round_work_units` work units (default 1) — small pilot
-  to validate the pipeline quickly before committing more resources
+- Typically produces `first_round_work_units` work units (default 1) — a
+  small pilot to validate the pipeline and collect metrics before committing
+  more resources
 - Collects FJR metrics: per-step RSS, CPU efficiency, time-per-event,
   per-tier output sizes
-- On completion: metrics aggregated into `workflow.step_metrics`,
-  round 1+ uses CPU and memory parameters optimized from measured data
+- Round 0 is not treated specially by the lifecycle manager — the same
+  round transition rules apply to all rounds. The typical pilot
+  configuration (1 WU, request defaults) is a parameter choice, not a
+  hardcoded behavior.
 
-**Round 1+** (production, `current_round>=1`, `adaptive=true`):
+**Subsequent rounds** (production):
 - `events_per_job` scaled by `effective_fraction` (= `test_fraction`; no-op
   when `test_fraction=1.0`)
 - `events_per_job` tuned to target wall time (default 8h)
@@ -2511,24 +2530,49 @@ pilot-round measurements to production events_per_job.
   `min_merge_size..max_merge_size`
 - Memory sized to FJR peak RSS + 20% safety margin (see Section 5.5)
 - Each round builds only its share of work units
-- On completion: metrics refined, request returns to queue if work remains
 
 **Non-adaptive** (`adaptive=false`):
 - Single DAG with all work, request defaults throughout
 - No pilot round, no inter-round optimization
 
+**Pipelined rounds.** Rounds overlap — the lifecycle manager starts the
+next round before the current one completes. This eliminates the "tail
+effect" where a few slow work units at the end of a round block the
+entire pipeline:
+
 ```
-Round 0: Request defaults → pilot DAG (1 WU) → metrics collected
-              │
-              ▼ (DAG completes, advance offsets)
-         Lifecycle Manager: aggregate metrics → step_metrics
-              │
-              ▼
-Round 1: Optimized params → production DAG (10 WUs) → metrics refined
-              │
-              ▼ (if work remains, advance offsets)
-Round K: Remaining work (≤10 WUs) → final DAG → COMPLETED
+Round 0:  ████████████████░░░░░░
+Round 1:          ████████████████████████░░░░░
+Round 2:                    ████████████████████████████
+                                                ↑
+                                     events_produced ≥ target
+                                     → stop planning, let tails finish
 ```
+
+Tail work units (░) from earlier rounds continue running in the
+background. Their output is accepted when they complete — no work is
+wasted. Slight overproduction is acceptable; it is preferable to
+pipeline stalls.
+
+**Round advance conditions.** The next round is released when all three
+conditions are met:
+
+| Condition | Parameter | Default |
+|-----------|-----------|---------|
+| Enough WUs completed in the current round | `round_advance_completion_fraction` | 0.5 |
+| Enough nodes running across active DAGs | `round_advance_running_fraction` | 0.3 |
+| Fewer than N DAGs active for this request | `max_concurrent_rounds` | 3 |
+
+The running fraction threshold prevents releasing new rounds when the
+system is idle — if a request has low priority and its jobs are not
+getting slots, adding more idle jobs wastes schedd capacity. When slots
+become available and work units start completing, the pipeline resumes
+naturally.
+
+**Termination.** When `events_produced >= target_events` (GEN) or
+`files_processed >= total_input_files` (file-based), stop planning new
+rounds. Running DAGs finish naturally (tails complete, output accepted).
+When all DAGs reach terminal status, the request transitions to COMPLETED.
 
 ### 5.4 Per-Step Splitting Optimization
 
@@ -3500,32 +3544,38 @@ This section captures significant design decisions and the reasoning behind them
 The design reuses the clean stop flow entirely — no new request states, no new DAG types, no new components. The `production_steps` list is extensible: adding more steps or changing thresholds requires no schema migration (JSONB). Work units are the natural fraction unit because they are already tracked by the DAG Monitor as SUBDAG EXTERNAL completions.
 
 **Rejected alternatives**:
-- *DAG partitioning at planning time* (split workflow into multiple smaller DAGs per priority tier): Complex, inflexible — the fraction boundary is hard-coded at planning time and can't adapt. Also requires managing multiple DAGs per workflow, violating the one-DAG-per-workflow invariant.
+- *DAG partitioning at planning time* (split workflow into multiple smaller DAGs per priority tier): Complex, inflexible — the fraction boundary is hard-coded at planning time and can't adapt. Superseded by pipelined rounds (DD-20), which naturally support multiple concurrent DAGs per workflow.
 - *New request status (e.g., DEPRIORITIZED)*: Unnecessary — the existing STOPPING → RESUBMITTING → QUEUED → ACTIVE flow handles everything. Adding states increases the state machine complexity for no benefit.
 - *Separate partial production queue*: Over-engineering. The admission queue already handles priority ordering; demoting the request's priority achieves the same effect.
 
 **Update**: For adaptive workflows (`adaptive=true`), the multi-round lifecycle
-(`docs/processing.md` §6.2) naturally subsumes this mechanism. Each round
-completes fully (FIFO, no priority preemption), and `production_steps` priority
-demotion is applied when the request re-enters the admission queue between
-rounds. Clean stop is no longer the trigger — round completion is.
+(`docs/processing.md` §6.2) naturally subsumes this mechanism. `production_steps`
+priority demotion is applied when the request re-enters the admission queue
+between rounds. With pipelined rounds (§5.3), demotion is checked as each
+round's DAG completes — not blocked by tail work units from earlier rounds.
 Non-adaptive workflows still use the original clean-stop mechanism.
 
 ### DD-12: Adaptive execution instead of dedicated pilot
 
 **Decision**: WMS2 uses the first processing round (Round 0) as an implicit
-pilot. It processes `first_round_work_units` work units (default 1) using
-request resource defaults. The outputs are real production data (registered
-in DBS, archived to tape), not throwaway measurements. After Round 0
-completes, FJR metrics are aggregated and used to optimize all parameters
-for Round 1+. A single work unit validates the pipeline quickly before
-committing more resources. See `docs/processing.md` §6.2.
+pilot. It typically processes `first_round_work_units` work units (default 1)
+using request resource defaults. The outputs are real production data
+(registered in DBS, archived to tape), not throwaway measurements. As work
+units complete, FJR metrics are aggregated and used to optimize parameters
+for subsequent rounds. See `docs/processing.md` §6.2.
+
+Round 0 is not treated specially by the lifecycle manager — the same round
+advance rules (completion fraction, running fraction, concurrency cap) apply
+to all rounds. The typical pilot configuration (1 WU, request defaults) is a
+parameter choice, not a hardcoded constraint. A request could use 3 WUs for
+round 0 and start the next round as soon as the first WU completes and
+provides metrics.
 
 **Why**: A dedicated pilot phase adds ~8 hours of latency and produces no
 usable output. Round 0 starts producing real results immediately while
 collecting the same performance data. Most optimization gains are realized
-by Round 1. The multi-round lifecycle means every workflow benefits from
-measured data for the bulk of its processing.
+after the first WU completes. The multi-round lifecycle means every workflow
+benefits from measured data for the bulk of its processing.
 
 **Rejected alternative**: *Dedicated pilot job with iterative measurement*. Adds latency, complexity (extra request/workflow states, pilot tracking fields, pilot parsing logic), and may not be representative. The adaptive approach achieves the same goal (accurate resource estimates) without a separate phase, using production data that is inherently representative.
 
@@ -3594,15 +3644,51 @@ FJR RSS, while it only samples at event boundaries and misses intra-event peaks,
 
 **Rejected alternative**: *P90 or median of cgroup peaks across jobs*. More stable than MAX, but still higher than necessary for most jobs and still subject to sampling artifacts. The fundamental problem is that 2-second sampling of a 24-second transient creates a biased estimator — no percentile choice fixes this.
 
-### DD-19: Per-batch merge with oversized file remote copy
+### DD-19: Direct XRootD merge with oversized file remote copy
 
-**Decision**: The merge script downloads and merges one batch (~4 GB) at a time, cleaning scratch between batches. Files that are individually >= 75% of the target merge size are remote-copied directly between storage endpoints (never downloaded to scratch).
+**Decision**: The merge script reads proc output files directly from site storage via `root://` URLs using cmsRun's native XRootD support, eliminating the download-to-scratch step. Files are batched by target merge size (~4 GB) to control merged output file size. Files that are individually >= 75% of the target merge size are remote-copied directly between storage endpoints (never downloaded to scratch).
 
-**Why**: Grid worker nodes have limited scratch disk — typically 2–3 GB per core (e.g. ~20 GB for an 8-core slot at T2_CH_CERN). Multi-tier StepChain workflows can produce 15+ GB per proc job (e.g. 14 GB AODSIM + 1 GB MINIAODSIM + 15 MB NANOAODSIM). Under the previous approach (download all proc outputs, then merge), a work unit with even 3 proc jobs required ~96 GB of scratch, far exceeding the ~20 GB available. This made merge disk the binding constraint on work unit size, limiting throughput to 3 jobs per work unit. With per-batch processing, peak scratch is ~8 GB regardless of work unit size, and WU sizing is driven purely by the target merged file size.
+**Why**: Downloading proc outputs to local scratch was the dominant bottleneck in merge wall time — merge jobs spent 30–60+ minutes on xrdcp transfers before any actual merging. Since all CMS T1/T2 sites provide XRootD endpoints (AAA requirement), cmsRun can read input files natively via `root://` protocol, streaming data on demand. This eliminates the download phase entirely, reduces peak scratch from ~2× target size to ~1× (only the merged output file), and significantly cuts merge wall time.
 
-**Rejected alternative**: *Download all files to scratch, merge all at once* (the previous design). Simple but unscalable — scratch disk becomes the bottleneck for multi-tier workflows with large output tiers. Requires either very small work units (poor throughput) or very large scratch requests (limits site matching).
+**Rejected alternative**: *Download all files to scratch, merge all at once*. Unscalable — scratch disk becomes the bottleneck for multi-tier workflows with large output tiers.
 
-**Rejected alternative**: *Per-tier merge jobs* (one merge job per output tier, like WMAgent). Would solve the disk problem but fundamentally changes the DAG structure — one merge group would need N merge nodes instead of one. Increases DAGMan complexity, scheduling overhead, and makes site pinning harder (all N merge jobs must land at the same site). Per-batch processing within a single merge job achieves the same disk efficiency without DAG restructuring.
+**Rejected alternative**: *Download per-batch to scratch, merge locally* (the previous design). Functional but slow — the sequential download→merge→upload→cleanup cycle per batch made merge the longest phase, often exceeding proc wall time for small work units. Direct XRootD reads pipeline data transfer with merge processing.
+
+**Rejected alternative**: *Per-tier merge jobs* (one merge job per output tier, like WMAgent). Would solve the disk problem but fundamentally changes the DAG structure — one merge group would need N merge nodes instead of one. Increases DAGMan complexity, scheduling overhead, and makes site pinning harder (all N merge jobs must land at the same site).
+
+### DD-20: Pipelined rounds instead of sequential
+
+**Decision**: Rounds can overlap. The lifecycle manager starts the next round without waiting for the previous round's DAG to complete. Tail work units from earlier rounds continue running and their output is accepted.
+
+**Why**: The "tail effect" — a few slow or stuck work units blocking the entire pipeline — adds hours of dead time per round. With 10 rounds, cumulative delay is significant. Pipelining eliminates this without sacrificing correctness: event ranges are non-overlapping (reserved at planning time), output is additive, and adaptive optimization uses the best available metrics.
+
+**Why not kill tails**: Killing wastes completed work within the WU (proc jobs may have finished, only merge is pending). Letting tails run costs little — they consume slots that would otherwise sit idle between rounds.
+
+**Trade-off**: Multiple concurrent DAGs per request increases management complexity (polling, status tracking, termination). Bounded by the `max_concurrent_rounds` parameter.
+
+### DD-21: Event offsets reserved at planning time
+
+**Decision**: `next_first_event` (GEN) and `file_offset` (file-based) are advanced when the DAG is planned, not when it completes.
+
+**Why**: With pipelined rounds, the next round is planned before the current one completes. Event ranges must be reserved at planning time to avoid overlap between concurrent rounds. This is a simple change with no correctness risk — event ranges are independent regardless of execution order.
+
+### DD-22: Per-DAG schedd assignment
+
+**Decision**: Each DAG is assigned to a schedd at submission time. Different rounds of the same request may use different schedds. The request is not bound to a single schedd.
+
+**Why**: Schedds need maintenance, can crash, or become overloaded. Binding a request to one schedd means the request is stuck if that schedd goes down. Per-DAG assignment allows routing new work away from a troubled schedd while earlier rounds continue there. One DAG cannot span multiple schedds (HTCondor constraint: DAGMan manages its nodes through its local schedd), but `work_units_per_round` bounds how much work goes to one schedd at a time. Load distribution across requests happens naturally — different requests' rounds land on different schedds.
+
+**Rejected alternative**: *Per-request schedd binding* (CRABServer model). CRABServer pins a task to one schedd because its resubmission mechanism (hold/edit/release) requires the same schedd. WMS2's pipelined rounds are independent DAGs with no cross-round references on the schedd, so per-request binding is unnecessary and reduces resilience.
+
+### DD-23: Spool-free data retrieval via condor_transfer_data
+
+**Decision**: WMS2 retrieves job output files (metrics, manifests, error data) using HTCondor's `condor_transfer_data` API instead of reading from sshfs-mounted spool directories. Data is stored in the database at retrieval time.
+
+**Why**: Spool access is unreliable (schedd cleans spool after DAGMan exits, causing race conditions), doesn't scale to multiple schedds (N sshfs mounts), is read-only (can't update deployed files for rescue DAGs), and is a security concern on shared schedds (spool contains data from all users). `condor_transfer_data` is HTCondor's native file retrieval mechanism — it works across any schedd without persistent mounts, uses the same authentication as job submission, and retrieves files on demand.
+
+**Rejected alternatives**:
+- *POST script API callbacks*: POST scripts push data to WMS2 via HTTP. Adds a network dependency (schedd must reach WMS2 API) and requires authentication infrastructure. More complex than using HTCondor's existing file transfer.
+- *Job classad storage*: Store results in the job's classad. Size-limited and not designed for structured data like metrics or manifests.
 
 ---
 

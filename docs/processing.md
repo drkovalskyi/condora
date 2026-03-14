@@ -4,11 +4,11 @@
 
 | Field | Value |
 |---|---|
-| **Spec Version** | 0.1.0 |
+| **Spec Version** | 0.2.0 |
 | **Status** | DRAFT |
-| **Date** | 2026-02-25 |
+| **Date** | 2026-03-14 |
 | **Authors** | CMS Computing |
-| **Parent Spec** | docs/spec.md (WMS2 v2.7.0) |
+| **Parent Spec** | docs/spec.md (WMS2 v2.14.0) |
 | **Related** | docs/adaptive.md (Adaptive Execution v1.0.0) |
 
 ---
@@ -528,21 +528,16 @@ Each production round processes at most `work_units_per_round` WUs of remaining 
 ### 6.3 Round Lifecycle
 
 ```
-adaptive=true:
+adaptive=true (pipelined):
 
-  Round 0: QUEUED → ACTIVE (pilot, 1 WU, request defaults) → complete
-           → collect metrics → QUEUED (back to admission queue)
+  Round 0:  ████████████████░░░░░░░░
+  Round 1:          ████████████████████████░░░░░░
+  Round 2:                    ████████████████████████████
+                                                    ↑
+                                         events_produced ≥ target
+                                         → stop planning, let tails finish
 
-  Round 1: QUEUED → ACTIVE (10 WUs, optimized params) → complete
-           → update metrics → QUEUED
-
-  Round 2: QUEUED → ACTIVE (10 WUs, same or re-tuned params) → complete
-           → QUEUED
-
-  ...
-
-  Round K: QUEUED → ACTIVE (remaining ≤10 WUs) → complete
-           → all work done → COMPLETED
+  ████ = active work units    ░░░ = tail work units (running, not blocking)
 
 adaptive=false:
 
@@ -551,15 +546,45 @@ adaptive=false:
 
 **Key properties:**
 
-- **Rounds run to completion.** Once a round starts, it finishes — no priority-based preemption mid-round. This prevents the starvation problem where partially-processed requests hang because their jobs lost priority.
-- **FIFO within a round, priority between rounds.** The admission controller dispatches the next round based on priority. A low-priority request waits its turn after each round completes.
-- **Fixed round size limits resource commitment.** Round 0 uses just 1 WU (pilot); subsequent rounds use 10 WUs × optimized jobs_per_group jobs — a bounded commitment. Other requests get their turn after each round.
-- **Partial production is subsumed.** Priority demotion (`production_steps`) applies between rounds when the request re-enters the queue. No need for clean stop — the round boundary is the natural scheduling point.
-- **Each DAG is self-contained.** Processing blocks, output management, and metrics are per-DAG. No cross-DAG state.
+- **Rounds overlap.** A new round starts when enough work units in the
+  current round have completed, without waiting for tail work units.
+  Tails continue running in the background — their output is accepted
+  when they complete.
+- **Round advance requires progress.** Three conditions must be met
+  before the next round is released: (1) enough WUs completed in the
+  current round (`round_advance_completion_fraction`, default 0.5),
+  (2) enough nodes actually running across active DAGs
+  (`round_advance_running_fraction`, default 0.3), and (3) fewer than
+  `max_concurrent_rounds` (default 3) DAGs active for this request.
+  The running fraction threshold prevents piling up idle work when the
+  request has low priority and isn't getting slots.
+- **No round is special.** Round 0 is typically configured as a small
+  pilot (1–3 WUs, request defaults), but the lifecycle manager applies
+  the same round advance rules to all rounds. The pilot configuration
+  is a parameter choice, not a hardcoded behavior.
+- **Fixed round size limits resource commitment.** Each round uses
+  `work_units_per_round` WUs — a bounded commitment to one schedd.
+  Other requests get their turn via the admission controller.
+- **Partial production is subsumed.** Priority demotion
+  (`production_steps`) applies as rounds complete and the request
+  re-enters the admission queue.
+- **Each DAG is self-contained.** Processing blocks, output management,
+  and metrics are per-DAG. No cross-DAG state.
+- **Overproduction is acceptable.** With pipelined rounds, the total
+  planned events may slightly exceed `target_events`. This is preferable
+  to pipeline stalls. When the target is met, no new rounds are planned.
+  Running DAGs finish naturally.
 
-The workflow row's `dag_id` points to the current DAG. Previous DAGs remain in the database as history. Completed work units from earlier rounds have already been processed through OutputManager — they are safe regardless of subsequent rounds.
+The workflow row's `dag_id` points to the most recently planned DAG
+(the "head"). Previous DAGs remain in the database. The lifecycle
+manager polls all non-terminal DAGs for a workflow. Completed work
+units from earlier rounds have already been processed through
+OutputManager — they are safe regardless of subsequent rounds.
 
-For GEN workflows, event ranges are non-overlapping by construction (each round starts where the previous ended). For file-based workflows, files processed in earlier rounds are excluded from subsequent rounds' splitting input.
+For GEN workflows, event ranges are non-overlapping by construction —
+each round reserves its range at planning time (see §6.5). For
+file-based workflows, input files are partitioned at planning time;
+files assigned to round N are excluded from round N+1's input.
 
 ### 6.4 Adaptive Job Split
 
@@ -577,7 +602,7 @@ No conflict with merge group composition — each round's groups are planned fre
 
 Each round's DAG is built from scratch containing **only** the work units for that round. The DAG Planner does not build a large DAG and throttle it — it builds exactly `work_units_per_round` WUs (or fewer for the final round).
 
-**Design decision (DD-P3):** Build only the current round's WUs in each DAG. The workflow row tracks cumulative progress across rounds. Each DAG runs to natural completion — no `condor_rm`, no clean stop, no rescue DAG.
+**Design decision (DD-P3):** Build only the current round's WUs in each DAG. The workflow row tracks cumulative progress across rounds.
 
 **Why not build all remaining WUs and throttle?**
 - Generates DAG files for WUs that won't run this round (wasted I/O)
@@ -587,21 +612,25 @@ Each round's DAG is built from scratch containing **only** the work units for th
 
 **Round bookkeeping — GEN workflows:**
 
-The workflow row tracks a single counter: `next_first_event`.
+The workflow row tracks a single counter: `next_first_event`. Event
+ranges are reserved at planning time (not at round completion), so
+concurrent rounds get non-overlapping ranges even when pipelined:
 
 ```
 Round 0: next_first_event = 1
          Plan 1 WU: events 1–80,000 (pilot)
-         After completion: next_first_event = 80,001
+         Advance offset: next_first_event = 80,001
 
 Round 1: next_first_event = 80,001
-         Plan 10 WUs: events 80,001–1,232,000 (optimized params)
-         After completion: next_first_event = 1,232,001
+         Plan 10 WUs: events 80,001–1,232,000
+         Advance offset: next_first_event = 1,232,001
 
-...
+Round 2: next_first_event = 1,232,001    (planned while round 1 still running)
+         Plan 10 WUs: events 1,232,001–2,384,000
+         Advance offset: next_first_event = 2,384,001
 ```
 
-The DAG Planner reads `next_first_event` and `RequestNumEvents` to determine remaining work. If `next_first_event > RequestNumEvents`, all work is done.
+The DAG Planner reads `next_first_event` and `RequestNumEvents` to determine remaining work. If `next_first_event > RequestNumEvents`, all work is planned (though earlier rounds may still be running).
 
 **Round bookkeeping — file-based workflows:**
 

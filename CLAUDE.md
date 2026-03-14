@@ -104,7 +104,7 @@ uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
 - **Payload agnosticism.** WMS2 does not know or care what runs inside a job (single-step, multi-step, StepChain). The sandbox/wrapper handles payload execution. Never add payload-specific logic to WMS2 core.
 - **Single state machine owner.** The Request Lifecycle Manager is the only component that transitions request status. Other components are stateless workers called by it. Never add independent polling loops to components.
 - **Site selection belongs to HTCondor.** WMS2 does not do load balancing or site assignment. The landing node mechanism lets HTCondor pick sites via normal negotiation. Never add site-selection logic to the DAG Planner.
-- **One DAG per workflow from WMS2's perspective.** WMS2 submits and monitors one top-level DAG. Merge group sub-DAGs are DAGMan's internal concern.
+- **One DAG per round, multiple rounds per workflow.** Each round produces one top-level DAG. With pipelined rounds, multiple DAGs may be active concurrently for one workflow. Merge group sub-DAGs within each top-level DAG are DAGMan's internal concern. Each DAG is assigned to one schedd; different rounds may use different schedds.
 
 ## Restarting the WMS2 service
 
