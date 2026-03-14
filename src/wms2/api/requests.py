@@ -783,20 +783,18 @@ def _scan_site_performance(dag_infos: list[dict]) -> list[dict]:
                 elif node == "cleanup":
                     cleanup_ts = ts
 
-            # Compute durations (only if we have landing + last_proc at minimum)
-            if not landing_ts or not last_proc_ts:
-                continue
-            proc_sec = (last_proc_ts - landing_ts).total_seconds()
-
+            # Compute durations
+            proc_sec = None
             merge_sec = None
-            if merge_ts and last_proc_ts:
-                merge_sec = (merge_ts - last_proc_ts).total_seconds()
-
             total_sec = None
-            if cleanup_ts:
-                total_sec = (cleanup_ts - landing_ts).total_seconds()
-            elif merge_ts:
-                total_sec = (merge_ts - landing_ts).total_seconds()
+            if landing_ts and last_proc_ts:
+                proc_sec = (last_proc_ts - landing_ts).total_seconds()
+                if merge_ts:
+                    merge_sec = (merge_ts - last_proc_ts).total_seconds()
+                if cleanup_ts:
+                    total_sec = (cleanup_ts - landing_ts).total_seconds()
+                elif merge_ts:
+                    total_sec = (merge_ts - landing_ts).total_seconds()
 
             completed = dag_status == 5
             results.append({
@@ -859,7 +857,8 @@ async def get_site_performance(
         entry = site_map[site]
         if wu["completed"]:
             entry["wus_done"] += 1
-            entry["proc_secs"].append(wu["proc_sec"])
+            if wu["proc_sec"] is not None:
+                entry["proc_secs"].append(wu["proc_sec"])
             if wu["merge_sec"] is not None:
                 entry["merge_secs"].append(wu["merge_sec"])
             if wu["total_sec"] is not None:

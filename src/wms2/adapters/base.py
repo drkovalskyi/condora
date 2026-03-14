@@ -95,6 +95,16 @@ class CondorAdapter(ABC):
         """
         return []
 
+    async def retrieve_job_output(
+        self, cluster_id: str, schedd_name: str | None = None,
+    ) -> bool:
+        """Transfer output files from remote schedd spool to submit host (DD-23).
+
+        Uses condor_transfer_data to pull output files without needing
+        an sshfs spool mount. Returns True on success, False on failure.
+        """
+        return False
+
     async def query_dag_site_summary(
         self, cluster_id: str, schedd_name: str | None = None,
     ) -> dict[str, dict[str, int]]:

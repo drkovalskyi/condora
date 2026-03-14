@@ -186,13 +186,14 @@
                 <label for="stageout-mode">Stageout Mode</label>
                 <select id="stageout-mode" x-model="stageoutMode">
                     <option value="local">Local (dev pool, filesystem copy)</option>
+                    <option value="local-grid">Local-Grid (local pool, Singularity, xrdcp via localhost)</option>
                     <option value="test">Test (grid stageout, /store/temp/, _Temp RSEs)</option>
                     <option value="production">Production (grid stageout, /store/, real RSEs)</option>
                 </select>
                 <div class="form-help">Local: filesystem copy on dev VM. Test: grid xrdcp to /store/temp/ with user Rucio scope. Production: grid xrdcp to /store/ with cms scope.</div>
             </div>
 
-            <template x-if="stageoutMode !== 'local'">
+            <template x-if="stageoutMode !== 'local' && stageoutMode !== 'local-grid'">
                 <div class="form-group">
                     <label for="allowed-sites">Allowed Sites</label>
                     <input id="allowed-sites" type="text" x-model="allowedSites"

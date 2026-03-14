@@ -37,8 +37,9 @@ def inject_faults(submit_dir: str, fault: FaultSpec) -> int:
             patched += _patch_node(group_dir, "cleanup", fault)
 
     logger.info(
-        "Injected fault (target=%s, exit=%d, sig=%d) into %d submit files",
-        fault.target, fault.exit_code, fault.signal, patched,
+        "Injected fault (target=%s, exit=%d, sig=%d, retry_aware=%s) "
+        "into %d submit files",
+        fault.target, fault.exit_code, fault.signal, fault.retry_aware, patched,
     )
     return patched
 
@@ -47,11 +48,25 @@ def _patch_proc_nodes(group_dir: Path, fault: FaultSpec) -> int:
     """Patch processing node submit files within a merge group."""
     sub_files = sorted(group_dir.glob("proc_*.sub"))
     patched = 0
+    patched_node_names: list[str] = []
     for idx, sub_file in enumerate(sub_files):
         if fault.node_indices is not None and idx not in fault.node_indices:
             continue
+        if fault.retry_aware:
+            # Save original before rewriting so fault_pre.sh can restore it
+            orig_path = sub_file.with_suffix(".sub.orig")
+            orig_path.write_text(sub_file.read_text())
+            logger.debug("Saved original %s → %s", sub_file.name, orig_path.name)
         _rewrite_sub_file(sub_file, fault)
+        patched_node_names.append(sub_file.stem)
         patched += 1
+
+    if fault.retry_aware and patched_node_names:
+        _write_fault_pre_script(group_dir / "fault_pre.sh")
+        dag_file = group_dir / "group.dag"
+        if dag_file.exists():
+            _patch_dag_for_retry_aware(dag_file, set(patched_node_names))
+
     return patched
 
 
@@ -105,3 +120,49 @@ def _write_fault_wrapper(path: Path, fault: FaultSpec) -> None:
 
     path.write_text("\n".join(lines) + "\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _write_fault_pre_script(path: Path) -> None:
+    """Write a PRE script that restores the original .sub on retry."""
+    script = """\
+#!/bin/bash
+# fault_pre.sh — retry-aware PRE script for fault injection tests.
+# On first attempt ($RETRY=0): delegates to pin_site.sh (fault wrapper runs).
+# On retry ($RETRY>0): restores original .sub, then delegates to pin_site.sh.
+RETRY_NUM=$1; shift
+SUBMIT_FILE=$1
+ELECTED_SITE=$2
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ "$RETRY_NUM" -gt 0 ]; then
+    ORIG="${SUBMIT_FILE}.orig"
+    if [ -f "$ORIG" ]; then
+        cp "$ORIG" "$SUBMIT_FILE"
+    fi
+fi
+exec "$SCRIPT_DIR/pin_site.sh" "$SUBMIT_FILE" "$ELECTED_SITE"
+"""
+    path.write_text(script)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    logger.debug("Wrote fault_pre.sh at %s", path)
+
+
+def _patch_dag_for_retry_aware(dag_path: Path, node_names: set[str]) -> None:
+    """Replace pin_site.sh with fault_pre.sh $RETRY for faulted nodes."""
+    lines = dag_path.read_text().splitlines()
+    new_lines = []
+    patched = 0
+    for line in lines:
+        # Match: SCRIPT PRE proc_000000 pin_site.sh ./proc_000000.sub T2_LOCAL_DEV
+        if line.startswith("SCRIPT PRE "):
+            parts = line.split()
+            # parts: [SCRIPT, PRE, node_name, pin_site.sh, submit_file, elected_site]
+            if len(parts) >= 4 and parts[2] in node_names and parts[3].endswith("pin_site.sh"):
+                # Original: SCRIPT PRE node pin_site.sh sub site
+                # Target:   SCRIPT PRE node fault_pre.sh $RETRY sub site
+                parts[3] = "fault_pre.sh"
+                parts.insert(4, "$RETRY")
+                line = " ".join(parts)
+                patched += 1
+        new_lines.append(line)
+    dag_path.write_text("\n".join(new_lines) + "\n")
+    logger.debug("Patched %d PRE script lines in %s", patched, dag_path)

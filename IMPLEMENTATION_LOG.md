@@ -2,6 +2,89 @@
 
 <!-- Entries are in reverse chronological order (newest first). -->
 
+## Pipelined Rounds, Multi-Schedd, Spool-Free Retrieval (2026-03-14)
+
+**What**: Implemented four interconnected architectural changes from the spec
+(DD-20 through DD-23):
+
+**Phase A — Data Model + Offset Reservation at Planning Time**
+- Added `round_number` column to `dags` table and DAG model
+- Moved offset advancement (`next_first_event`, `file_offset`, `current_round`)
+  from `complete_round()` to `plan_production_dag()` — offsets are now reserved
+  at planning time so pipelined rounds don't overlap
+- Added `get_active_dags_for_workflow()` repository method
+
+**Phase B — Pipelined Rounds**
+- New config settings: `round_advance_completion_fraction` (0.5),
+  `round_advance_running_fraction` (0.3), `max_concurrent_rounds` (3)
+- Rewrote `_handle_active()` to poll ALL active DAGs per workflow, not just one
+- Added `_maybe_advance_round()` — checks WU completion fraction, running
+  fraction, and concurrency cap before starting the next round
+- Added `_process_completed_wus()` — extracted WU output registration
+- Added `_handle_single_dag_failure()` — per-DAG failure handling
+- Added `_aggregate_workflow_counts()` — sums node counts across active DAGs
+- Added `_target_reached()` — centralized target check
+- Renamed `_handle_round_completion()` → `_handle_dag_round_completion()` —
+  stays ACTIVE with pipelining, falls back to QUEUED when max_concurrent_rounds=1
+- Updated `_handle_stopping()` and `initiate_clean_stop()` for multiple DAGs
+- Updated `fail_request()` to condor_rm all active DAGs
+- Removed workflow-level node count updates from DAGMonitor (lifecycle manager
+  aggregates across all DAGs)
+
+**Phase C — Multi-Schedd Architecture**
+- New `schedd_pool` config setting (JSON array of schedds with capacity weights)
+- Created `schedd_selector.py` with capacity-weighted random selection
+- Wired into DAG submission (dag_planner) and rescue DAG submission (lifecycle)
+
+**Phase D — Spool-Free Data Retrieval**
+- Added `retrieve_job_output()` to CondorAdapter (wraps `schedd.retrieve()`)
+- Abstract method on base, implementation in HTCondorAdapter
+
+**UI**: Updated workflow-detail.js to use `round_number` from DAG API for
+round history. Settings page shows pipelining configuration.
+
+**Backward Compatibility**:
+- `max_concurrent_rounds=1` disables pipelining (sequential behavior)
+- Empty `schedd_pool` falls back to `remote_schedd`
+- Existing DAGs get `round_number=0` (correct default)
+- `_target_reached` returns True when no target is set (non-adaptive)
+
+**Machine avoidance fix**: `pin_site.sh` now uses `condor_status` to check how
+many unique machines serve the elected site before applying machine exclusions.
+If excluding all failed machines would leave zero matchable machines (e.g.
+single-machine local pool), exclusions are skipped. The failed machine is still
+recorded in `excluded_machines.txt` for multi-machine pools.
+
+**Verification**: Unit tests updated and passing (40/40). Matrix smoke tests
+all passing (6/6). All core module imports verified.
+
+---
+
+## Direct XRootD merge (2026-03-14)
+
+**What**: Merge script reads proc output files directly from site storage via
+`root://` URLs using cmsRun's native XRootD support, instead of downloading
+them to local scratch first via xrdcp.
+
+**Change**: In grid mode, `resolve_read_pfn()` resolves each input file LFN to
+a `root://` URL. These URLs are passed directly to `merge_root_tier()` →
+`write_merge_pset()` → cmsRun, which reads them natively. The download loop
+and input cleanup are removed. Batching by `max_merge_size` is preserved for
+output file size control. Oversized file handling unchanged.
+
+**Why**: Merge jobs were spending 30–60+ minutes downloading proc outputs via
+xrdcp before any actual merging. Since all CMS sites provide XRootD endpoints
+(AAA requirement), cmsRun can stream inputs directly. This eliminates the
+download phase, reduces peak scratch from ~8 GB to ~4 GB, and should
+significantly cut merge wall time.
+
+**Files**: `src/wms2/core/dag_planner.py` (merge script), `docs/spec.md` (DD-19).
+
+**Verification**: Deployed to service. Will validate with next round's merge
+jobs (current round's merges use the already-deployed old script).
+
+---
+
 **Phase**: 1 — Project Scaffold and Foundation
 
 ---

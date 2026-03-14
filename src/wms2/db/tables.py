@@ -107,6 +107,7 @@ class DAGRow(Base):
     nodes_held: Mapped[int] = mapped_column(Integer, default=0)
     total_work_units: Mapped[int] = mapped_column(Integer, default=0)
     completed_work_units: Mapped[list] = mapped_column(JSONB, default=list)
+    round_number: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="planning")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

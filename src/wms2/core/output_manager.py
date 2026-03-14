@@ -118,7 +118,7 @@ class OutputManager:
 
         # 4. Register files as Rucio DIDs — FATAL for non-local stageout
         stageout_mode = (config_data or {}).get("stageout_mode", "local")
-        if output_files and site != "local" and stageout_mode != "local":
+        if output_files and site != "local" and stageout_mode not in ("local", "local-grid"):
             await self._register_files_in_rucio(
                 block, output_files, site, config_data=config_data,
             )
@@ -160,7 +160,7 @@ class OutputManager:
         """
         cd = config_data or {}
         stageout_mode = cd.get("stageout_mode", "local")
-        if stageout_mode == "local":
+        if stageout_mode in ("local", "local-grid"):
             return
 
         # Determine scope and RSE based on stageout mode
@@ -364,7 +364,7 @@ class OutputManager:
             # Retry replica registration for files not yet in Rucio.
             # register_replicas / add_did / attach_dids are idempotent,
             # so safe to call again even if some files were already registered.
-            if (stageout_mode != "local"
+            if (stageout_mode not in ("local", "local-grid")
                     and block.output_files
                     and self.site_manager):
                 files_by_site: dict[str, list[dict]] = {}

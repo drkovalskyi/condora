@@ -202,7 +202,12 @@ async def complete_round(repo, settings, workflow, dag):
     config = workflow.config_data or {}
     is_gen = config.get("_is_gen", False)
     params = workflow.splitting_params or {}
-    current_round = getattr(workflow, "current_round", 0) or 0
+    # DD-21: Use the DAG's round_number (set at planning time) rather than
+    # workflow.current_round, which is now advanced by the planner before
+    # the DAG completes.
+    current_round = getattr(dag, "round_number", None)
+    if current_round is None:
+        current_round = getattr(workflow, "current_round", 0) or 0
 
     # ── Count proc jobs ──
     node_counts = dag.node_counts or {}
@@ -323,27 +328,14 @@ async def complete_round(repo, settings, workflow, dag):
                 tp_opt.get("estimated_total_wall_sec", 0) / 3600,
             )
 
-    # ── Advance offset and round ──
+    # ── Record round completion ──
+    # DD-21: Offsets and current_round are now advanced at plan time
+    # (in plan_production_dag), not at completion time.  We only store
+    # the enriched step_metrics here.
     new_round = current_round + 1
     update_kwargs = {
-        "current_round": new_round,
         "step_metrics": new_metrics,
     }
-    if pilot_throwaway:
-        # Don't advance offset or count events — pilot output is discarded
-        logger.info("Pilot throwaway: skipping event/file offset advance for round 0")
-    elif is_gen:
-        # Use effective_events_per_job from DAG (accounts for pilot_fraction scaling)
-        node_counts = dag.node_counts or {}
-        events_per_job = node_counts.get("effective_events_per_job") or \
-            (params.get("events_per_job") or params.get("eventsPerJob") or 100_000)
-        new_offset = (workflow.next_first_event or 1) + proc_jobs * events_per_job
-        update_kwargs["next_first_event"] = new_offset
-    else:
-        files_per_job = (params.get("files_per_job")
-                         or params.get("filesPerJob") or 1)
-        new_offset = (workflow.file_offset or 0) + proc_jobs * files_per_job
-        update_kwargs["file_offset"] = new_offset
 
     await repo.update_workflow(workflow.id, **update_kwargs)
 
@@ -574,6 +566,13 @@ class RequestLifecycleManager:
         if not workflow:
             return
 
+        # If there are already active DAGs for this workflow, transition
+        # directly to ACTIVE — _handle_active will manage them.
+        active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+        if active_dags:
+            await self.transition(request, RequestStatus.ACTIVE)
+            return
+
         # Check existing DAG state before planning a new one
         if workflow.dag_id:
             dag = await self.db.get_dag(workflow.dag_id)
@@ -593,8 +592,10 @@ class RequestLifecycleManager:
                         and bool(self.settings.spool_mount)
                         and bool(self.settings.remote_spool_prefix)
                     )
+                    from wms2.core.schedd_selector import select_schedd
                     schedd_name = (
-                        self.settings.remote_schedd if use_spool else None
+                        select_schedd(self.settings.schedd_pool, self.settings.remote_schedd)
+                        if use_spool else None
                     )
 
                     # If spool dir was cleaned up (e.g. old DAG removed),
@@ -733,238 +734,376 @@ class RequestLifecycleManager:
             await self.transition(request, RequestStatus.ACTIVE)
 
     async def _handle_active(self, request):
-        """Poll DAG status, process outputs."""
+        """Poll all active DAGs, process outputs, check round advance."""
         if self.dag_monitor is None:
             logger.debug("Skipping _handle_active: dag_monitor not available")
             return
 
         workflow = await self.db.get_workflow_by_request(request.request_name)
-        if not workflow or not workflow.dag_id:
+        if not workflow:
             return
 
-        dag = await self.db.get_dag(workflow.dag_id)
-        if not dag:
+        # Fetch all active DAGs for this workflow
+        active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+
+        # Also check the head DAG (dag_id) if no active DAGs — it may
+        # have completed or failed since last cycle.
+        if not active_dags and workflow.dag_id:
+            dag = await self.db.get_dag(workflow.dag_id)
+            if dag and dag.status == DAGStatus.COMPLETED.value:
+                await self._cleanup_condor_dag(dag)
+                await self._handle_dag_round_completion(request, workflow, dag)
+                return
+            elif dag and dag.status in (DAGStatus.PARTIAL.value, DAGStatus.FAILED.value):
+                await self._handle_single_dag_failure(request, workflow, dag)
+                return
             return
 
-        if dag.status in (DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value):
+        # Poll each active DAG
+        for dag in active_dags:
             result = await self.dag_monitor.poll_dag(dag)
 
             # Process completed work units through output manager
-            if result.newly_completed_work_units and self.output_manager:
-                from wms2.core.output_manager import RucioRegistrationError
-                try:
-                    all_blocks = await self.db.get_processing_blocks(workflow.id)
-                    # Use only the latest block per dataset (current round).
-                    # Multiple rounds create blocks with the same dataset_name;
-                    # we must register output only to the current round's blocks.
-                    latest_by_ds: dict[str, object] = {}
-                    for b in all_blocks:
-                        prev = latest_by_ds.get(b.dataset_name)
-                        if prev is None or b.created_at > prev.created_at:
-                            latest_by_ds[b.dataset_name] = b
-                    blocks = list(latest_by_ds.values())
-
-                    for wu in result.newly_completed_work_units:
-                        manifest = wu.get("manifest") or {}
-                        datasets_info = manifest.get("datasets", {})
-                        for block in blocks:
-                            ds_info = datasets_info.get(block.dataset_name, {})
-                            await self.output_manager.handle_work_unit_completion(
-                                workflow.id, block.id, {
-                                    "output_files": ds_info.get("files", []),
-                                    "site": manifest.get("site", "local"),
-                                    "node_name": wu["group_name"],
-                                },
-                                config_data=workflow.config_data,
-                            )
-                except RucioRegistrationError as e:
-                    logger.error(
-                        "Rucio registration failed for %s — holding request: %s",
-                        request.request_name, e,
-                    )
-                    await self.transition(request, RequestStatus.HELD)
-                    return
-                except Exception:
-                    logger.warning(
-                        "Output registration failed for %s — will retry next cycle",
-                        request.request_name, exc_info=True,
-                    )
-
-            # Accumulate production counters from completed work units
-            # (skip if pilot_throwaway — events don't count toward target)
             if result.newly_completed_work_units:
-                wf = await self.db.get_workflow_by_request(request.request_name)
-                wf_config = (wf.config_data or {}) if wf else {}
-                is_pilot_throwaway = (
-                    (getattr(wf, "current_round", 0) or 0) == 0
-                    and wf_config.get("pilot_throwaway", self.settings.pilot_throwaway)
-                )
-                if not is_pilot_throwaway:
-                    total_new_events = sum(
-                        wu.get("output_events", 0) for wu in result.newly_completed_work_units
-                    )
-                    if total_new_events > 0 and wf:
-                        await self.db.update_workflow(
-                            wf.id,
-                            events_produced=(wf.events_produced or 0) + total_new_events,
-                        )
+                await self._process_completed_wus(request, workflow, result)
 
-            # Every cycle: retry failed Rucio calls
-            if self.output_manager:
-                try:
-                    await self.output_manager.process_blocks_for_workflow(
-                        workflow.id, config_data=workflow.config_data,
-                    )
-                except RucioRegistrationError as e:
-                    logger.error(
-                        "Rucio retry failed for %s — holding request: %s",
-                        request.request_name, e,
-                    )
-                    await self.transition(request, RequestStatus.HELD)
-                    return
-                except Exception:
-                    logger.warning(
-                        "Output block processing failed for %s — will retry next cycle",
-                        request.request_name, exc_info=True,
-                    )
-
+            # Handle per-DAG terminal states
             if result.status == DAGStatus.COMPLETED:
-                # Best-effort check on output block archival
-                if self.output_manager:
-                    try:
-                        if not await self.output_manager.all_blocks_archived(workflow.id):
-                            logger.debug(
-                                "Blocks not yet archived for %s — proceeding anyway",
-                                request.request_name,
-                            )
-                    except Exception:
-                        logger.warning(
-                            "Block archive check failed for %s — proceeding with completion",
-                            request.request_name, exc_info=True,
-                        )
-                # Check adaptive round completion
-                if getattr(request, "adaptive", False):
-                    # Re-fetch dag — poll_dag updated DB but our object is stale
-                    dag = await self.db.get_dag(workflow.dag_id)
-                    await self._cleanup_condor_dag(dag)
-                    await self._handle_round_completion(request, workflow, dag)
-                    return
+                dag = await self.db.get_dag(dag.id)  # re-fetch after poll
                 await self._cleanup_condor_dag(dag)
-                await self.transition(request, RequestStatus.COMPLETED)
-                return
+                await self._handle_dag_round_completion(request, workflow, dag)
+                # Re-fetch request — may have transitioned
+                request = await self.db.get_request(request.request_name)
+                if not request or request.status != RequestStatus.ACTIVE.value:
+                    return
+                workflow = await self.db.get_workflow_by_request(request.request_name)
+                if not workflow:
+                    return
+                continue
+
             elif result.status in (DAGStatus.PARTIAL, DAGStatus.FAILED):
-                if self.error_handler:
-                    completion = await self.error_handler.handle_dag_completion(
-                        dag, request, workflow
-                    )
-                    if completion.action == "rescue":
-                        if completion.problem_sites:
-                            from wms2.core.error_handler import ErrorHandler
-                            ErrorHandler.apply_site_exclusions(
-                                dag.submit_dir, completion.problem_sites
-                            )
-                        await self.transition(request, RequestStatus.RESUBMITTING)
-                        return
-                # No error_handler or completion.action == "hold"
+                await self._handle_single_dag_failure(request, workflow, dag)
+                # Re-fetch — failure handler may have transitioned
+                request = await self.db.get_request(request.request_name)
+                if not request or request.status != RequestStatus.ACTIVE.value:
+                    return
+                workflow = await self.db.get_workflow_by_request(request.request_name)
+                if not workflow:
+                    return
+                continue
+
+            # Per-DAG: site exclusion, tail escalation (running DAGs only)
+            dag = await self.db.get_dag(dag.id)
+            if dag and dag.status in (DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value):
+                await self._check_mid_dag_site_exclusions(dag, workflow)
+                await self._maybe_escalate_tail_priority(dag, workflow, result)
+
+        # Every cycle: retry failed Rucio calls
+        if self.output_manager:
+            from wms2.core.output_manager import RucioRegistrationError
+            try:
+                await self.output_manager.process_blocks_for_workflow(
+                    workflow.id, config_data=workflow.config_data,
+                )
+            except RucioRegistrationError as e:
+                logger.error(
+                    "Rucio retry failed for %s — holding request: %s",
+                    request.request_name, e,
+                )
                 await self.transition(request, RequestStatus.HELD)
                 return
-            # Proactive site exclusion: when WUs have failed, check if a
-            # site is consistently broken and exclude it from idle landings.
-            dag = await self.db.get_dag(dag.id)
-            if dag:
-                await self._check_mid_dag_site_exclusions(dag, workflow)
+            except Exception:
+                logger.warning(
+                    "Output block processing failed for %s — will retry next cycle",
+                    request.request_name, exc_info=True,
+                )
 
-            # Tail WU escalation: when most WUs are done, bump remaining
-            # jobs' priority so the last few WUs don't block round completion.
-            await self._maybe_escalate_tail_priority(dag, workflow, result)
+        # Aggregate workflow-level node counts across all active DAGs (B9)
+        await self._aggregate_workflow_counts(workflow)
 
-            # RUNNING — no transition, will poll again next cycle
+        # Check if all work is done and all DAGs terminal
+        request = await self.db.get_request(request.request_name)
+        if not request or request.status != RequestStatus.ACTIVE.value:
+            return
+        workflow = await self.db.get_workflow_by_request(request.request_name)
+        if not workflow:
+            return
+        remaining_active = await self.db.get_active_dags_for_workflow(workflow.id)
+        if not remaining_active and self._target_reached(workflow):
+            await self.transition(request, RequestStatus.COMPLETED)
             return
 
-        if dag.status == DAGStatus.COMPLETED.value:
-            await self._cleanup_condor_dag(dag)
-            if self.output_manager:
-                try:
-                    if not await self.output_manager.all_blocks_archived(workflow.id):
-                        logger.debug(
-                            "Blocks not yet archived for %s — proceeding anyway",
-                            request.request_name,
+        # Check pipelined round advance conditions
+        if remaining_active:
+            await self._maybe_advance_round(request, workflow)
+
+    async def _process_completed_wus(self, request, workflow, result):
+        """Process completed work units: output registration + event counting."""
+        if not result.newly_completed_work_units:
+            return
+
+        # Output registration
+        if self.output_manager:
+            from wms2.core.output_manager import RucioRegistrationError
+            try:
+                all_blocks = await self.db.get_processing_blocks(workflow.id)
+                latest_by_ds: dict[str, object] = {}
+                for b in all_blocks:
+                    prev = latest_by_ds.get(b.dataset_name)
+                    if prev is None or b.created_at > prev.created_at:
+                        latest_by_ds[b.dataset_name] = b
+                blocks = list(latest_by_ds.values())
+
+                for wu in result.newly_completed_work_units:
+                    manifest = wu.get("manifest") or {}
+                    datasets_info = manifest.get("datasets", {})
+                    for block in blocks:
+                        ds_info = datasets_info.get(block.dataset_name, {})
+                        await self.output_manager.handle_work_unit_completion(
+                            workflow.id, block.id, {
+                                "output_files": ds_info.get("files", []),
+                                "site": manifest.get("site", "local"),
+                                "node_name": wu["group_name"],
+                            },
+                            config_data=workflow.config_data,
                         )
-                except Exception:
-                    logger.warning(
-                        "Block archive check failed for %s — proceeding with completion",
-                        request.request_name, exc_info=True,
-                    )
-            if getattr(request, "adaptive", False):
-                await self._handle_round_completion(request, workflow, dag)
-                return
-            await self.transition(request, RequestStatus.COMPLETED)
-        elif dag.status in (DAGStatus.PARTIAL.value, DAGStatus.FAILED.value):
-            if self.error_handler:
-                result = await self.error_handler.handle_dag_completion(
-                    dag, request, workflow
+            except RucioRegistrationError as e:
+                logger.error(
+                    "Rucio registration failed for %s — holding request: %s",
+                    request.request_name, e,
                 )
-                if result.action == "rescue":
-                    if result.problem_sites:
-                        from wms2.core.error_handler import ErrorHandler
-                        ErrorHandler.apply_site_exclusions(
-                            dag.submit_dir, result.problem_sites
-                        )
-                    await self.transition(request, RequestStatus.RESUBMITTING)
-                    return
-            # No error_handler or result.action == "hold"
-            await self.transition(request, RequestStatus.HELD)
+                await self.transition(request, RequestStatus.HELD)
+                return
+            except Exception:
+                logger.warning(
+                    "Output registration failed for %s — will retry next cycle",
+                    request.request_name, exc_info=True,
+                )
+
+        # Accumulate production counters (skip pilot_throwaway)
+        wf = await self.db.get_workflow_by_request(request.request_name)
+        wf_config = (wf.config_data or {}) if wf else {}
+        is_pilot_throwaway = (
+            wf_config.get("pilot_throwaway", self.settings.pilot_throwaway)
+            and not any(
+                (isinstance(item, dict) and item.get("metrics"))
+                or isinstance(item, str)
+                for item in (wf.completed_work_units if hasattr(wf, 'completed_work_units') else [])
+            )
+        )
+        # Check round 0 via the DAG's round_number to determine pilot_throwaway
+        # for the specific DAG that produced these WUs
+        dag_round = None
+        if result.newly_completed_work_units:
+            # The DAG ID is in the result
+            dag_id = result.dag_id
+            if dag_id:
+                try:
+                    from uuid import UUID
+                    dag_obj = await self.db.get_dag(UUID(dag_id) if isinstance(dag_id, str) else dag_id)
+                    if dag_obj:
+                        dag_round = getattr(dag_obj, "round_number", None)
+                except Exception:
+                    pass
+
+        is_pilot_throwaway = (
+            dag_round == 0
+            and wf_config.get("pilot_throwaway", self.settings.pilot_throwaway)
+        ) if dag_round is not None else False
+
+        if not is_pilot_throwaway:
+            total_new_events = sum(
+                wu.get("output_events", 0) for wu in result.newly_completed_work_units
+            )
+            if total_new_events > 0 and wf:
+                await self.db.update_workflow(
+                    wf.id,
+                    events_produced=(wf.events_produced or 0) + total_new_events,
+                )
+
+    async def _handle_single_dag_failure(self, request, workflow, dag):
+        """Handle a single DAG that completed with failures."""
+        if self.error_handler:
+            completion = await self.error_handler.handle_dag_completion(
+                dag, request, workflow
+            )
+            if completion.action == "rescue":
+                if completion.problem_sites:
+                    from wms2.core.error_handler import ErrorHandler
+                    ErrorHandler.apply_site_exclusions(
+                        dag.submit_dir, completion.problem_sites
+                    )
+                await self.transition(request, RequestStatus.RESUBMITTING)
+                return
+        # No error_handler or completion.action == "hold"
+        await self.transition(request, RequestStatus.HELD)
+
+    async def _aggregate_workflow_counts(self, workflow):
+        """Aggregate node counts from all active DAGs into workflow."""
+        active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+        total_nodes = 0
+        total_done = 0
+        total_failed = 0
+        total_running = 0
+        total_idle = 0
+        for d in active_dags:
+            total_nodes += d.total_nodes or 0
+            total_done += d.nodes_done or 0
+            total_failed += d.nodes_failed or 0
+            total_running += d.nodes_running or 0
+            total_idle += d.nodes_idle or 0
+        await self.db.update_workflow(
+            workflow.id,
+            total_nodes=total_nodes,
+            nodes_done=total_done,
+            nodes_failed=total_failed,
+            nodes_running=total_running,
+            nodes_queued=total_idle,
+        )
+
+    @staticmethod
+    def _target_reached(workflow) -> bool:
+        """Check if the production target has been met.
+
+        Returns True when either:
+        - GEN: events_produced >= target_events (target > 0)
+        - File-based: files_processed >= total_input_files (total > 0)
+        - No target set (target == 0): True (single-round / non-adaptive)
+        """
+        config = workflow.config_data or {}
+        is_gen = config.get("_is_gen", False)
+        if is_gen:
+            target = workflow.target_events or 0
+            produced = workflow.events_produced or 0
+            return target == 0 or produced >= target
+        else:
+            total_files = workflow.total_input_files or 0
+            processed = workflow.files_processed or 0
+            return total_files == 0 or processed >= total_files
+
+    async def _maybe_advance_round(self, request, workflow):
+        """Check round advance conditions and plan next round if met (DD-20)."""
+        config = workflow.config_data or {}
+
+        # 1. Don't start new rounds if target reached
+        if self._target_reached(workflow):
+            return
+
+        # 2. Check max_concurrent_rounds
+        active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+        if len(active_dags) >= self.settings.max_concurrent_rounds:
+            return
+
+        # 3. Check completion fraction on latest (most recently created) DAG
+        if not active_dags:
+            return
+        latest_dag = max(active_dags, key=lambda d: d.created_at)
+        total_wus = latest_dag.total_work_units or 0
+        if total_wus == 0:
+            return
+        done_wus = len(wu_names(latest_dag.completed_work_units))
+        if done_wus / total_wus < self.settings.round_advance_completion_fraction:
+            return
+
+        # 4. Check running fraction across all active DAGs
+        total_running = sum(d.nodes_running or 0 for d in active_dags)
+        total_schedulable = sum(
+            (d.nodes_running or 0) + (d.nodes_idle or 0) for d in active_dags
+        )
+        if total_schedulable > 0:
+            if total_running / total_schedulable < self.settings.round_advance_running_fraction:
+                return
+
+        # All conditions met — plan next round
+        if not self.dag_planner:
+            return
+
+        workflow = await self.db.get_workflow_by_request(request.request_name)
+        if not workflow:
+            return
+
+        try:
+            new_dag = await self.dag_planner.plan_production_dag(
+                workflow, adaptive=True,
+            )
+            if new_dag:
+                logger.info(
+                    "Request %s: pipelined round advance — new DAG %s (round %d)",
+                    request.request_name, new_dag.id,
+                    getattr(new_dag, "round_number", "?"),
+                )
+        except Exception:
+            logger.warning(
+                "Pipelined round advance failed for %s — will retry next cycle",
+                request.request_name, exc_info=True,
+            )
 
     async def _handle_stopping(self, request):
-        """Monitor clean stop progress. Retry condor_rm if DAG is still alive.
+        """Monitor clean stop progress. Remove ALL active DAGs.
 
-        If the DAG's stop_reason starts with "FAIL:", transition to FAILED
+        If a DAG's stop_reason starts with "FAIL:", transition to FAILED
         instead of PAUSED (operator requested fail via /fail endpoint).
         """
         workflow = await self.db.get_workflow_by_request(request.request_name)
-        if not workflow or not workflow.dag_id:
+        if not workflow:
             return
 
-        dag = await self.db.get_dag(workflow.dag_id)
-        if not dag:
+        # Collect all active DAGs + the head DAG
+        active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+        head_dag = None
+        if workflow.dag_id:
+            head_dag = await self.db.get_dag(workflow.dag_id)
+            if head_dag and head_dag not in active_dags:
+                # Head DAG may already be terminal — only add if still active
+                if head_dag.status in (DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value):
+                    active_dags.append(head_dag)
+
+        if not active_dags and not head_dag:
             return
 
-        dagman_status = await self.condor.query_job(
-            schedd_name=dag.schedd_name, cluster_id=dag.dagman_cluster_id
-        )
-        if dagman_status is None:
-            # DAGMan process gone — stop complete
-            fail_requested = (dag.stop_reason or "").startswith("FAIL:")
-
-            if fail_requested:
-                # Operator requested fail — mark everything failed
-                await self.db.update_dag(dag.id, status=DAGStatus.FAILED.value)
-                for d in await self.db.list_dags(workflow_id=workflow.id):
-                    if d.status not in (DAGStatus.FAILED.value, DAGStatus.COMPLETED.value):
-                        await self.db.update_dag(d.id, status=DAGStatus.FAILED.value)
-                for block in await self.db.get_processing_blocks(workflow.id):
-                    if block.status == "open":
-                        await self.db.update_processing_block(block.id, status="failed")
-                await self.db.update_workflow(workflow.id, status="failed")
-                await self.transition(request, RequestStatus.FAILED)
-                logger.info("Request %s: stopping -> failed (operator-initiated)", request.request_name)
+        all_stopped = True
+        fail_requested = False
+        for dag in active_dags:
+            dagman_status = await self.condor.query_job(
+                schedd_name=dag.schedd_name, cluster_id=dag.dagman_cluster_id
+            )
+            if dagman_status is None:
+                # DAGMan process gone
+                if (dag.stop_reason or "").startswith("FAIL:"):
+                    fail_requested = True
             else:
-                # Normal clean stop — park in PAUSED
-                await self.db.update_dag(dag.id, status=DAGStatus.STOPPED.value)
-                await self.transition(request, RequestStatus.PAUSED)
+                all_stopped = False
+                # DAGMan still alive — retry condor_rm
+                try:
+                    await self.condor.remove_job(
+                        schedd_name=dag.schedd_name,
+                        cluster_id=dag.dagman_cluster_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Retry condor_rm failed for DAG %s (%s)",
+                        dag.dagman_cluster_id, request.request_name,
+                        exc_info=True,
+                    )
+
+        if not all_stopped:
+            return
+
+        # All DAGs stopped
+        if fail_requested or (head_dag and (head_dag.stop_reason or "").startswith("FAIL:")):
+            for d in await self.db.list_dags(workflow_id=workflow.id):
+                if d.status not in (DAGStatus.FAILED.value, DAGStatus.COMPLETED.value):
+                    await self.db.update_dag(d.id, status=DAGStatus.FAILED.value)
+            for block in await self.db.get_processing_blocks(workflow.id):
+                if block.status == "open":
+                    await self.db.update_processing_block(block.id, status="failed")
+            await self.db.update_workflow(workflow.id, status="failed")
+            await self.transition(request, RequestStatus.FAILED)
+            logger.info("Request %s: stopping -> failed (operator-initiated)", request.request_name)
         else:
-            # DAGMan still alive — retry condor_rm
-            try:
-                await self.condor.remove_job(
-                    schedd_name=dag.schedd_name,
-                    cluster_id=dag.dagman_cluster_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Retry condor_rm failed for DAG %s (%s)",
-                    dag.dagman_cluster_id, request.request_name,
-                    exc_info=True,
-                )
+            for d in active_dags:
+                await self.db.update_dag(d.id, status=DAGStatus.STOPPED.value)
+            await self.transition(request, RequestStatus.PAUSED)
 
     async def _handle_resubmitting(self, request):
         """Prepare recovery DAG if needed, then move to admission queue.
@@ -1033,22 +1172,19 @@ class RequestLifecycleManager:
 
         workflow = await self.db.get_workflow_by_request(request_name)
         if workflow:
-            # 1. condor_rm on running DAG (swallow errors)
-            if workflow.dag_id:
-                dag = await self.db.get_dag(workflow.dag_id)
-                if dag and dag.status in (
-                    DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value
-                ):
-                    try:
-                        await self.condor.remove_job(
-                            schedd_name=dag.schedd_name,
-                            cluster_id=dag.dagman_cluster_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to remove DAG %s for %s",
-                            dag.id, request_name,
-                        )
+            # 1. condor_rm on ALL active DAGs (swallow errors)
+            active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+            for dag in active_dags:
+                try:
+                    await self.condor.remove_job(
+                        schedd_name=dag.schedd_name,
+                        cluster_id=dag.dagman_cluster_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to remove DAG %s for %s",
+                        dag.id, request_name,
+                    )
 
             # 2. Mark all non-terminal DAGs as FAILED
             for dag in await self.db.list_dags(workflow_id=workflow.id):
@@ -1383,15 +1519,16 @@ class RequestLifecycleManager:
 
     # ── Adaptive Round Completion ──────────────────────────────
 
-    async def _handle_round_completion(self, request, workflow, dag):
-        """Handle completion of one adaptive round. Delegates shared logic
-        to the module-level complete_round(), then handles termination
-        checks and state transitions.
+    async def _handle_dag_round_completion(self, request, workflow, dag):
+        """Handle completion of one DAG (one round). Delegates shared logic
+        to the module-level complete_round(), then checks whether more
+        rounds are needed.  With pipelining, the request stays ACTIVE —
+        _maybe_advance_round() handles starting new rounds.
         """
         # Re-fetch workflow to get the latest state
         workflow = await self.db.get_workflow_by_request(request.request_name)
 
-        # Shared logic: metrics, adaptive, offset advancement
+        # Shared logic: metrics, adaptive
         result = await complete_round(self.db, self.settings, workflow, dag)
         new_round = result["new_round"]
 
@@ -1403,29 +1540,6 @@ class RequestLifecycleManager:
         workflow = await self.db.get_workflow_by_request(request.request_name)
         config = workflow.config_data or {}
         is_gen = config.get("_is_gen", False)
-
-        # ── Termination check: based on actual production ──
-        if is_gen:
-            target = workflow.target_events or 0
-            produced = workflow.events_produced or 0
-            if target > 0 and produced >= target:
-                logger.info(
-                    "Request %s: COMPLETED — produced %d >= target %d output events",
-                    request.request_name, produced, target,
-                )
-                await self.transition(request, RequestStatus.COMPLETED)
-                return
-
-        else:
-            total_files = workflow.total_input_files or 0
-            processed = workflow.files_processed or 0
-            if total_files > 0 and processed >= total_files:
-                logger.info(
-                    "Request %s: COMPLETED — processed %d / %d input files",
-                    request.request_name, processed, total_files,
-                )
-                await self.transition(request, RequestStatus.COMPLETED)
-                return
 
         # Apply production_steps priority demotion between rounds
         steps = request.production_steps or []
@@ -1449,16 +1563,39 @@ class RequestLifecycleManager:
                         ],
                     )
 
+        # Check if target reached AND no more active DAGs → COMPLETED
+        remaining_active = await self.db.get_active_dags_for_workflow(workflow.id)
+        if not remaining_active and self._target_reached(workflow):
+            logger.info(
+                "Request %s: COMPLETED — target reached, all DAGs terminal",
+                request.request_name,
+            )
+            await self.transition(request, RequestStatus.COMPLETED)
+            return
+
+        # With pipelining: request stays ACTIVE.  _maybe_advance_round()
+        # in _handle_active() will plan the next round when conditions are met.
+        # For backward compat (max_concurrent_rounds=1): if no active DAGs and
+        # target not reached, transition to QUEUED so _handle_queued plans next.
+        if not remaining_active and self.settings.max_concurrent_rounds <= 1:
+            logger.info(
+                "Request %s: round %d complete, advancing to round %d "
+                "(produced=%s, target=%s)",
+                request.request_name, dag.round_number, new_round,
+                workflow.events_produced if is_gen else workflow.files_processed,
+                workflow.target_events if is_gen else workflow.total_input_files,
+            )
+            await self.transition(request, RequestStatus.QUEUED)
+            return
+
         logger.info(
-            "Request %s: round %d complete, advancing to round %d "
-            "(produced=%s, target=%s)",
-            request.request_name, workflow.current_round - 1, new_round,
+            "Request %s: DAG round %d complete (produced=%s, target=%s), "
+            "%d active DAGs remain",
+            request.request_name, dag.round_number,
             workflow.events_produced if is_gen else workflow.files_processed,
             workflow.target_events if is_gen else workflow.total_input_files,
+            len(remaining_active),
         )
-
-        # Return to admission queue for next round
-        await self.transition(request, RequestStatus.QUEUED)
 
     # ── Pilot Output Cleanup ─────────────────────────────────────
 
@@ -1495,7 +1632,7 @@ class RequestLifecycleManager:
                 pfn = mf.get("pfn", "")
                 lfn = mf.get("lfn", "")
                 try:
-                    if stageout_mode == "local":
+                    if stageout_mode in ("local", "local-grid"):
                         local_path = pfn or os.path.join(
                             self.settings.local_pfn_prefix, lfn.lstrip("/")
                         )
@@ -1563,17 +1700,22 @@ class RequestLifecycleManager:
             await self.transition(request, RequestStatus.STOPPING)
             return
 
-        # ACTIVE: remove DAGMan job
-        if not workflow.dag_id:
-            return
-        dag = await self.db.get_dag(workflow.dag_id)
-        if not dag:
+        # ACTIVE: remove ALL active DAGs
+        active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
+        if not active_dags:
+            # Fall back to head DAG
+            if workflow.dag_id:
+                dag = await self.db.get_dag(workflow.dag_id)
+                if dag and dag.status in (DAGStatus.SUBMITTED.value, DAGStatus.RUNNING.value):
+                    active_dags = [dag]
+        if not active_dags:
             return
 
-        await self.condor.remove_job(
-            schedd_name=dag.schedd_name, cluster_id=dag.dagman_cluster_id
-        )
-        await self.db.update_dag(dag.id, stop_requested_at=now, stop_reason=reason)
+        for dag in active_dags:
+            await self.condor.remove_job(
+                schedd_name=dag.schedd_name, cluster_id=dag.dagman_cluster_id
+            )
+            await self.db.update_dag(dag.id, stop_requested_at=now, stop_reason=reason)
         await self.db.update_workflow(workflow.id, status=WorkflowStatus.STOPPING.value)
         await self.transition(request, RequestStatus.STOPPING)
 

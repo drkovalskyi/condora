@@ -186,6 +186,41 @@
             </div>
 
             <div class="section">
+                <h3>Pipelining</h3>
+                <dl class="detail-grid">
+                    <dt>Max Concurrent Rounds</dt>
+                    <dd>
+                        <template x-if="editing">
+                            <input type="number" class="settings-input" x-model.number="editValues.max_concurrent_rounds" min="1">
+                        </template>
+                        <template x-if="!editing">
+                            <span x-text="settings.max_concurrent_rounds"></span>
+                        </template>
+                    </dd>
+                    <dt>Round Advance Completion</dt>
+                    <dd>
+                        <template x-if="editing">
+                            <input type="number" class="settings-input" x-model.number="editValues.round_advance_completion_fraction" min="0" max="1" step="0.1">
+                        </template>
+                        <template x-if="!editing">
+                            <span x-text="(settings.round_advance_completion_fraction * 100) + '%'"></span>
+                        </template>
+                    </dd>
+                    <dt>Round Advance Running</dt>
+                    <dd>
+                        <template x-if="editing">
+                            <input type="number" class="settings-input" x-model.number="editValues.round_advance_running_fraction" min="0" max="1" step="0.1">
+                        </template>
+                        <template x-if="!editing">
+                            <span x-text="(settings.round_advance_running_fraction * 100) + '%'"></span>
+                        </template>
+                    </dd>
+                    <dt>Schedd Pool</dt>
+                    <dd x-text="settings.schedd_pool"></dd>
+                </dl>
+            </div>
+
+            <div class="section">
                 <h3>Error Handling</h3>
                 <dl class="detail-grid">
                     <dt>Hold Threshold</dt>
@@ -244,6 +279,7 @@
                         <template x-if="editing">
                             <select class="settings-input" x-model="editValues.stageout_mode">
                                 <option value="local">local</option>
+                                <option value="local-grid">local-grid</option>
                                 <option value="test">test</option>
                                 <option value="production">production</option>
                             </select>

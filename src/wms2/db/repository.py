@@ -198,6 +198,19 @@ class Repository:
         await self.session.flush()
         return result.scalar_one_or_none()
 
+    async def get_active_dags_for_workflow(self, workflow_id: UUID) -> list[DAGRow]:
+        """All DAGs in submitted/running status for a workflow, ordered by creation."""
+        stmt = (
+            select(DAGRow)
+            .where(
+                DAGRow.workflow_id == workflow_id,
+                DAGRow.status.in_(("submitted", "running")),
+            )
+            .order_by(DAGRow.created_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def count_active_dags(self) -> int:
         stmt = select(func.count()).select_from(DAGRow).where(
             DAGRow.status.in_(("submitted", "running"))

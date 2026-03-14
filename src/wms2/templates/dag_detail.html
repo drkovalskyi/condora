@@ -2,6 +2,13 @@
 {% block title %}WMS2 — DAG {{ dag_id[:8] }}{% endblock %}
 {% block head_scripts %}
 <script src="/static/js/components/dag-detail.js"></script>
+<style>
+    th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+    th[data-sort]:hover { background: rgba(0,0,0,0.05); }
+    .table-filter { font-size: 0.8rem; padding: 0.15rem 0.4rem; border: 1px solid #ccc;
+                    border-radius: 3px; width: 14rem; margin-left: 0.5rem; }
+    .table-filter::placeholder { opacity: 0.5; }
+</style>
 {% endblock %}
 {% block content %}
 <div x-data="dagDetail('{{ dag_id|e }}')" data-dag-id="{{ dag_id|e }}">
@@ -106,34 +113,99 @@
                 </div>
             </div>
 
-            <!-- HTCondor Jobs -->
-            <template x-if="jobs.length > 0">
+            <!-- Work Unit Detail -->
+            <template x-if="_wuSummaryRaw.length > 0">
                 <div class="section">
-                    <h3>HTCondor Jobs <span style="font-size:0.85rem; opacity:0.6;" x-text="'(' + jobs.length + ')'"></span></h3>
+                    <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                        Work Unit Detail
+                        <span style="font-size:0.85rem; opacity:0.6;" x-text="'(' + wuSummary.length + ')'"></span>
+                        <input type="text" class="table-filter" placeholder="Filter..."
+                               x-model.debounce.200ms="wuFilter">
+                    </h3>
                     <table class="timeline-table">
                         <thead>
                             <tr>
-                                <th>Node</th>
-                                <th>Status</th>
-                                <th>Priority</th>
-                                <th>Wall Time</th>
-                                <th>Mem (MB)</th>
-                                <th>ReqMem</th>
-                                <th>CPU Eff</th>
-                                <th>CPUs</th>
-                                <th>Site</th>
+                                <th data-sort @click="toggleSort(wuSort, 'name')"
+                                    x-text="'WU' + sortIcon(wuSort, 'name')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'site')"
+                                    x-text="'Site' + sortIcon(wuSort, 'site')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'running')"
+                                    x-text="'Running' + sortIcon(wuSort, 'running')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'idle')"
+                                    x-text="'Idle' + sortIcon(wuSort, 'idle')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'held')"
+                                    x-text="'Held' + sortIcon(wuSort, 'held')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'avg_wall')"
+                                    x-text="'Avg Wall' + sortIcon(wuSort, 'avg_wall')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'avg_cpu_eff')"
+                                    x-text="'Avg CPU Eff' + sortIcon(wuSort, 'avg_cpu_eff')"></th>
+                                <th data-sort @click="toggleSort(wuSort, 'avg_mem')"
+                                    x-text="'Avg Mem (MB)' + sortIcon(wuSort, 'avg_mem')"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="wu in wuSummary" :key="wu.name">
+                                <tr>
+                                    <td style="font-family:monospace; font-size:0.8rem;" x-text="wu.name"></td>
+                                    <td x-text="wu.site || '—'"></td>
+                                    <td x-text="wu.running"></td>
+                                    <td x-text="wu.idle"></td>
+                                    <td>
+                                        <span :style="wu.held > 0 ? 'color:#ef4444; font-weight:600;' : ''"
+                                              x-text="wu.held"></span>
+                                    </td>
+                                    <td x-text="fmtWallTime(wu.avg_wall)"></td>
+                                    <td x-text="wu.avg_cpu_eff != null ? wu.avg_cpu_eff + '%' : '—'"></td>
+                                    <td x-text="wu.avg_mem != null ? wu.avg_mem : '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- HTCondor Jobs -->
+            <template x-if="jobs.length > 0">
+                <div class="section">
+                    <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                        HTCondor Jobs
+                        <span style="font-size:0.85rem; opacity:0.6;" x-text="'(' + filteredJobs.length + (filteredJobs.length !== jobs.length ? '/' + jobs.length : '') + ')'"></span>
+                        <input type="text" class="table-filter" placeholder="Filter (e.g. merge, held, KIT)..."
+                               x-model.debounce.200ms="jobFilter">
+                    </h3>
+                    <table class="timeline-table">
+                        <thead>
+                            <tr>
+                                <th data-sort @click="toggleSort(jobSort, 'work_unit')"
+                                    x-text="'WU' + sortIcon(jobSort, 'work_unit')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'name')"
+                                    x-text="'Node' + sortIcon(jobSort, 'name')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'status')"
+                                    x-text="'Status' + sortIcon(jobSort, 'status')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'wall_time')"
+                                    x-text="'Wall Time' + sortIcon(jobSort, 'wall_time')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'memory_mb')"
+                                    x-text="'Mem (MB)' + sortIcon(jobSort, 'memory_mb')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'request_memory')"
+                                    x-text="'ReqMem' + sortIcon(jobSort, 'request_memory')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'cpu_efficiency')"
+                                    x-text="'CPU Eff' + sortIcon(jobSort, 'cpu_efficiency')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'cpus')"
+                                    x-text="'CPUs' + sortIcon(jobSort, 'cpus')"></th>
+                                <th data-sort @click="toggleSort(jobSort, 'site')"
+                                    x-text="'Site' + sortIcon(jobSort, 'site')"></th>
                                 <th>Details</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <template x-for="j in jobs" :key="j.name">
+                            <template x-for="j in filteredJobs" :key="(j.work_unit||'') + j.name">
                                 <tr>
+                                    <td style="font-family:monospace; font-size:0.8rem; opacity:0.6;" x-text="j.work_unit || '—'"></td>
                                     <td style="font-family:monospace; font-size:0.8rem;">
                                         <a href="#" @click.prevent="jumpToNodeLog(j.name)"
                                            x-text="j.name" style="text-decoration:underline; cursor:pointer;"></a>
                                     </td>
                                     <td x-html="statusBadge(j.status)"></td>
-                                    <td x-text="j.priority != null ? j.priority : '—'"></td>
                                     <td x-text="fmtWallTime(j.wall_time)"></td>
                                     <td x-text="j.memory_mb != null ? j.memory_mb : '—'"></td>
                                     <td x-text="j.request_memory || '—'"></td>
@@ -312,21 +384,33 @@
             <!-- History timeline -->
             <template x-if="history.length > 0">
                 <div class="section">
-                    <h3>History</h3>
+                    <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                        History
+                        <span style="font-size:0.85rem; opacity:0.6;" x-text="'(' + filteredHistory.length + ')'"></span>
+                        <input type="text" class="table-filter" placeholder="Filter..."
+                               x-model.debounce.200ms="histFilter">
+                    </h3>
                     <table class="timeline-table">
                         <thead>
                             <tr>
-                                <th>Event</th>
-                                <th>From</th>
-                                <th>To</th>
-                                <th>Done</th>
-                                <th>Running</th>
-                                <th>Failed</th>
-                                <th>Time</th>
+                                <th data-sort @click="toggleSort(histSort, 'event_type')"
+                                    x-text="'Event' + sortIcon(histSort, 'event_type')"></th>
+                                <th data-sort @click="toggleSort(histSort, 'from_status')"
+                                    x-text="'From' + sortIcon(histSort, 'from_status')"></th>
+                                <th data-sort @click="toggleSort(histSort, 'to_status')"
+                                    x-text="'To' + sortIcon(histSort, 'to_status')"></th>
+                                <th data-sort @click="toggleSort(histSort, 'nodes_done')"
+                                    x-text="'Done' + sortIcon(histSort, 'nodes_done')"></th>
+                                <th data-sort @click="toggleSort(histSort, 'nodes_running')"
+                                    x-text="'Running' + sortIcon(histSort, 'nodes_running')"></th>
+                                <th data-sort @click="toggleSort(histSort, 'nodes_failed')"
+                                    x-text="'Failed' + sortIcon(histSort, 'nodes_failed')"></th>
+                                <th data-sort @click="toggleSort(histSort, 'created_at')"
+                                    x-text="'Time' + sortIcon(histSort, 'created_at')"></th>
                             </tr>
                         </thead>
                         <tbody>
-                            <template x-for="h in history" :key="h.id">
+                            <template x-for="h in filteredHistory" :key="h.id">
                                 <tr>
                                     <td x-text="h.event_type"></td>
                                     <td x-html="h.from_status ? statusBadge(h.from_status) : '—'"></td>

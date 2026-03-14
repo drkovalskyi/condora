@@ -93,6 +93,7 @@ class DAG(BaseModel):
     nodes_held: int = 0
     total_work_units: int = 0
     completed_work_units: list = []
+    round_number: int = 0
     status: DAGStatus = DAGStatus.PLANNING
     created_at: datetime
     submitted_at: Optional[datetime] = None

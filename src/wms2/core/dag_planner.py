@@ -685,6 +685,7 @@ class DAGPlanner:
             total_edges=total_edges,
             node_counts=node_counts,
             total_work_units=len(merge_groups),
+            round_number=current_round,
             status=DAGStatus.READY.value,
         )
 
@@ -723,7 +724,10 @@ class DAGPlanner:
 
         # 11. Submit DAG to HTCondor
         t_submit = time.monotonic()
-        remote_schedd = self.settings.remote_schedd if use_spool else None
+        from wms2.core.schedd_selector import select_schedd
+        remote_schedd = select_schedd(
+            self.settings.schedd_pool, self.settings.remote_schedd,
+        ) if use_spool else None
         cluster_id, schedd = await self.condor.submit_dag(
             dag_file_path, force=True, spool=use_spool,
             schedd_name=remote_schedd,
@@ -756,12 +760,30 @@ class DAGPlanner:
             submitted_at=now,
         )
 
-        await self.db.update_workflow(
-            workflow.id,
-            dag_id=dag.id,
-            status=WorkflowStatus.ACTIVE.value,
-            total_nodes=total_nodes,
+        # DD-21: Reserve event/file range at planning time so pipelined
+        # rounds don't overlap.  Offset is advanced now, not at round completion.
+        wf_update = {
+            "dag_id": dag.id,
+            "status": WorkflowStatus.ACTIVE.value,
+            "total_nodes": total_nodes,
+            "current_round": current_round + 1,
+        }
+        sp = workflow.splitting_params or {}
+        pilot_throwaway = (
+            current_round == 0
+            and config.get("pilot_throwaway", self.settings.pilot_throwaway)
         )
+        if not pilot_throwaway:
+            if is_gen:
+                effective_epj = node_counts.get("effective_events_per_job") or \
+                    (sp.get("events_per_job") or sp.get("eventsPerJob") or 100_000)
+                start_event = getattr(workflow, "next_first_event", 1) or 1
+                wf_update["next_first_event"] = start_event + total_proc * int(effective_epj)
+            else:
+                files_per_job = (sp.get("files_per_job") or sp.get("filesPerJob") or 1)
+                wf_update["file_offset"] = (workflow.file_offset or 0) + total_proc * files_per_job
+
+        await self.db.update_workflow(workflow.id, **wf_update)
 
         logger.info(
             "Production DAG planned for workflow %s (round %d): "
@@ -2158,9 +2180,11 @@ else
 fi
 # Build Requirements: site pinning + machine exclusions (if any).
 # Uses python3 to avoid sed quoting issues with nested double quotes.
+# Machine avoidance is skipped when excluding would leave zero matchable
+# machines (e.g. single-machine pool).
 EXCL_FILE="$(dirname "$SUBMIT_FILE")/excluded_machines.txt"
 python3 -c "
-import sys, os
+import sys, os, subprocess
 site, sub_file, excl_file = sys.argv[1], sys.argv[2], sys.argv[3]
 req = '(TARGET.GLIDEIN_CMSSite == \\"%s\\")' % site
 if os.path.isfile(excl_file):
@@ -2169,7 +2193,24 @@ if os.path.isfile(excl_file):
         m = line.strip()
         if m and m not in seen:
             seen.add(m)
-            req += ' && (TARGET.Machine != \\"%s\\")' % m
+    # Check how many unique machines serve this site.  If excluding
+    # all failed machines would leave zero, skip machine avoidance.
+    if seen:
+        try:
+            out = subprocess.check_output(
+                ['condor_status', '-autoformat', 'Machine',
+                 '-constraint', 'GLIDEIN_CMSSite == \\"%s\\"' % site],
+                stderr=subprocess.DEVNULL, timeout=10,
+            ).decode()
+            pool_machines = set(l.strip() for l in out.splitlines() if l.strip())
+        except Exception:
+            pool_machines = set()
+        remaining = pool_machines - seen
+        if remaining or not pool_machines:
+            # Safe to exclude — other machines available (or pool unknown)
+            for m in sorted(seen):
+                req += ' && (TARGET.Machine != \\"%s\\")' % m
+        # else: skip exclusions — would leave zero matchable machines
 lines = open(sub_file).readlines()
 with open(sub_file, 'w') as f:
     found = False
@@ -5076,26 +5117,22 @@ if root_entries:
 
                 out_dir = os.path.join(work_dir, f"_merged_{ds_tier}")
                 for batch_idx, batch in enumerate(batches):
-                    # Download batch to scratch
+                    # Resolve to root:// read URLs — cmsRun reads directly, no download
                     local_files = []
                     for basename in batch:
                         lfn = unmerged_root_lfns[basename]
-                        pfn, cmd = stageout.resolve_write_pfn(lfn, siteconfig)
-                        local = os.path.join(work_dir, basename)
                         try:
-                            stageout.download_file(pfn, local, cmd)
-                            local_files.append(local)
-                        except Exception as e:
-                            print(f"    WARNING: download failed for {basename}: {e}")
+                            read_pfn, _ = stageout.resolve_read_pfn(lfn, siteconfig)
+                            local_files.append(read_pfn)
+                        except Exception:
                             try:
-                                read_pfn, _ = stageout.resolve_read_pfn(lfn, siteconfig)
-                                local_files.append(read_pfn)
-                                print(f"    Falling back to direct access: {read_pfn}")
-                            except Exception:
-                                print(f"    Skipping {basename}")
+                                pfn, _ = stageout.resolve_write_pfn(lfn, siteconfig)
+                                local_files.append(pfn)
+                            except Exception as e:
+                                print(f"    WARNING: cannot resolve {basename}: {e}")
 
                     if not local_files:
-                        print(f"  Batch {batch_idx+1}/{len(batches)}: no files available, skipping")
+                        print(f"  Batch {batch_idx+1}/{len(batches)}: no files resolvable, skipping")
                         continue
 
                     # Merge
@@ -5104,10 +5141,9 @@ if root_entries:
                         merge_root_tier(ds_tier, local_files, step_idx, out_dir, manifest, work_dir)
                     else:
                         for rf in local_files:
-                            if os.path.isfile(rf):
-                                out_name = f"{uuid.uuid4()}.root"
-                                dest = os.path.join(out_dir, out_name)
-                                shutil.copy2(rf, dest)
+                            out_name = f"{uuid.uuid4()}.root"
+                            dest = os.path.join(out_dir, out_name)
+                            stageout.download_file(rf, dest, grid_write_cmd)
 
                     # Upload merged outputs, collect metadata, and free scratch
                     for fname in sorted(os.listdir(out_dir)):
@@ -5133,14 +5169,9 @@ if root_entries:
                             stageout.upload_file(local_file, pfn, cmd)
                             os.remove(local_file)
 
-                    # Cleanup downloaded inputs
-                    for lf in local_files:
-                        if os.path.isfile(lf):
-                            os.remove(lf)
-
                     batch_sz = sum(file_sizes_map.get(b, 0) for b in batch)
                     print(f"  Batch {batch_idx+1}/{len(batches)}: {len(local_files)} files "
-                          f"({batch_sz / (1024**2):.0f} MB) merged & uploaded")
+                          f"({batch_sz / (1024**2):.0f} MB) merged via direct read & uploaded")
         else:
             # Local mode: write directly to local PFN path
             out_dir = lfn_to_pfn(local_pfn_prefix, merged_lfn_dir)

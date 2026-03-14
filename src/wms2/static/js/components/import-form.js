@@ -129,8 +129,8 @@ document.addEventListener('alpine:init', () => {
             if (this.pilotFraction !== '') body.pilot_fraction = parseFloat(this.pilotFraction);
             if (this.pilotThrowaway) body.pilot_throwaway = true;
             body.stageout_mode = this.stageoutMode;
-            body.condor_pool = this.stageoutMode === 'local' ? 'local' : 'global';
-            if (this.stageoutMode !== 'local' && this.allowedSites.trim()) {
+            body.condor_pool = (this.stageoutMode === 'local' || this.stageoutMode === 'local-grid') ? 'local' : 'global';
+            if (this.stageoutMode !== 'local' && this.stageoutMode !== 'local-grid' && this.allowedSites.trim()) {
                 body.allowed_sites = this.allowedSites.trim();
             }
             body.high_priority = parseInt(this.highPriority);

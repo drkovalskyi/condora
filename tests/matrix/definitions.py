@@ -15,6 +15,7 @@ class FaultSpec:
     signal: int = 0
     delay_sec: int = 0
     skip_output: bool = False
+    retry_aware: bool = False
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class VerifySpec:
     expect_merged_outputs: bool = True
     expect_cleanup_ran: bool = True
     expect_dag_status: str | None = None
+    expect_excluded_machines: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,4 +66,5 @@ class WorkflowDef:
     safety_margin: float = 0.20  # safety margin on measured memory (0.20 = 20%)
     min_threads: int = 2  # minimum threads per job (floor for adaptive tuning)
     singularity_image: str = ""  # "" = disabled, "auto" or explicit path → +SingularityImage
+    stageout_mode: str = "local"  # "local" | "local-grid" | "test" | "production"
     production_path: bool = False  # use production components (real DB, mock DBS/Rucio)

@@ -90,7 +90,7 @@ document.addEventListener('alpine:init', () => {
 
         get transitions() {
             if (!this.request || !this.request.status_transitions) return [];
-            return this.request.status_transitions;
+            return [...this.request.status_transitions].reverse();
         },
 
         // Action visibility helpers

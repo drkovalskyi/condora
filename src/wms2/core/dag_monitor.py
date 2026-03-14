@@ -145,16 +145,8 @@ class DAGMonitor:
             await self._handle_held_oom_jobs(dag)
 
 
-        # Update workflow node counts (reuse live_total from DAG update above)
-        if dag.workflow_id:
-            await self.db.update_workflow(
-                dag.workflow_id,
-                nodes_done=inner_summary.done,
-                nodes_failed=inner_summary.failed,
-                nodes_running=inner_summary.running,
-                nodes_queued=inner_summary.idle,
-                total_nodes=live_total,
-            )
+        # B9: Workflow-level node counts are now aggregated across all
+        # active DAGs by the lifecycle manager, not set per-DAG here.
 
         return DAGPollResult(
             dag_id=str(dag.id),
@@ -585,14 +577,7 @@ class DAGMonitor:
 
         await self.db.update_dag(dag.id, **update_kwargs)
 
-        if dag.workflow_id:
-            await self.db.update_workflow(
-                dag.workflow_id,
-                nodes_done=final_done,
-                nodes_failed=final_failed,
-                nodes_running=0,
-                nodes_queued=0,
-            )
+        # B9: Workflow-level counts aggregated by lifecycle manager.
 
         logger.info(
             "DAG %s completed: status=%s done=%d failed=%d newly_completed_wus=%d",

@@ -40,7 +40,7 @@ class ImportBody(BaseModel):
     priority_switch_fraction: float = 0.5
     replace: bool = False
     condor_pool: str = "global"  # "local" or "global" (which schedd to use)
-    stageout_mode: str = "test"  # "local", "test", or "production"
+    stageout_mode: str = "test"  # "local", "local-grid", "test", or "production"
     allowed_sites: str = ""    # comma-separated CMS site names (for global pool)
     pilot_fraction: float | None = None    # fraction of events_per_job for round 0 (0 = skip)
     pilot_throwaway: bool | None = None    # discard round 0 output after metrics
@@ -260,11 +260,11 @@ async def import_request(
                      body.request_num_events, body.request_name)
 
     # Validate stageout_mode
-    if body.stageout_mode not in ("local", "test", "production"):
+    if body.stageout_mode not in ("local", "local-grid", "test", "production"):
         raise HTTPException(
             status_code=400,
             detail=f"Invalid stageout_mode '{body.stageout_mode}'. "
-                   "Must be 'local', 'test', or 'production'.",
+                   "Must be 'local', 'local-grid', 'test', or 'production'.",
         )
 
     # Store pool, stageout mode, and priority profile in request_data for UI display

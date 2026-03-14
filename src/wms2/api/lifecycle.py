@@ -28,9 +28,12 @@ EDITABLE_FIELDS = {
     "site_ban_failure_ratio": (float, lambda v: 0 < v <= 1),
     "log_level": (str, lambda v: v.upper() in ("DEBUG", "INFO", "WARNING", "ERROR")),
     "default_pilot_priority": (int, lambda v: True),
-    "stageout_mode": (str, lambda v: v in ("local", "test", "production")),
+    "stageout_mode": (str, lambda v: v in ("local", "local-grid", "test", "production")),
     "pileup_remote_read": (bool, lambda v: isinstance(v, bool)),
     "target_wall_time_hours": (float, lambda v: v >= 0),
+    "round_advance_completion_fraction": (float, lambda v: 0 < v <= 1),
+    "round_advance_running_fraction": (float, lambda v: 0 <= v <= 1),
+    "max_concurrent_rounds": (int, lambda v: v >= 1),
 }
 
 
@@ -79,6 +82,10 @@ async def lifecycle_settings(request: Request):
         "log_level": s.log_level,
         "default_pilot_priority": s.default_pilot_priority,
         "target_wall_time_hours": s.target_wall_time_hours,
+        "round_advance_completion_fraction": s.round_advance_completion_fraction,
+        "round_advance_running_fraction": s.round_advance_running_fraction,
+        "max_concurrent_rounds": s.max_concurrent_rounds,
+        "schedd_pool": s.schedd_pool or "(none)",
         "database_url": _mask_password(s.database_url),
     }
 

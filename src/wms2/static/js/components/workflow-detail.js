@@ -133,10 +133,10 @@ document.addEventListener('alpine:init', () => {
             }));
         },
 
-        /** Map step index (string "0","1",...) to step name from manifest. */
+        /** Map step number (string "1","2",...) to step name from manifest. */
         stepName(idx) {
             const steps = this.configData.manifest_steps || [];
-            const i = Number(idx);
+            const i = Number(idx) - 1;
             if (i >= 0 && i < steps.length && steps[i].name) return steps[i].name;
             return 'Step ' + idx;
         },
@@ -155,24 +155,33 @@ document.addEventListener('alpine:init', () => {
             const origThreads = cd.multicore;
             const rounds = sm?.rounds || {};
 
-            // Build DAG-by-round index from creation order.
-            // A new round starts only after a previously completed DAG
-            // (status=completed). Failed/partial DAGs don't advance the
-            // round — the next DAG is a retry or rescue of the same round.
+            // Build DAG-by-round index using round_number field (DD-20).
+            // Falls back to creation-order inference for old DAGs without
+            // a round_number field.
             const dagsByRound = {};
             const sortedDags = [...this.allDags].sort((a, b) =>
                 (a.created_at || '').localeCompare(b.created_at || ''));
-            let rnd = 0;
-            for (let i = 0; i < sortedDags.length; i++) {
-                const d = sortedDags[i];
-                if (i > 0) {
-                    const prev = sortedDags[i - 1];
-                    if (prev.status === 'completed') {
-                        rnd++;
-                    }
+            const hasRoundNumber = sortedDags.some(d => d.round_number != null && d.round_number > 0);
+            if (hasRoundNumber) {
+                for (const d of sortedDags) {
+                    const rnd = d.round_number || 0;
+                    if (!dagsByRound[rnd]) dagsByRound[rnd] = [];
+                    dagsByRound[rnd].push(d);
                 }
-                if (!dagsByRound[rnd]) dagsByRound[rnd] = [];
-                dagsByRound[rnd].push(d);
+            } else {
+                // Legacy fallback: infer round from creation order
+                let rnd = 0;
+                for (let i = 0; i < sortedDags.length; i++) {
+                    const d = sortedDags[i];
+                    if (i > 0) {
+                        const prev = sortedDags[i - 1];
+                        if (prev.status === 'completed') {
+                            rnd++;
+                        }
+                    }
+                    if (!dagsByRound[rnd]) dagsByRound[rnd] = [];
+                    dagsByRound[rnd].push(d);
+                }
             }
             // Sort each round's DAGs by created_at (latest last)
             for (const rnd of Object.keys(dagsByRound)) {

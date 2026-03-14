@@ -63,9 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--merged-lfn-base", default=None,
                      help="Override MergedLFNBase (e.g. /store/mc or /store/data). "
                           "Auto-determined from input dataset if not specified.")
-    imp.add_argument("--stageout-mode", required=True, choices=["local", "test", "production"],
-                     help="Stageout mode: local (filesystem copy), test (grid, /store/temp/, _Temp RSEs), "
-                          "production (grid, /store/, real RSEs)")
+    imp.add_argument("--stageout-mode", required=True, choices=["local", "local-grid", "test", "production"],
+                     help="Stageout mode: local (filesystem copy), local-grid (local pool + Singularity + xrdcp), "
+                          "test (grid, /store/temp/, _Temp RSEs), production (grid, /store/, real RSEs)")
     imp.add_argument("--processing-version", type=int, default=None,
                      help="Override ProcessingVersion (changes -vN in output dataset paths)")
     imp.add_argument("--work-units-per-round", type=int, default=None,
@@ -427,7 +427,7 @@ async def run_import(args: argparse.Namespace) -> None:
 
             # Stageout mode and condor pool
             config_data["stageout_mode"] = stageout_mode
-            config_data["condor_pool"] = "local" if stageout_mode == "local" else "global"
+            config_data["condor_pool"] = "local" if stageout_mode in ("local", "local-grid") else "global"
             if stageout_mode == "test":
                 config_data["consolidation_rse"] = "T2_CH_CERN_Temp"
                 config_data["rucio_test_account"] = settings.rucio_test_account

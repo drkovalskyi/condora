@@ -67,6 +67,7 @@ def _dag_detail(row):
         "nodes_failed": row.nodes_failed,
         "nodes_held": row.nodes_held,
         "total_work_units": row.total_work_units,
+        "round_number": getattr(row, "round_number", 0),
         "wus_done": wus_done,
         "wus_failed": wus_failed,
         "completed_work_units": row.completed_work_units,

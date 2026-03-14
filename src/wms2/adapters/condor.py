@@ -294,17 +294,24 @@ class HTCondorAdapter(CondorAdapter):
         schedd = self._get_schedd(schedd_name)
         sub_dagman_ads = schedd.query(
             constraint=f"DAGManJobId == {cluster_id} && JobUniverse == 7",
-            projection=["ClusterId"],
+            projection=["ClusterId", "DAGNodeName"],
         )
         if not sub_dagman_ads:
             return []
 
-        sub_ids = [str(int(ad["ClusterId"])) for ad in sub_dagman_ads]
+        # Map sub-DAGMan ClusterId -> WU name (e.g. "mg_000000")
+        subdag_to_wu: dict[str, str] = {}
+        for ad in sub_dagman_ads:
+            sid = str(int(ad["ClusterId"]))
+            subdag_to_wu[sid] = ad.get("DAGNodeName", "")
+
+        sub_ids = list(subdag_to_wu.keys())
         parts = " || ".join(f"DAGManJobId == {sid}" for sid in sub_ids)
         constraint = f"({parts}) && JobUniverse =!= 7"
 
         projection = [
-            "DAGNodeName", "JobStatus", "ResidentSetSize_RAW",
+            "DAGNodeName", "DAGManJobId", "JobStatus", "ResidentSetSize_RAW",
+            "DiskUsage_RAW", "RequestDisk",
             "CumulativeRemoteUserCpu", "CumulativeRemoteSysCpu",
             "RequestCpus", "RequestMemory", "JobStartDate", "ServerTime",
             "MATCH_GLIDEIN_CMSSite", "JobPrio",
@@ -336,8 +343,10 @@ class HTCondorAdapter(CondorAdapter):
                     100.0 * (cpu_user + cpu_sys) / (wall_time * cpus), 1
                 )
 
+            dagman_jid = str(int(ad.get("DAGManJobId", 0)))
             job = {
                 "name": ad.get("DAGNodeName", "?"),
+                "work_unit": subdag_to_wu.get(dagman_jid, ""),
                 "status": status,
                 "wall_time": wall_time,
                 "memory_mb": memory_mb,
@@ -346,6 +355,8 @@ class HTCondorAdapter(CondorAdapter):
                 "cpu_efficiency": cpu_efficiency,
                 "cpus": cpus,
                 "request_memory": int(ad.get("RequestMemory", 0)),
+                "disk_mb": int(ad["DiskUsage_RAW"]) // 1024 if ad.get("DiskUsage_RAW") is not None else None,
+                "request_disk_mb": int(ad["RequestDisk"]) // 1024 if ad.get("RequestDisk") is not None else None,
                 "site": ad.get("MATCH_GLIDEIN_CMSSite"),
                 "priority": int(ad.get("JobPrio", 0)),
             }
@@ -354,7 +365,7 @@ class HTCondorAdapter(CondorAdapter):
                 job["hold_reason_code"] = int(ad.get("HoldReasonCode", 0))
             jobs.append(job)
 
-        jobs.sort(key=lambda j: j["name"])
+        jobs.sort(key=lambda j: (j.get("work_unit", ""), j["name"]))
         return jobs
 
     async def query_dag_jobs(self, cluster_id: str,
@@ -624,6 +635,26 @@ class HTCondorAdapter(CondorAdapter):
     ) -> list[dict]:
         return await asyncio.to_thread(
             self._query_dag_landing_jobs_sync, cluster_id, schedd_name,
+        )
+
+    def _retrieve_job_output_sync(self, cluster_id: str,
+                                   schedd_name: str | None = None) -> bool:
+        """Transfer output files from remote schedd spool to submit host."""
+        schedd = self._get_schedd(schedd_name)
+        constraint = f"ClusterId == {int(cluster_id)}"
+        try:
+            schedd.retrieve(constraint)
+            return True
+        except Exception:
+            logger.warning("retrieve() failed for cluster %s on %s",
+                           cluster_id, schedd_name, exc_info=True)
+            return False
+
+    async def retrieve_job_output(
+        self, cluster_id: str, schedd_name: str | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._retrieve_job_output_sync, cluster_id, schedd_name
         )
 
     async def query_dag_site_summary(

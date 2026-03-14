@@ -301,6 +301,7 @@ def _make_workflow_mock(wf: WorkflowDef, sandbox_path: str) -> MagicMock:
         "_is_gen": True,
         "output_datasets": wf.output_datasets,
         "extra_classads": {"WMS2_QuickJob": "True"},
+        "stageout_mode": wf.stageout_mode,
     }
     # Adaptive round fields — must be real values, not MagicMock
     mock.next_first_event = 1
@@ -378,6 +379,13 @@ def _verify(wf: WorkflowDef, result: WorkflowResult, wf_dir: Path) -> None:
                     has_merged = True
         if not has_merged and wf.output_datasets:
             errors.append("expected merged outputs but none found")
+
+    # Machine avoidance
+    if v.expect_excluded_machines:
+        excl_files = list(wf_dir.glob("**/excluded_machines.txt"))
+        non_empty = [f for f in excl_files if f.stat().st_size > 0]
+        if not non_empty:
+            errors.append("expected excluded_machines.txt with content but none found")
 
     # Cleanup
     if v.expect_cleanup_ran:

@@ -221,11 +221,10 @@ spec. DBS writes remain disabled.
   Fix: add one-line per-request progress summary at INFO level.
   File: `src/wms2/core/lifecycle_manager.py:719`.
 - **~~WU sizing ignores merge disk footprint~~ (FIXED)** — Merge script
-  refactored to per-batch processing: downloads one batch (~4 GB) at a time,
-  merges, uploads, cleans scratch before next batch. Peak scratch ≈ 8 GB
-  regardless of WU size. Oversized files (>= 75% of target) are remote-copied
-  directly (gfal-copy TPC) without touching scratch. WU sizing no longer
-  capped by merge disk — sized purely by target merged file size.
+  reads proc outputs directly via root:// URLs (cmsRun native XRootD) — no
+  download to scratch. Peak scratch ≈ 4 GB (merged output only). Oversized
+  files (>= 75% of target) are remote-copied directly (gfal-copy TPC) without
+  touching scratch. WU sizing driven purely by target merged file size.
   File: `src/wms2/core/dag_planner.py`.
 - **SyntaxWarnings in dag_planner.py** — Invalid escape sequences `\s`, `\d` in
   embedded bash script at line ~1941 and regex at line ~4560. Will become errors
@@ -275,13 +274,13 @@ spec. DBS writes remain disabled.
 
 ### Current status
 
-**Global pool commissioning — per-batch merge + oversized file skip.**
-Merge script refactored to per-batch processing: downloads one batch (~4 GB)
-at a time to scratch, merges, uploads merged output, cleans scratch before
-next batch. Peak scratch ≈ 8 GB regardless of WU size. Files >= 75% of target
-merge size are remote-copied directly (gfal-copy TPC), never touching scratch.
-WU sizing no longer capped by merge disk — sized purely by target file size.
-Merge node request_disk = 8 GB (2x target).
+**Global pool commissioning — direct XRootD merge + oversized file skip.**
+Merge script reads proc outputs directly from site storage via root:// URLs
+using cmsRun's native XRootD support — no download to scratch. Files batched
+by target merge size for output splitting. Peak scratch ≈ 4 GB (merged output
+only). Files >= 75% of target merge size are remote-copied directly
+(gfal-copy TPC), never touching scratch. WU sizing driven purely by target
+merged file size. Merge node request_disk = 8 GB (2x target, conservative).
 
 Also deployed: WU-level recovery (RETRY on outer SUBDAG + site exclusion
 in wu_post.sh), proactive mid-DAG site exclusion, tail escalation fix for
@@ -307,9 +306,10 @@ Active requests:
 - Rescue chain exhaustion → HELD → fresh replan with updated code
 - Multi-round adaptive optimization across 17+ rounds
 - Autonomous lifecycle manager operation in global pool
+- Machine avoidance on transient failures (validated on local pool — single-machine
+  pools skip exclusion via condor_status check in pin_site.sh)
 
 **Not yet validated:**
-- Machine avoidance on transient failures (deployed, not yet observed in action)
 - Merge at European sites using `davs://` protocol (KIT, NCBJ, DESY) —
   `proc_node_indices` probe fallback deployed but untested at those sites
 - Production-scale requests (current tests use test_fraction=0.01)

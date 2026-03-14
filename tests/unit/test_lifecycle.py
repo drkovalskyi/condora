@@ -45,6 +45,9 @@ def _make_dag(
     dag.status = status
     dag.rescue_dag_path = rescue_dag_path
     dag.parent_dag_id = parent_dag_id
+    dag.stop_reason = None
+    dag.stop_requested_at = None
+    dag.round_number = 0
     dag.total_nodes = 10
     dag.total_edges = 8
     dag.node_counts = {"processing": 8, "merge": 1, "cleanup": 1}
@@ -183,7 +186,7 @@ async def test_initiate_clean_stop(lifecycle_manager, mock_repository, mock_cond
 
 
 async def test_handle_stopping_dagman_gone(lifecycle_manager, mock_repository, mock_condor):
-    """STOPPING: DAGMan gone → DAG STOPPED, recovery prepared, request → RESUBMITTING."""
+    """STOPPING: DAGMan gone → DAG STOPPED, request → PAUSED."""
     request = make_request_row(status="stopping")
     dag = _make_dag(status="running")
     workflow = _make_workflow(dag_id=dag.id)
@@ -194,22 +197,15 @@ async def test_handle_stopping_dagman_gone(lifecycle_manager, mock_repository, m
     # DAGMan process gone — query_job returns None
     mock_condor.removed_jobs.add(dag.dagman_cluster_id)
 
-    # create_dag returns the new rescue DAG record
-    new_dag = _make_dag(status="ready", rescue_dag_path=f"{dag.dag_file_path}.rescue001")
-    mock_repository.create_dag.return_value = new_dag
-
     await lifecycle_manager.evaluate_request(request)
 
     # DAG marked as STOPPED
     dag_update_calls = mock_repository.update_dag.call_args_list
     assert any(c[1].get("status") == DAGStatus.STOPPED.value for c in dag_update_calls)
 
-    # Recovery DAG created
-    mock_repository.create_dag.assert_called_once()
-
-    # Request eventually transitions to RESUBMITTING
+    # Request transitions to PAUSED (recovery happens when operator resumes)
     last_req_update = mock_repository.update_request.call_args
-    assert last_req_update[1]["status"] == RequestStatus.RESUBMITTING.value
+    assert last_req_update[1]["status"] == RequestStatus.PAUSED.value
 
 
 async def test_handle_stopping_dagman_alive(lifecycle_manager, mock_repository, mock_condor):
@@ -288,6 +284,8 @@ async def test_handle_active_processes_work_units(mock_repository, mock_condor, 
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
 
     # Mock a processing block that get_processing_blocks returns
     block = MagicMock()
@@ -333,8 +331,11 @@ async def test_handle_active_processes_work_units(mock_repository, mock_condor, 
             "site": "T2_US_MIT",
             "node_name": "mg_000000",
         },
+        config_data=workflow.config_data,
     )
-    mock_output_manager.process_blocks_for_workflow.assert_called_once_with(workflow.id)
+    mock_output_manager.process_blocks_for_workflow.assert_called_once_with(
+        workflow.id, config_data=workflow.config_data,
+    )
 
 
 async def test_handle_active_no_output_manager_skips(mock_repository, mock_condor, settings):
@@ -347,6 +348,8 @@ async def test_handle_active_no_output_manager_skips(mock_repository, mock_condo
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
 
     block_id = uuid.uuid4()
     mock_dag_monitor = AsyncMock()
@@ -389,6 +392,8 @@ async def test_active_partial_with_rescue(mock_repository, mock_condor, settings
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -405,9 +410,7 @@ async def test_active_partial_with_rescue(mock_repository, mock_condor, settings
     request = make_request_row(status="active")
     await lm.evaluate_request(request)
 
-    mock_error_handler.handle_dag_completion.assert_called_once_with(
-        dag, request, workflow
-    )
+    mock_error_handler.handle_dag_completion.assert_called_once()
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.RESUBMITTING.value
 
@@ -421,6 +424,8 @@ async def test_active_partial_without_error_handler(mock_repository, mock_condor
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -457,6 +462,8 @@ async def test_active_failed_with_error_handler(mock_repository, mock_condor, se
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -473,9 +480,7 @@ async def test_active_failed_with_error_handler(mock_repository, mock_condor, se
     request = make_request_row(status="active")
     await lm.evaluate_request(request)
 
-    mock_error_handler.handle_dag_completion.assert_called_once_with(
-        dag, request, workflow
-    )
+    mock_error_handler.handle_dag_completion.assert_called_once()
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.HELD.value
 
@@ -496,10 +501,11 @@ async def test_handle_queued_rescue_dag_submits(lifecycle_manager, mock_reposito
 
     await lifecycle_manager.evaluate_request(request)
 
-    # Rescue DAG submitted to HTCondor
+    # Rescue DAG submitted to HTCondor (submits original DAG file —
+    # DAGMan's AutoRescue finds the rescue file automatically)
     submit_calls = [c for c in mock_condor.calls if c[0] == "submit_dag"]
     assert len(submit_calls) == 1
-    assert submit_calls[0][1] == (rescue_path,)
+    assert submit_calls[0][1] == (dag.dag_file_path,)
 
     # DAG record updated with new cluster_id and SUBMITTED status
     mock_repository.update_dag.assert_called_once()
@@ -516,7 +522,11 @@ async def test_handle_queued_rescue_dag_submits(lifecycle_manager, mock_reposito
 
 
 async def test_round_completion_gen_returns_to_queued(mock_repository, mock_condor, settings):
-    """Adaptive GEN request with remaining events → QUEUED, offsets advanced."""
+    """Adaptive GEN request with remaining events → QUEUED (max_concurrent_rounds=1).
+
+    DD-21: Offsets and current_round are advanced at plan time, not at
+    round completion. complete_round() only stores step_metrics.
+    """
     from wms2.core.dag_monitor import DAGPollResult
     from wms2.core.lifecycle_manager import RequestLifecycleManager
 
@@ -539,6 +549,12 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    # First call returns [dag] for polling; subsequent calls return []
+    # (DAG is terminal after completion)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(
+        side_effect=[[dag]] + [[]] * 10
+    )
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active", adaptive=True))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -546,6 +562,8 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
         nodes_done=8, nodes_failed=0,
     )
 
+    # max_concurrent_rounds=1 → sequential mode, transitions to QUEUED
+    settings.max_concurrent_rounds = 1
     lm = RequestLifecycleManager(
         mock_repository, mock_condor, settings,
         dag_monitor=mock_dag_monitor,
@@ -554,12 +572,13 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
     request = make_request_row(status="active", adaptive=True)
     await lm.evaluate_request(request)
 
-    # Workflow updated with new round and offset
-    wf_update = mock_repository.update_workflow.call_args
-    assert wf_update[1]["current_round"] == 1
-    assert wf_update[1]["next_first_event"] == 800_001  # 1 + 8*100_000
-    assert wf_update[1]["step_metrics"]["rounds_completed"] == 1
-    assert wf_update[1]["step_metrics"]["cumulative_nodes_done"] == 8
+    # Workflow updated with step_metrics (offsets advanced at plan time)
+    wf_updates = mock_repository.update_workflow.call_args_list
+    metrics_update = [u for u in wf_updates if "step_metrics" in u[1]]
+    assert len(metrics_update) >= 1
+    sm = metrics_update[0][1]["step_metrics"]
+    assert sm["rounds_completed"] == 1
+    assert sm["cumulative_nodes_done"] == 8
 
     # Request transitions to QUEUED (not COMPLETED — only 0/1M produced)
     req_update = mock_repository.update_request.call_args
@@ -567,23 +586,22 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
 
 
 async def test_round_completion_gen_all_done(mock_repository, mock_condor, settings):
-    """Adaptive GEN request where all events processed → COMPLETED."""
+    """Adaptive GEN request where all events produced → COMPLETED."""
     from wms2.core.dag_monitor import DAGPollResult
     from wms2.core.lifecycle_manager import RequestLifecycleManager
 
-    # 1M events total, already at event 900_001 (9 rounds done), 1 job of 100k left
-    # events_produced=1M means target reached after this round
     dag = _make_dag(
         status="submitted", nodes_done=1, nodes_failed=0,
         node_counts={"processing": 1, "merge": 1, "cleanup": 1},
+        round_number=9,
     )
     workflow = _make_workflow(
         dag_id=dag.id,
         config_data={"_is_gen": True, "request_num_events": 1_000_000},
         splitting_params={"events_per_job": 100_000},
-        next_first_event=900_001,
+        next_first_event=1_000_001,
         file_offset=0,
-        current_round=9,
+        current_round=10,  # already advanced by planner
         step_metrics={"rounds_completed": 9, "cumulative_nodes_done": 72},
         adaptive=True,
         events_produced=1_000_000,
@@ -594,6 +612,10 @@ async def test_round_completion_gen_all_done(mock_repository, mock_condor, setti
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(
+        side_effect=[[dag]] + [[]] * 10
+    )
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active", adaptive=True))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -609,12 +631,7 @@ async def test_round_completion_gen_all_done(mock_repository, mock_condor, setti
     request = make_request_row(status="active", adaptive=True)
     await lm.evaluate_request(request)
 
-    # Workflow updated
-    wf_update = mock_repository.update_workflow.call_args
-    assert wf_update[1]["current_round"] == 10
-    assert wf_update[1]["next_first_event"] == 1_000_001
-
-    # Request transitions to COMPLETED (events_produced >= target_events)
+    # Request transitions to COMPLETED (events_produced >= target_events, no active DAGs)
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.COMPLETED.value
 
@@ -647,6 +664,10 @@ async def test_round_completion_file_based_returns_to_queued(
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(
+        side_effect=[[dag]] + [[]] * 10
+    )
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active", adaptive=True))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -654,6 +675,8 @@ async def test_round_completion_file_based_returns_to_queued(
         nodes_done=5, nodes_failed=0,
     )
 
+    # max_concurrent_rounds=1 → sequential mode, transitions to QUEUED
+    settings.max_concurrent_rounds = 1
     lm = RequestLifecycleManager(
         mock_repository, mock_condor, settings,
         dag_monitor=mock_dag_monitor,
@@ -662,11 +685,10 @@ async def test_round_completion_file_based_returns_to_queued(
     request = make_request_row(status="active", adaptive=True)
     await lm.evaluate_request(request)
 
-    # Workflow updated with file_offset (not next_first_event)
-    wf_update = mock_repository.update_workflow.call_args
-    assert wf_update[1]["current_round"] == 1
-    assert wf_update[1]["file_offset"] == 10  # 5 jobs * 2 files_per_job
-    assert "next_first_event" not in wf_update[1]
+    # DD-21: Offsets advanced at plan time; complete_round stores step_metrics
+    wf_updates = mock_repository.update_workflow.call_args_list
+    metrics_update = [u for u in wf_updates if "step_metrics" in u[1]]
+    assert len(metrics_update) >= 1
 
     # Request transitions to QUEUED (0/100 files processed)
     req_update = mock_repository.update_request.call_args
@@ -683,6 +705,10 @@ async def test_non_adaptive_skips_round_handler(mock_repository, mock_condor, se
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(
+        side_effect=[[dag]] + [[]] * 10
+    )
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -698,12 +724,10 @@ async def test_non_adaptive_skips_round_handler(mock_repository, mock_condor, se
     request = make_request_row(status="active")
     await lm.evaluate_request(request)
 
-    # Request transitions to COMPLETED (no round handler)
+    # Request transitions to COMPLETED (target reached with 0/0 = all done,
+    # no active DAGs remaining after this one completes)
     req_update = mock_repository.update_request.call_args
     assert req_update[1]["status"] == RequestStatus.COMPLETED.value
-    # update_workflow should NOT have been called with current_round
-    for call in mock_repository.update_workflow.call_args_list:
-        assert "current_round" not in call[1]
 
 
 async def test_round_completion_priority_demotion(mock_repository, mock_condor, settings):
@@ -731,6 +755,10 @@ async def test_round_completion_priority_demotion(mock_repository, mock_condor, 
 
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
+    mock_repository.get_active_dags_for_workflow = AsyncMock(
+        side_effect=[[dag]] + [[]] * 10
+    )
+    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active", adaptive=True))
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -738,6 +766,7 @@ async def test_round_completion_priority_demotion(mock_repository, mock_condor, 
         nodes_done=5, nodes_failed=0,
     )
 
+    settings.max_concurrent_rounds = 1
     lm = RequestLifecycleManager(
         mock_repository, mock_condor, settings,
         dag_monitor=mock_dag_monitor,
@@ -852,9 +881,10 @@ async def test_queued_urgent_adaptive_all_done_completes(mock_repository, mock_c
     assert req_update[1]["status"] == RequestStatus.COMPLETED.value
 
 
-async def test_queued_round0_runs_pilot(mock_repository, mock_condor, settings):
-    """Round 0, non-urgent → pilot submitted (existing behavior)."""
+async def test_queued_round0_plans_dag(mock_repository, mock_condor, settings):
+    """Round 0 → plan_production_dag called (round 0 IS the pilot)."""
     mock_dag_planner = AsyncMock()
+    mock_dag_planner.plan_production_dag.return_value = _make_dag(status="submitted")
 
     workflow = _make_workflow(current_round=0)
 
@@ -870,13 +900,12 @@ async def test_queued_round0_runs_pilot(mock_repository, mock_condor, settings):
 
     await lm.evaluate_request(request)
 
-    # submit_pilot called, NOT plan_production_dag
-    mock_dag_planner.submit_pilot.assert_called_once_with(workflow)
-    mock_dag_planner.plan_production_dag.assert_not_called()
+    # plan_production_dag called for round 0
+    mock_dag_planner.plan_production_dag.assert_called_once()
 
-    # Request transitions to PILOT_RUNNING
+    # Request transitions to ACTIVE
     req_update = mock_repository.update_request.call_args
-    assert req_update[1]["status"] == RequestStatus.PILOT_RUNNING.value
+    assert req_update[1]["status"] == RequestStatus.ACTIVE.value
 
 
 async def test_aggregate_round_metrics():
@@ -962,6 +991,7 @@ async def test_fail_request_cleanup(mock_repository, mock_condor, settings):
     workflow = _make_workflow(dag_id=dag.id)
     mock_repository.get_workflow_by_request.return_value = workflow
     mock_repository.get_dag.return_value = dag
+    mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
 
     # list_dags returns the running dag plus one ready dag
     ready_dag = _make_dag(status="ready")

@@ -191,6 +191,37 @@ _WF_310_0 = WorkflowDef(
     ),
 )
 
+_WF_310_1 = WorkflowDef(
+    wf_id=310.1,
+    title="DY2Mu-low 5-step StepChain, local-grid mode (Singularity + xrdcp)",
+    sandbox_mode="cached",
+    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
+    request_spec={
+        "RequestName": "cmsunified_task_GEN-Run3Summer23wmLHEGS-00057__v1_T_230922_115605_1852",
+        "RequestType": "StepChain",
+        "StepChain": 5,
+        "Multicore": 4,
+        "Memory": 7900,
+        "TimePerEvent": 7.46,
+        "SizePerEvent": 1468.0,
+    },
+    events_per_job=40,
+    num_jobs=2,
+    output_datasets=_GEN_DY2MU_LOW_OUTPUT_DATASETS,
+    memory_mb=7900,
+    multicore=4,
+    size="large",
+    timeout_sec=3600,
+    requires=("condor", "cvmfs", "siteconf", "apptainer"),
+    singularity_image="/cvmfs/unpacked.cern.ch/registry.hub.docker.com/cmssw/el8:x86_64",
+    stageout_mode="local-grid",
+    verify=VerifySpec(
+        expect_success=True,
+        expect_merged_outputs=True,
+        expect_cleanup_ran=True,
+    ),
+)
+
 _WF_311_0 = WorkflowDef(
     wf_id=311.0,
     title="DY2Mu-low 5-step StepChain, scale test (8 jobs x 400 ev)",
@@ -890,6 +921,41 @@ _WF_501_0 = WorkflowDef(
     ),
 )
 
+_WF_520_0 = WorkflowDef(
+    wf_id=520.0,
+    title="Fault: retry-aware transient (machine avoidance)",
+    sandbox_mode="synthetic",
+    request_spec={
+        "RequestName": "matrix_fault_520_0",
+        "RequestType": "StepChain",
+        "StepChain": 1,
+        "Step1": {
+            "StepName": "GEN-SIM",
+            "GlobalTag": "auto:mc",
+            "CMSSWVersion": "",
+        },
+        "Multicore": 1,
+        "Memory": 512,
+        "TimePerEvent": 0.01,
+        "SizePerEvent": 1.0,
+    },
+    events_per_job=1,
+    num_jobs=2,
+    output_datasets=_SYNTHETIC_OUTPUT,
+    memory_mb=512,
+    multicore=1,
+    size="medium",
+    timeout_sec=300,
+    requires=("condor",),
+    fault=FaultSpec(target="proc", exit_code=1, retry_aware=True, node_indices=(0,)),
+    verify=VerifySpec(
+        expect_success=True,
+        expect_excluded_machines=True,
+        expect_merged_outputs=True,
+        expect_cleanup_ran=True,
+    ),
+)
+
 _WF_510_0 = WorkflowDef(
     wf_id=510.0,
     title="Fault: merge exits 1",
@@ -1277,6 +1343,7 @@ CATALOG: dict[float, WorkflowDef] = {
         _WF_300_1,
         _WF_301_0,
         _WF_310_0,
+        _WF_310_1,
         _WF_311_0,
         _WF_351_0,
         _WF_351_1,
@@ -1296,5 +1363,6 @@ CATALOG: dict[float, WorkflowDef] = {
         _WF_500_0,
         _WF_501_0,
         _WF_510_0,
+        _WF_520_0,
     ]
 }

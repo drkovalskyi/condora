@@ -33,6 +33,7 @@ def mock_repository():
     repo.update_workflow = AsyncMock()
     repo.list_workflows = AsyncMock(return_value=[])
     repo.list_dags = AsyncMock(return_value=[])
+    repo.get_active_dags_for_workflow = AsyncMock(return_value=[])
     repo.get_processing_blocks = AsyncMock(return_value=[])
     repo.get_processing_block = AsyncMock(return_value=None)
     repo.create_processing_block = AsyncMock()

@@ -99,6 +99,16 @@ class Settings(BaseSettings):
     # the site's trivialcatalog (storage.xml), requiring local replicas.
     pileup_remote_read: bool = True
 
+    # Pipelined round advance (DD-20/DD-21)
+    round_advance_completion_fraction: float = 0.5   # WU completion fraction to trigger next round
+    round_advance_running_fraction: float = 0.3       # running node fraction threshold
+    max_concurrent_rounds: int = 3                     # max active DAGs per request
+
+    # Multi-schedd pool (DD-22) — JSON array of schedd configs.
+    # Format: [{"name": "vocms047.cern.ch", "capacity": 100000, "enabled": true}]
+    # Empty = use remote_schedd (single schedd mode).
+    schedd_pool: str = ""
+
     # Work unit sizing
     jobs_per_work_unit: int = 8  # processing jobs per merge group
     first_round_work_units: int = 1  # work units for round 0 (pilot)
@@ -119,6 +129,7 @@ class Settings(BaseSettings):
 
     # Output staging — LFN→PFN mapping
     # stageout_mode: "local" = filesystem copy (PFN = local_pfn_prefix + LFN)
+    #                "local-grid" = local pool + Singularity isolation + xrdcp via localhost XRootD
     #                "test"  = grid stageout to /store/temp/, _Temp RSEs, user Rucio scope
     #                "production" = grid stageout to /store/, real RSEs, cms Rucio scope
     stageout_mode: str = "local"
