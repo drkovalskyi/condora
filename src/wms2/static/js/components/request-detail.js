@@ -8,6 +8,8 @@ document.addEventListener('alpine:init', () => {
         request: null,
         workflow: null,
         dag: null,
+        allDags: [],
+        outputDatasets: [],
         errors: null,
         sitePerformance: null,
         loading: true,
@@ -45,10 +47,19 @@ document.addEventListener('alpine:init', () => {
                 this.request = req;
                 this.workflow = wf;
 
-                if (wf && wf.dag_id) {
-                    this.dag = await WMS2_API.getDAG(wf.dag_id).catch(() => null);
+                if (wf) {
+                    const [dag, dags, ods] = await Promise.all([
+                        wf.dag_id ? WMS2_API.getDAG(wf.dag_id).catch(() => null) : null,
+                        WMS2_API.getWorkflowDags(wf.id).catch(() => []),
+                        WMS2_API.getWorkflowOutputDatasets(wf.id).catch(() => []),
+                    ]);
+                    this.dag = dag;
+                    this.allDags = dags;
+                    this.outputDatasets = ods;
                 } else {
                     this.dag = null;
+                    this.allDags = [];
+                    this.outputDatasets = [];
                 }
             } catch (e) {
                 this.error = e.message;
@@ -68,6 +79,18 @@ document.addEventListener('alpine:init', () => {
 
         get hasWorkflow() { return this.workflow != null; },
         get hasDAG() { return this.dag != null; },
+        get activeRoundsDisplay() {
+            const active = this.allDags
+                .filter(d => d.status === 'submitted' || d.status === 'running')
+                .map(d => d.round_number)
+                .filter(r => r != null);
+            if (active.length === 0) {
+                return this.workflow ? String(this.workflow.current_round) : '—';
+            }
+            const sorted = [...new Set(active)].sort((a, b) => a - b);
+            if (sorted.length === 1) return String(sorted[0]);
+            return sorted[0] + '–' + sorted[sorted.length - 1];
+        },
         get hasErrors() {
             if (!this.errors) return false;
             const e = this.errors;
@@ -141,6 +164,18 @@ document.addEventListener('alpine:init', () => {
         get consolidationRse() {
             const cd = (this.workflow && this.workflow.config_data) || {};
             return cd.consolidation_rse || null;
+        },
+
+        get stepsInfo() {
+            const cd = (this.workflow && this.workflow.config_data) || {};
+            const steps = cd.manifest_steps || [];
+            return steps.map((s, i) => ({
+                index: i + 1,
+                name: s.name || `Step ${i + 1}`,
+                cmssw: s.cmssw_version || '—',
+                global_tag: s.global_tag || '—',
+                scram_arch: s.scram_arch || '—',
+            }));
         },
 
         get priorityProfile() {

@@ -38,6 +38,7 @@ def _dag_summary(r):
         "nodes_done": r.nodes_done,
         "nodes_failed": r.nodes_failed,
         "nodes_running": r.nodes_running,
+        "round_number": getattr(r, "round_number", 0),
         "dag_file_path": r.dag_file_path,
         "dagman_cluster_id": r.dagman_cluster_id,
         "created_at": r.created_at.isoformat() if r.created_at else None,

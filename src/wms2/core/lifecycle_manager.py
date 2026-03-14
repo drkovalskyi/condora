@@ -337,6 +337,13 @@ async def complete_round(repo, settings, workflow, dag):
         "step_metrics": new_metrics,
     }
 
+    # Safety net: if current_round wasn't advanced at plan time (e.g.
+    # DAG was planned with old code before DD-21), ensure it's at least
+    # dag.round_number + 1 so the next round gets the correct number.
+    wf_current = getattr(workflow, "current_round", 0) or 0
+    if wf_current < new_round:
+        update_kwargs["current_round"] = new_round
+
     await repo.update_workflow(workflow.id, **update_kwargs)
 
     return {

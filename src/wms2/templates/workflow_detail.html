@@ -65,143 +65,6 @@
                 </div>
             </template>
 
-            <div class="section">
-                <h3>Processing Info</h3>
-                <dl class="detail-grid">
-                    <dt>Request</dt>
-                    <dd>
-                        <a :href="reqmgrUrl" target="_blank" rel="noopener"
-                           x-text="workflow.request_name" style="word-break:break-all;"
-                           title="Open in ReqMgr2"></a>
-                        <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)"
-                           style="margin-left:0.5rem; font-size:0.8rem;">(WMS2)</a>
-                    </dd>
-                    <dt>Type</dt>
-                    <dd x-text="configData.request_type || '—'"></dd>
-                    <template x-if="!isGen">
-                        <div style="display:contents;">
-                            <dt>Input Dataset</dt>
-                            <dd :title="workflow.input_dataset" x-text="fmtMidTruncate(workflow.input_dataset, 100)"></dd>
-                        </div>
-                    </template>
-                    <template x-for="pu in pileupDatasets" :key="pu.dataset">
-                        <div style="display:contents;">
-                            <dt x-text="pu.type"></dt>
-                            <dd :title="pu.dataset" x-text="fmtMidTruncate(pu.dataset, 100)"></dd>
-                        </div>
-                    </template>
-                    <dt>Splitting Algorithm</dt>
-                    <dd x-text="workflow.splitting_algo || '—'"></dd>
-                    <dt>Current Round</dt>
-                    <dd x-text="workflow.current_round != null ? workflow.current_round : '—'"></dd>
-                    <dt>Created</dt>
-                    <dd x-text="fmtDateTime(workflow.created_at)"></dd>
-                    <dt>Updated</dt>
-                    <dd x-text="fmtDateTime(workflow.updated_at)"></dd>
-                </dl>
-            </div>
-
-            <!-- Splitting params -->
-            <template x-if="Object.keys(splittingDisplay).length > 0">
-                <div class="section">
-                    <h3>Splitting Parameters</h3>
-                    <dl class="detail-grid">
-                        <template x-for="[key, val] in Object.entries(splittingDisplay)" :key="key">
-                            <div>
-                                <dt x-text="key"></dt>
-                                <dd>
-                                    <template x-if="key === 'effective_events_per_job'">
-                                        <span><strong x-text="val"></strong> <span style="opacity:0.6">(nominal &times; test_fraction)</span></span>
-                                    </template>
-                                    <template x-if="key !== 'effective_events_per_job'">
-                                        <span x-text="val"></span>
-                                    </template>
-                                </dd>
-                            </div>
-                        </template>
-                    </dl>
-                </div>
-            </template>
-
-            <!-- Adaptive optimization — current result summary -->
-            <template x-if="adaptiveInfo">
-                <div class="section">
-                    <h3>Adaptive Optimization</h3>
-                    <dl class="detail-grid">
-                        <dt>Request Memory</dt>
-                        <dd><span x-text="fmtNum(adaptiveInfo.original_memory)"></span> MB</dd>
-                        <dt>Measured Memory</dt>
-                        <dd>
-                            <template x-if="adaptiveInfo.measured_memory">
-                                <span>
-                                    <span x-text="fmtNum(adaptiveInfo.measured_memory)"></span> MB
-                                    <span style="opacity:0.6; margin-left:0.25rem;"
-                                          x-text="'(' + (adaptiveInfo.memory_source || '—') + ')'"></span>
-                                </span>
-                            </template>
-                            <template x-if="!adaptiveInfo.measured_memory">
-                                <span x-text="adaptiveInfo.peak_rss ? fmtNum(adaptiveInfo.peak_rss) + ' MB (FJR RSS)' : '—'"></span>
-                            </template>
-                        </dd>
-                        <dt>Tuned Memory</dt>
-                        <dd>
-                            <strong x-text="fmtNum(adaptiveInfo.tuned_memory)"></strong> MB
-                            <template x-if="adaptiveInfo.original_memory && adaptiveInfo.tuned_memory">
-                                <span style="margin-left:0.25rem;"
-                                      :style="adaptiveInfo.tuned_memory < adaptiveInfo.original_memory ? 'color:#16a34a' : 'color:#dc2626'"
-                                      x-text="'(' + (adaptiveInfo.tuned_memory < adaptiveInfo.original_memory ? '' : '+') + (((adaptiveInfo.tuned_memory - adaptiveInfo.original_memory) / adaptiveInfo.original_memory) * 100).toFixed(0) + '%)'"></span>
-                            </template>
-                        </dd>
-                        <dt>Request Threads</dt>
-                        <dd x-text="adaptiveInfo.original_nthreads"></dd>
-                        <dt>Tuned Threads</dt>
-                        <dd>
-                            <strong x-text="adaptiveInfo.tuned_nthreads"></strong>
-                            <template x-if="adaptiveInfo.original_nthreads !== adaptiveInfo.tuned_nthreads">
-                                <span style="margin-left:0.25rem;" x-text="'(' + (adaptiveInfo.tuned_nthreads - adaptiveInfo.original_nthreads) + ')'"></span>
-                            </template>
-                        </dd>
-                        <template x-if="adaptiveInfo.cpu_eff != null">
-                            <div style="display:contents;">
-                                <dt>Weighted CPU Eff</dt>
-                                <dd x-text="fmtPct(adaptiveInfo.cpu_eff * 100)"></dd>
-                            </div>
-                        </template>
-                    </dl>
-
-                    <!-- Per-step adaptive detail -->
-                    <template x-if="adaptiveInfo.per_step">
-                        <div style="margin-top:0.75rem;">
-                            <h4 style="font-size:0.9rem; margin-bottom:0.25rem;">Per-Step Tuning</h4>
-                            <table style="font-size:0.85rem;">
-                                <thead>
-                                    <tr>
-                                        <th>Step</th>
-                                        <th>CPU Eff</th>
-                                        <th>Eff Cores</th>
-                                        <th>Tuned Threads</th>
-                                        <th>Parallel</th>
-                                        <th>Overcommit</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <template x-for="[sn, sd] in Object.entries(adaptiveInfo.per_step).sort((a,b) => Number(a[0]) - Number(b[0]))" :key="sn">
-                                        <tr>
-                                            <td x-text="stepName(sn)"></td>
-                                            <td x-text="sd.cpu_eff != null ? fmtPct(sd.cpu_eff * 100) : '—'"></td>
-                                            <td x-text="sd.effective_cores != null ? sd.effective_cores.toFixed(1) : '—'"></td>
-                                            <td x-text="sd.tuned_nthreads || '—'"></td>
-                                            <td x-text="sd.n_parallel || 1"></td>
-                                            <td x-text="sd.overcommit_applied ? 'yes' : 'no'"></td>
-                                        </tr>
-                                    </template>
-                                </tbody>
-                            </table>
-                        </div>
-                    </template>
-                </div>
-            </template>
-
             <!-- Progress -->
             <div class="section">
                 <h3>Events Progress</h3>
@@ -343,62 +206,141 @@
                 </div>
             </template>
 
-            <!-- Output Datasets -->
-            <template x-if="outputDatasets.length > 0">
+            <!-- Splitting params -->
+            <template x-if="Object.keys(splittingDisplay).length > 0">
                 <div class="section">
-                    <h3>Output Datasets</h3>
-                    <template x-for="ds in outputDatasets" :key="ds.dataset_name">
-                        <div style="margin-bottom:1rem; padding:0.75rem; border:1px solid var(--pico-muted-border-color); border-radius:4px;">
-                            <strong x-text="ds.rucio_did || ds.dataset_name" style="word-break:break-all;"></strong>
-                            <template x-if="ds.rucio_did">
-                                <div style="font-size:0.8rem; opacity:0.6; margin-top:0.15rem;"
-                                     x-text="'Production: ' + ds.dataset_name"></div>
+                    <h3>Splitting Parameters</h3>
+                    <dl class="detail-grid">
+                        <template x-for="[key, val] in Object.entries(splittingDisplay)" :key="key">
+                            <div>
+                                <dt x-text="key"></dt>
+                                <dd>
+                                    <template x-if="key === 'effective_events_per_job'">
+                                        <span><strong x-text="val"></strong> <span style="opacity:0.6">(nominal &times; test_fraction)</span></span>
+                                    </template>
+                                    <template x-if="key !== 'effective_events_per_job'">
+                                        <span x-text="val"></span>
+                                    </template>
+                                </dd>
+                            </div>
+                        </template>
+                    </dl>
+                </div>
+            </template>
+
+            <!-- Adaptive optimization — current result summary -->
+            <template x-if="adaptiveInfo">
+                <div class="section">
+                    <h3>Adaptive Optimization</h3>
+                    <dl class="detail-grid">
+                        <dt>Request Memory</dt>
+                        <dd><span x-text="fmtNum(adaptiveInfo.original_memory)"></span> MB</dd>
+                        <dt>Measured Memory</dt>
+                        <dd>
+                            <template x-if="adaptiveInfo.measured_memory">
+                                <span>
+                                    <span x-text="fmtNum(adaptiveInfo.measured_memory)"></span> MB
+                                    <span style="opacity:0.6; margin-left:0.25rem;"
+                                          x-text="'(' + (adaptiveInfo.memory_source || '—') + ')'"></span>
+                                </span>
                             </template>
-                            <dl class="detail-grid" style="margin-top:0.5rem;">
-                                <dt>Data Tier</dt>
-                                <dd x-text="ds.data_tier || '—'"></dd>
-                                <dt>LFN Base</dt>
-                                <dd x-text="ds.merged_lfn_base || '—'" style="word-break:break-all; font-size:0.85rem;"></dd>
-                                <dt>Events</dt>
-                                <dd x-text="ds.event_count > 0 ? fmtNum(ds.event_count) : '—'"></dd>
-                                <dt>Files</dt>
-                                <dd><span x-text="ds.file_count"></span> .root files</dd>
-                                <dt>Total Size</dt>
-                                <dd x-text="ds.total_size_mb > 0 ? ds.total_size_mb + ' MB' : '—'"></dd>
-                            </dl>
+                            <template x-if="!adaptiveInfo.measured_memory">
+                                <span x-text="adaptiveInfo.peak_rss ? fmtNum(adaptiveInfo.peak_rss) + ' MB (FJR RSS)' : '—'"></span>
+                            </template>
+                        </dd>
+                        <dt>Tuned Memory</dt>
+                        <dd>
+                            <strong x-text="fmtNum(adaptiveInfo.tuned_memory)"></strong> MB
+                            <template x-if="adaptiveInfo.original_memory && adaptiveInfo.tuned_memory">
+                                <span style="margin-left:0.25rem;"
+                                      :style="adaptiveInfo.tuned_memory < adaptiveInfo.original_memory ? 'color:#16a34a' : 'color:#dc2626'"
+                                      x-text="'(' + (adaptiveInfo.tuned_memory < adaptiveInfo.original_memory ? '' : '+') + (((adaptiveInfo.tuned_memory - adaptiveInfo.original_memory) / adaptiveInfo.original_memory) * 100).toFixed(0) + '%)'"></span>
+                            </template>
+                        </dd>
+                        <dt>Request Threads</dt>
+                        <dd x-text="adaptiveInfo.original_nthreads"></dd>
+                        <dt>Tuned Threads</dt>
+                        <dd>
+                            <strong x-text="adaptiveInfo.tuned_nthreads"></strong>
+                            <template x-if="adaptiveInfo.original_nthreads !== adaptiveInfo.tuned_nthreads">
+                                <span style="margin-left:0.25rem;" x-text="'(' + (adaptiveInfo.tuned_nthreads - adaptiveInfo.original_nthreads) + ')'"></span>
+                            </template>
+                        </dd>
+                        <template x-if="adaptiveInfo.cpu_eff != null">
+                            <div style="display:contents;">
+                                <dt>Weighted CPU Eff</dt>
+                                <dd x-text="fmtPct(adaptiveInfo.cpu_eff * 100)"></dd>
+                            </div>
+                        </template>
+                    </dl>
+
+                    <!-- Per-step adaptive detail -->
+                    <template x-if="adaptiveInfo.per_step">
+                        <div style="margin-top:0.75rem;">
+                            <h4 style="font-size:0.9rem; margin-bottom:0.25rem;">Per-Step Tuning</h4>
+                            <table style="font-size:0.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th>Step</th>
+                                        <th>CPU Eff</th>
+                                        <th>Eff Cores</th>
+                                        <th>Tuned Threads</th>
+                                        <th>Parallel</th>
+                                        <th>Overcommit</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="[sn, sd] in Object.entries(adaptiveInfo.per_step).sort((a,b) => Number(a[0]) - Number(b[0]))" :key="sn">
+                                        <tr>
+                                            <td x-text="stepName(sn)"></td>
+                                            <td x-text="sd.cpu_eff != null ? fmtPct(sd.cpu_eff * 100) : '—'"></td>
+                                            <td x-text="sd.effective_cores != null ? sd.effective_cores.toFixed(1) : '—'"></td>
+                                            <td x-text="sd.tuned_nthreads || '—'"></td>
+                                            <td x-text="sd.n_parallel || 1"></td>
+                                            <td x-text="sd.overcommit_applied ? 'yes' : 'no'"></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
                         </div>
                     </template>
                 </div>
             </template>
 
-            <!-- Steps -->
-            <template x-if="stepsInfo.length > 0">
-                <div class="section">
-                    <h3>Steps</h3>
-                    <table style="font-size:0.85rem;">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>Name</th>
-                                <th>CMSSW</th>
-                                <th>Global Tag</th>
-                                <th>Arch</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <template x-for="s in stepsInfo" :key="s.index">
-                                <tr>
-                                    <td x-text="s.index"></td>
-                                    <td x-text="s.name"></td>
-                                    <td x-text="s.cmssw"></td>
-                                    <td x-text="s.global_tag"></td>
-                                    <td x-text="s.scram_arch"></td>
-                                </tr>
-                            </template>
-                        </tbody>
-                    </table>
-                </div>
-            </template>
+            <!-- Processing Info -->
+            <div class="section">
+                <h3>Processing Info</h3>
+                <dl class="detail-grid">
+                    <dt>Request</dt>
+                    <dd>
+                        <a :href="reqmgrUrl" target="_blank" rel="noopener"
+                           x-text="workflow.request_name" style="word-break:break-all;"
+                           title="Open in ReqMgr2"></a>
+                        <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)"
+                           style="margin-left:0.5rem; font-size:0.8rem;">(WMS2)</a>
+                    </dd>
+                    <dt>Type</dt>
+                    <dd x-text="configData.request_type || '—'"></dd>
+                    <template x-if="!isGen">
+                        <div style="display:contents;">
+                            <dt>Input Dataset</dt>
+                            <dd :title="workflow.input_dataset" x-text="fmtMidTruncate(workflow.input_dataset, 100)"></dd>
+                        </div>
+                    </template>
+                    <template x-for="pu in pileupDatasets" :key="pu.dataset">
+                        <div style="display:contents;">
+                            <dt x-text="pu.type"></dt>
+                            <dd :title="pu.dataset" x-text="fmtMidTruncate(pu.dataset, 100)"></dd>
+                        </div>
+                    </template>
+                    <dt>Splitting Algorithm</dt>
+                    <dd x-text="workflow.splitting_algo || '—'"></dd>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(workflow.created_at)"></dd>
+                    <dt>Updated</dt>
+                    <dd x-text="fmtDateTime(workflow.updated_at)"></dd>
+                </dl>
+            </div>
 
             <!-- Back links -->
             <p>

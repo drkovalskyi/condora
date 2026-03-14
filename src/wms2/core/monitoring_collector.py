@@ -50,77 +50,109 @@ async def collect_htcondor_overview(session_factory, condor) -> dict:
 
         for req_row in requests:
             wf = await repo.get_workflow_by_request(req_row.request_name)
-            if not wf or not wf.dag_id:
-                continue
-            dag = await repo.get_dag(wf.dag_id)
-            if not dag or not dag.dagman_cluster_id:
-                continue
-            if dag.status not in ("submitted", "running"):
+            if not wf:
                 continue
 
-            sites: dict[str, dict[str, int]] = {}
-            if condor:
-                try:
-                    sites = await condor.query_dag_site_summary(
-                        dag.dagman_cluster_id, schedd_name=dag.schedd_name,
-                    )
-                except Exception:
-                    log.warning(
-                        "HTCondor site query failed for DAG %s",
-                        dag.id, exc_info=True,
-                    )
+            # Collect all active DAGs for this workflow
+            active_dags = await repo.get_active_dags_for_workflow(wf.id)
+            if not active_dags:
+                continue
 
-            htcondor_totals = {"running": 0, "idle": 0, "held": 0}
-            for counts in sites.values():
-                for k in htcondor_totals:
-                    htcondor_totals[k] += counts.get(k, 0)
+            # Aggregate across all active DAGs
+            agg_sites: dict[str, dict[str, int]] = {}
+            agg_htcondor = {"running": 0, "idle": 0, "held": 0}
+            agg_dag_nodes = {"total": 0, "done": 0, "running": 0,
+                             "idle": 0, "failed": 0, "held": 0}
+            agg_wus_done = 0
+            agg_wus_total = 0
+            round_numbers = []
 
-            dag_nodes = {
-                "total": dag.total_nodes or 0,
-                "done": dag.nodes_done or 0,
-                "running": dag.nodes_running or 0,
-                "idle": getattr(dag, "nodes_idle", 0) or 0,
-                "failed": dag.nodes_failed or 0,
-                "held": getattr(dag, "nodes_held", 0) or 0,
-            }
+            for dag in active_dags:
+                if not dag.dagman_cluster_id:
+                    continue
 
-            completed_wus = dag.completed_work_units
-            if isinstance(completed_wus, list):
-                wus_done = len(completed_wus)
+                round_num = getattr(dag, "round_number", None)
+                if round_num is not None:
+                    round_numbers.append(round_num)
+
+                # Per-DAG HTCondor site query
+                if condor:
+                    try:
+                        sites = await condor.query_dag_site_summary(
+                            dag.dagman_cluster_id,
+                            schedd_name=dag.schedd_name,
+                        )
+                    except Exception:
+                        log.warning(
+                            "HTCondor site query failed for DAG %s",
+                            dag.id, exc_info=True,
+                        )
+                        sites = {}
+                else:
+                    sites = {}
+
+                for site, counts in sites.items():
+                    if site not in agg_sites:
+                        agg_sites[site] = {"running": 0, "idle": 0, "held": 0}
+                    for k in counts:
+                        agg_sites[site][k] += counts.get(k, 0)
+                        agg_htcondor[k] += counts.get(k, 0)
+
+                agg_dag_nodes["total"] += dag.total_nodes or 0
+                agg_dag_nodes["done"] += dag.nodes_done or 0
+                agg_dag_nodes["running"] += dag.nodes_running or 0
+                agg_dag_nodes["idle"] += getattr(dag, "nodes_idle", 0) or 0
+                agg_dag_nodes["failed"] += dag.nodes_failed or 0
+                agg_dag_nodes["held"] += getattr(dag, "nodes_held", 0) or 0
+
+                completed_wus = dag.completed_work_units
+                if isinstance(completed_wus, list):
+                    agg_wus_done += len(completed_wus)
+                else:
+                    agg_wus_done += completed_wus or 0
+                agg_wus_total += dag.total_work_units or 0
+
+            # Build round display: "1-2" for multiple, "1" for single
+            if round_numbers:
+                round_numbers.sort()
+                if len(round_numbers) == 1:
+                    round_display = str(round_numbers[0])
+                else:
+                    round_display = f"{round_numbers[0]}-{round_numbers[-1]}"
             else:
-                wus_done = completed_wus or 0
-            total_wus = dag.total_work_units or 0
+                round_display = str(wf.current_round)
 
             totals = {
-                "running": htcondor_totals["running"],
-                "idle": htcondor_totals["idle"],
-                "held": htcondor_totals["held"],
+                "running": agg_htcondor["running"],
+                "idle": agg_htcondor["idle"],
+                "held": agg_htcondor["held"],
             }
 
             entry = {
                 "request_name": req_row.request_name,
                 "request_status": req_row.status,
-                "round": wf.current_round,
-                "dag_status": dag.status,
-                "dagman_cluster_id": dag.dagman_cluster_id,
-                "schedd_name": dag.schedd_name,
-                "sites": sites,
+                "round": round_display,
+                "active_dags": len(active_dags),
+                "dag_status": active_dags[-1].status if active_dags else None,
+                "dagman_cluster_id": active_dags[-1].dagman_cluster_id if active_dags else None,
+                "schedd_name": active_dags[-1].schedd_name if active_dags else None,
+                "sites": agg_sites,
                 "totals": totals,
-                "dag_nodes": dag_nodes,
-                "work_units": {"done": wus_done, "total": total_wus},
+                "dag_nodes": agg_dag_nodes,
+                "work_units": {"done": agg_wus_done, "total": agg_wus_total},
                 "events": {
                     "produced": wf.events_produced or 0,
                     "target": wf.target_events or 0,
                 },
-                "htcondor_totals": htcondor_totals,
+                "htcondor_totals": agg_htcondor,
             }
             request_entries.append(entry)
 
             for k in grand_totals:
                 grand_totals[k] += totals[k]
             for k in htcondor_grand:
-                htcondor_grand[k] += htcondor_totals[k]
-            for site, counts in sites.items():
+                htcondor_grand[k] += agg_htcondor[k]
+            for site, counts in agg_sites.items():
                 if site not in grand_by_site:
                     grand_by_site[site] = {"running": 0, "idle": 0, "held": 0}
                 for k in counts:

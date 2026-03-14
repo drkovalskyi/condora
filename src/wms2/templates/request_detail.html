@@ -108,106 +108,6 @@
                 </div>
             </template>
 
-            <!-- Request info -->
-            <div class="section">
-                <h3>Request Info</h3>
-                <dl class="detail-grid">
-                    <dt>Campaign</dt>
-                    <dd x-text="request.campaign || '—'"></dd>
-                    <dt>Job Priority</dt>
-                    <dd x-text="currentJobPriority != null ? currentJobPriority : '—'"></dd>
-                    <dt>Requestor</dt>
-                    <dd x-text="request.requestor || '—'"></dd>
-                    <dt>Urgent</dt>
-                    <dd x-text="request.urgent ? 'Yes' : 'No'"></dd>
-                    <dt>Adaptive</dt>
-                    <dd x-text="request.adaptive ? 'Yes' : 'No'"></dd>
-                    <dt>Type</dt>
-                    <dd x-text="(request.request_data && request.request_data.RequestType) || '—'"></dd>
-                    <template x-if="request.input_dataset && !(request.request_data && request.request_data._is_gen)">
-                        <div style="display:contents;">
-                            <dt>Input Dataset</dt>
-                            <dd x-text="request.input_dataset" style="word-break:break-all;"></dd>
-                        </div>
-                    </template>
-                    <template x-if="stageoutMode">
-                        <div style="display:contents;">
-                            <dt>Stageout Mode</dt>
-                            <dd x-text="stageoutMode"></dd>
-                        </div>
-                    </template>
-                    <template x-if="processingVersion != null">
-                        <div style="display:contents;">
-                            <dt>Processing Version</dt>
-                            <dd x-text="'v' + processingVersion"></dd>
-                        </div>
-                    </template>
-                    <dt>Work Units</dt>
-                    <dd x-text="'Round 0: 1, Round 1+: ' + (workUnitsPerRound || '—')"></dd>
-                    <template x-if="consolidationRse">
-                        <div style="display:contents;">
-                            <dt>Consolidation RSE</dt>
-                            <dd x-text="consolidationRse"></dd>
-                        </div>
-                    </template>
-                    <dt>Created</dt>
-                    <dd x-text="fmtDateTime(request.created_at)"></dd>
-                    <dt>Updated</dt>
-                    <dd x-text="fmtDateTime(request.updated_at)"></dd>
-                    <dt>Cleanup Policy</dt>
-                    <dd x-text="request.cleanup_policy || '—'"></dd>
-                    <template x-if="testFraction">
-                        <div style="display:contents;">
-                            <dt>Test Fraction</dt>
-                            <dd><span style="color:#b45309; font-weight:600;" x-text="testFraction"></span></dd>
-                        </div>
-                    </template>
-                </dl>
-            </div>
-
-            <!-- Priority profile -->
-            <div class="section">
-                <h3 style="display:flex; align-items:center; gap:0.5rem;">
-                    Priority Profile
-                    <template x-if="!editingPriority">
-                        <button class="outline" style="font-size:0.75rem; padding:0.15rem 0.5rem;"
-                                @click="startEditPriority()">Edit</button>
-                    </template>
-                </h3>
-                <template x-if="!editingPriority">
-                    <dl class="detail-grid">
-                        <dt>High Priority</dt>
-                        <dd x-text="priorityProfile ? priorityProfile.high : '—'"></dd>
-                        <dt>Nominal Priority</dt>
-                        <dd x-text="priorityProfile ? priorityProfile.nominal : '—'"></dd>
-                        <dt>Switch Fraction</dt>
-                        <dd x-text="priorityProfile ? (priorityProfile.switch_fraction * 100) + '%' : '—'"></dd>
-                    </dl>
-                </template>
-                <template x-if="editingPriority">
-                    <div>
-                        <dl class="detail-grid">
-                            <dt><label for="prio-high">High Priority</label></dt>
-                            <dd><input id="prio-high" type="number" x-model="prioHigh" style="width:80px;"></dd>
-                            <dt><label for="prio-nominal">Nominal Priority</label></dt>
-                            <dd><input id="prio-nominal" type="number" x-model="prioNominal" style="width:80px;"></dd>
-                            <dt><label for="prio-switch">Switch Fraction</label></dt>
-                            <dd><input id="prio-switch" type="number" x-model="prioSwitchFraction"
-                                       step="0.05" min="0" max="1" style="width:80px;"></dd>
-                        </dl>
-                        <div style="margin-top:0.5rem; display:flex; gap:0.5rem;">
-                            <button @click="savePriority()" :disabled="actionLoading"
-                                    style="font-size:0.85rem; padding:0.25rem 0.75rem;">Save</button>
-                            <button class="outline" @click="editingPriority = false" :disabled="actionLoading"
-                                    style="font-size:0.85rem; padding:0.25rem 0.75rem;">Cancel</button>
-                        </div>
-                        <p style="font-size:0.8rem; opacity:0.6; margin-top:0.25rem;">
-                            Changes take effect on the next DAG submission (next round).
-                        </p>
-                    </div>
-                </template>
-            </div>
-
             <!-- Processing progress -->
             <template x-if="hasWorkflow">
                 <div class="section">
@@ -216,7 +116,7 @@
                         <dt>Status</dt>
                         <dd x-html="statusBadge(workflow.status)"></dd>
                         <dt>Round</dt>
-                        <dd x-text="workflow.current_round != null ? workflow.current_round : '—'"></dd>
+                        <dd x-text="activeRoundsDisplay"></dd>
                         <dt>Events Produced</dt>
                         <dd>
                             <span x-text="fmtNum(workflow.events_produced)"></span>
@@ -255,7 +155,7 @@
                         <dd x-html="statusBadge(dag.status)"></dd>
                         <dt>DAGMan Cluster</dt>
                         <dd x-text="dag.dagman_cluster_id || '—'"></dd>
-                        <dt>Work Units <span x-show="workflow && workflow.current_round != null" style="opacity:0.6; font-weight:normal;">(Round <span x-text="workflow.current_round"></span>)</span></dt>
+                        <dt>Work Units <span x-show="dag && dag.round_number != null" style="opacity:0.6; font-weight:normal;">(Round <span x-text="dag.round_number"></span>)</span></dt>
                         <dd>
                             <span x-text="Array.isArray(dag.completed_work_units) ? dag.completed_work_units.length : (dag.completed_work_units || 0)"></span>
                             / <span x-text="dag.total_work_units || 0"></span> completed
@@ -379,6 +279,163 @@
                                     <td x-html="statusBadge(t.from)"></td>
                                     <td x-html="statusBadge(t.to)"></td>
                                     <td x-text="fmtDateTime(t.timestamp)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Request info -->
+            <div class="section">
+                <h3>Request Info</h3>
+                <dl class="detail-grid">
+                    <dt>Campaign</dt>
+                    <dd x-text="request.campaign || '—'"></dd>
+                    <dt>Job Priority</dt>
+                    <dd x-text="currentJobPriority != null ? currentJobPriority : '—'"></dd>
+                    <dt>Requestor</dt>
+                    <dd x-text="request.requestor || '—'"></dd>
+                    <dt>Urgent</dt>
+                    <dd x-text="request.urgent ? 'Yes' : 'No'"></dd>
+                    <dt>Adaptive</dt>
+                    <dd x-text="request.adaptive ? 'Yes' : 'No'"></dd>
+                    <dt>Type</dt>
+                    <dd x-text="(request.request_data && request.request_data.RequestType) || '—'"></dd>
+                    <template x-if="request.input_dataset && !(request.request_data && request.request_data._is_gen)">
+                        <div style="display:contents;">
+                            <dt>Input Dataset</dt>
+                            <dd x-text="request.input_dataset" style="word-break:break-all;"></dd>
+                        </div>
+                    </template>
+                    <template x-if="stageoutMode">
+                        <div style="display:contents;">
+                            <dt>Stageout Mode</dt>
+                            <dd x-text="stageoutMode"></dd>
+                        </div>
+                    </template>
+                    <template x-if="processingVersion != null">
+                        <div style="display:contents;">
+                            <dt>Processing Version</dt>
+                            <dd x-text="'v' + processingVersion"></dd>
+                        </div>
+                    </template>
+                    <dt>Work Units</dt>
+                    <dd x-text="'Round 0: 1, Round 1+: ' + (workUnitsPerRound || '—')"></dd>
+                    <template x-if="consolidationRse">
+                        <div style="display:contents;">
+                            <dt>Consolidation RSE</dt>
+                            <dd x-text="consolidationRse"></dd>
+                        </div>
+                    </template>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(request.created_at)"></dd>
+                    <dt>Updated</dt>
+                    <dd x-text="fmtDateTime(request.updated_at)"></dd>
+                    <dt>Cleanup Policy</dt>
+                    <dd x-text="request.cleanup_policy || '—'"></dd>
+                    <template x-if="testFraction">
+                        <div style="display:contents;">
+                            <dt>Test Fraction</dt>
+                            <dd><span style="color:#b45309; font-weight:600;" x-text="testFraction"></span></dd>
+                        </div>
+                    </template>
+                </dl>
+            </div>
+
+            <!-- Priority profile -->
+            <div class="section">
+                <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                    Priority Profile
+                    <template x-if="!editingPriority">
+                        <button class="outline" style="font-size:0.75rem; padding:0.15rem 0.5rem;"
+                                @click="startEditPriority()">Edit</button>
+                    </template>
+                </h3>
+                <template x-if="!editingPriority">
+                    <dl class="detail-grid">
+                        <dt>High Priority</dt>
+                        <dd x-text="priorityProfile ? priorityProfile.high : '—'"></dd>
+                        <dt>Nominal Priority</dt>
+                        <dd x-text="priorityProfile ? priorityProfile.nominal : '—'"></dd>
+                        <dt>Switch Fraction</dt>
+                        <dd x-text="priorityProfile ? (priorityProfile.switch_fraction * 100) + '%' : '—'"></dd>
+                    </dl>
+                </template>
+                <template x-if="editingPriority">
+                    <div>
+                        <dl class="detail-grid">
+                            <dt><label for="prio-high">High Priority</label></dt>
+                            <dd><input id="prio-high" type="number" x-model="prioHigh" style="width:80px;"></dd>
+                            <dt><label for="prio-nominal">Nominal Priority</label></dt>
+                            <dd><input id="prio-nominal" type="number" x-model="prioNominal" style="width:80px;"></dd>
+                            <dt><label for="prio-switch">Switch Fraction</label></dt>
+                            <dd><input id="prio-switch" type="number" x-model="prioSwitchFraction"
+                                       step="0.05" min="0" max="1" style="width:80px;"></dd>
+                        </dl>
+                        <div style="margin-top:0.5rem; display:flex; gap:0.5rem;">
+                            <button @click="savePriority()" :disabled="actionLoading"
+                                    style="font-size:0.85rem; padding:0.25rem 0.75rem;">Save</button>
+                            <button class="outline" @click="editingPriority = false" :disabled="actionLoading"
+                                    style="font-size:0.85rem; padding:0.25rem 0.75rem;">Cancel</button>
+                        </div>
+                        <p style="font-size:0.8rem; opacity:0.6; margin-top:0.25rem;">
+                            Changes take effect on the next DAG submission (next round).
+                        </p>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Output Datasets -->
+            <template x-if="outputDatasets.length > 0">
+                <div class="section">
+                    <h3>Output Datasets</h3>
+                    <template x-for="ds in outputDatasets" :key="ds.dataset_name">
+                        <div style="margin-bottom:1rem; padding:0.75rem; border:1px solid var(--pico-muted-border-color); border-radius:4px;">
+                            <strong x-text="ds.rucio_did || ds.dataset_name" style="word-break:break-all;"></strong>
+                            <template x-if="ds.rucio_did">
+                                <div style="font-size:0.8rem; opacity:0.6; margin-top:0.15rem;"
+                                     x-text="'Production: ' + ds.dataset_name"></div>
+                            </template>
+                            <dl class="detail-grid" style="margin-top:0.5rem;">
+                                <dt>Data Tier</dt>
+                                <dd x-text="ds.data_tier || '—'"></dd>
+                                <dt>LFN Base</dt>
+                                <dd x-text="ds.merged_lfn_base || '—'" style="word-break:break-all; font-size:0.85rem;"></dd>
+                                <dt>Events</dt>
+                                <dd x-text="ds.event_count > 0 ? fmtNum(ds.event_count) : '—'"></dd>
+                                <dt>Files</dt>
+                                <dd><span x-text="ds.file_count"></span> .root files</dd>
+                                <dt>Total Size</dt>
+                                <dd x-text="ds.total_size_mb > 0 ? ds.total_size_mb + ' MB' : '—'"></dd>
+                            </dl>
+                        </div>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Steps -->
+            <template x-if="stepsInfo.length > 0">
+                <div class="section">
+                    <h3>Steps</h3>
+                    <table style="font-size:0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Name</th>
+                                <th>CMSSW</th>
+                                <th>Global Tag</th>
+                                <th>Arch</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in stepsInfo" :key="s.index">
+                                <tr>
+                                    <td x-text="s.index"></td>
+                                    <td x-text="s.name"></td>
+                                    <td x-text="s.cmssw"></td>
+                                    <td x-text="s.global_tag"></td>
+                                    <td x-text="s.scram_arch"></td>
                                 </tr>
                             </template>
                         </tbody>
