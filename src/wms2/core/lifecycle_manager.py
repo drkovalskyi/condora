@@ -758,13 +758,23 @@ class RequestLifecycleManager:
         if not active_dags and workflow.dag_id:
             dag = await self.db.get_dag(workflow.dag_id)
             if dag and dag.status == DAGStatus.COMPLETED.value:
-                await self._cleanup_condor_dag(dag)
-                await self._handle_dag_round_completion(request, workflow, dag)
-                return
+                # Guard: only process round completion once — check if
+                # this DAG's round is already in step_metrics.rounds.
+                sm = workflow.step_metrics or {}
+                dag_round = getattr(dag, "round_number", None)
+                already_recorded = (
+                    dag_round is not None
+                    and str(dag_round) in (sm.get("rounds") or {})
+                )
+                if not already_recorded:
+                    await self._cleanup_condor_dag(dag)
+                    await self._handle_dag_round_completion(request, workflow, dag)
+                # Fall through to aggregate counts and plan next round
             elif dag and dag.status in (DAGStatus.PARTIAL.value, DAGStatus.FAILED.value):
                 await self._handle_single_dag_failure(request, workflow, dag)
                 return
-            return
+            # Don't return — fall through to aggregate counts and
+            # potentially plan the next round below.
 
         # Poll each active DAG
         for dag in active_dags:
@@ -843,6 +853,27 @@ class RequestLifecycleManager:
         # Check pipelined round advance conditions
         if remaining_active:
             await self._maybe_advance_round(request, workflow)
+        elif self.dag_planner and not self._target_reached(workflow):
+            # No active DAGs, target not reached — plan next round directly.
+            # This handles the case where the last DAG completed but the
+            # pipelining path kept the request ACTIVE (max_concurrent_rounds>1).
+            try:
+                workflow = await self.db.get_workflow_by_request(request.request_name)
+                if workflow:
+                    new_dag = await self.dag_planner.plan_production_dag(
+                        workflow, adaptive=True,
+                    )
+                    if new_dag:
+                        logger.info(
+                            "Request %s: planned next round — DAG %s (round %d)",
+                            request.request_name, new_dag.id,
+                            getattr(new_dag, "round_number", "?"),
+                        )
+            except Exception:
+                logger.warning(
+                    "Round advance failed for %s — will retry next cycle",
+                    request.request_name, exc_info=True,
+                )
 
     async def _process_completed_wus(self, request, workflow, result):
         """Process completed work units: output registration + event counting."""

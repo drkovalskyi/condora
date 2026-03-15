@@ -1508,8 +1508,9 @@ class MergeGroup(BaseModel):
         Steps with MCPileup or DataPileup reference pileup datasets whose
         files may be only partially available on disk (many replicas are
         tape-only). The DAG Planner queries Rucio for files with on-disk
-        replicas and writes the available list to pileup_files.json in each
-        merge group directory. At runtime the processing wrapper injects
+        replicas and writes the available list to `pileup_files.json` in the
+        submit directory (one copy shared across all work units in a round).
+        At runtime the processing wrapper injects
         this list into the CMSSW PSet (process.mixData.input.fileNames or
         process.mix.input.fileNames), replacing the ConfigCache defaults.
         This ensures jobs only attempt to read accessible files.
@@ -3743,6 +3744,48 @@ Note: `RequestType` is stored in `PayloadConfig` as metadata. WMS2 does not act 
 ---
 
 ## Appendix C: DAGMan File Format Reference
+
+### C.0 Submit Directory Layout and Shared Files
+
+Each round produces one submit directory containing the outer DAG and all work
+unit sub-directories.  In spool mode, the entire tree is transferred to the
+remote schedd — file placement directly impacts spool size.
+
+**Key invariant: SUBDAG EXTERNAL Iwd.**  In spool mode (no `DIR` keyword), the
+inner DAGMan inherits the outer DAG's Iwd (= submit directory root).  All job
+paths in inner `.dag` files use `mg_NNNNNN/` prefixes.  Files placed at the
+submit directory root are accessible by bare filename from all WU jobs.
+
+**Shared files** (identical across all WUs, written once at submit directory level):
+
+| File | Size | Purpose |
+|------|------|---------|
+| `sandbox.tar.gz` | varies | CMSSW config + PSet files (symlink to source) |
+| `manifest.json` | ~3 KB | Step metadata extracted from sandbox, with adaptive tuning applied |
+| `pileup_files.json` | up to 80 MB | Rucio pileup replica list for PSet injection |
+| `wms2_proc.sh` | ~30 KB | Processing wrapper script |
+| `wms2_merge.py` | ~20 KB | Merge script |
+| `wms2_cleanup.py` | ~5 KB | Cleanup script |
+| `wms2_stageout.py` | ~10 KB | Stageout utility |
+| `x509_proxy` | ~10 KB | X.509 credential (symlink) |
+| Site-pinning scripts | ~3 KB each | `elect_site.sh`, `pin_site.sh`, `post_script.sh` |
+
+**Per-WU files** (unique content, must exist in `mg_NNNNNN/`):
+
+| File | Purpose |
+|------|---------|
+| `group.dag` | Inner DAG: landing → procs → merge → cleanup |
+| `output_info.json` | Per-WU output paths, group_index, proc_node_indices |
+| `proc_NNNNNN.sub` | Per-proc submit: unique event range, seed |
+| `landing.sub`, `merge.sub`, `cleanup.sub` | Per-WU submit descriptions |
+
+**Why this matters:** A pileup file list for a large PREMIX dataset can be 80 MB.
+Duplicating it per-WU would make a 500-WU round consume 40 GB of spool — exceeding
+the schedd's `SYSTEM_PERIODIC_REMOVE` disk limit.  Sharing it at the round level
+reduces spool to 80 MB regardless of WU count.
+
+In local mode (non-spool), `DIR mg_NNNNNN/` sets the inner DAGMan's Iwd to the
+WU subdirectory, so shared files are symlinked per-WU instead.
 
 ### C.1 Outer DAG (workflow.dag)
 

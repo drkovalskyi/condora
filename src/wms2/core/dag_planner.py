@@ -1235,6 +1235,61 @@ def _generate_dag_files(
         if not proxy_link.exists():
             os.symlink(os.path.abspath(x509_proxy), str(proxy_link))
 
+    # ── Shared files at round level (spool mode only) ───────────
+    # In spool mode, SUBDAG EXTERNAL inner DAGMan inherits the outer
+    # DAG's Iwd (spool root = submit_dir).  Files placed here are
+    # accessible by bare filename from all WU jobs, avoiding per-WU
+    # duplication in the spool transfer.  In local mode, DIR sets the
+    # inner DAGMan's Iwd to mg_NNNNNN/ so files must be per-WU there.
+
+    if spool_mode:
+        # Write pileup_files.json once (can be tens of MB for large datasets)
+        if pileup_files:
+            _write_file(
+                str(submit_path / "pileup_files.json"),
+                json.dumps(pileup_files, indent=2),
+            )
+
+        # Extract and tune manifest.json once from sandbox
+        if sandbox_path and os.path.isfile(sandbox_path):
+            import tarfile
+            try:
+                with tarfile.open(sandbox_path, "r:gz") as tf:
+                    for member in tf.getmembers():
+                        if member.name == "manifest.json" or member.name.endswith("/manifest.json"):
+                            member.name = "manifest.json"
+                            tf.extract(member, str(submit_path))
+                            break
+            except Exception:
+                pass
+            # Apply adaptive tuning to the shared manifest
+            _rp = resource_params or {}
+            _ncpus = _rp.get("ncpus", 0)
+            _per_step = _rp.get("_per_step_tuning")
+            _manifest_path = submit_path / "manifest.json"
+            if _manifest_path.is_file() and (_ncpus or _per_step):
+                try:
+                    _manifest = json.loads(_manifest_path.read_text())
+                    _changed = False
+                    for i, step in enumerate(_manifest.get("steps", [])):
+                        st = _per_step.get(str(i)) if _per_step else None
+                        if st:
+                            tuned_nt = st.get("tuned_nthreads")
+                            n_par = st.get("n_parallel", 1)
+                            if tuned_nt and tuned_nt != step.get("multicore"):
+                                step["multicore"] = tuned_nt
+                                _changed = True
+                            if n_par > 1 and step.get("n_parallel", 1) != n_par:
+                                step["n_parallel"] = n_par
+                                _changed = True
+                        elif _ncpus and step.get("multicore", 0) != _ncpus:
+                            step["multicore"] = _ncpus
+                            _changed = True
+                    if _changed:
+                        _manifest_path.write_text(json.dumps(_manifest, indent=2))
+                except Exception:
+                    pass
+
     # Generate outer DAG.
     # Local mode: absolute paths (scheduler universe inherits schedd's CWD).
     # Spool mode: relative paths (DAGMan CWD = spool subdir on remote schedd).
@@ -1292,8 +1347,9 @@ def _generate_dag_files(
                 f"RETRY {mg_name} {wu_retry} UNLESS-EXIT 42"
             )
 
-        # Write pileup_files.json if pileup datasets were resolved
-        if pileup_files:
+        # Write pileup_files.json per-WU (local mode only — spool mode
+        # writes once at submit_dir level above the loop)
+        if pileup_files and not spool_mode:
             _write_file(
                 str(mg_dir / "pileup_files.json"),
                 json.dumps(pileup_files, indent=2),
@@ -1446,47 +1502,50 @@ def _generate_group_dag(
             proc_transfer_files.append(sandbox_link.name)
         else:
             proc_transfer_files.append(f"../{sandbox_link.name}")
-        # Extract manifest.json to group dir so merge job can find CMSSW info
-        import tarfile
-        try:
-            with tarfile.open(sandbox_path, "r:gz") as tf:
-                for member in tf.getmembers():
-                    if member.name == "manifest.json" or member.name.endswith("/manifest.json"):
-                        member.name = "manifest.json"
-                        tf.extract(member, str(group_dir))
-                        break
-        except Exception:
-            pass  # merge will fall back to copy mode without hadd
-
-        # Override per-step multicore and n_parallel in manifest
-        manifest_path = group_dir / "manifest.json"
-        per_step_tuning = rp.get("_per_step_tuning")
-        if manifest_path.is_file() and (ncpus or per_step_tuning):
+        # Extract manifest.json so merge job can find CMSSW info.
+        # In spool mode, manifest is already at submit_dir level (shared).
+        # In local mode, extract per-WU to group_dir.
+        if not spool_mode:
+            import tarfile
             try:
-                import json as _json
-                with open(manifest_path) as _f:
-                    _manifest = _json.load(_f)
-                changed = False
-                for i, step in enumerate(_manifest.get("steps", [])):
-                    step_key = str(i)
-                    st = per_step_tuning.get(step_key) if per_step_tuning else None
-                    if st:
-                        tuned_nt = st.get("tuned_nthreads")
-                        n_par = st.get("n_parallel", 1)
-                        if tuned_nt and tuned_nt != step.get("multicore"):
-                            step["multicore"] = tuned_nt
-                            changed = True
-                        if n_par > 1 and step.get("n_parallel", 1) != n_par:
-                            step["n_parallel"] = n_par
-                            changed = True
-                    elif ncpus and step.get("multicore", 0) != ncpus:
-                        step["multicore"] = ncpus
-                        changed = True
-                if changed:
-                    with open(manifest_path, "w") as _f:
-                        _json.dump(_manifest, _f, indent=2)
+                with tarfile.open(sandbox_path, "r:gz") as tf:
+                    for member in tf.getmembers():
+                        if member.name == "manifest.json" or member.name.endswith("/manifest.json"):
+                            member.name = "manifest.json"
+                            tf.extract(member, str(group_dir))
+                            break
             except Exception:
-                pass
+                pass  # merge will fall back to copy mode without hadd
+
+            # Override per-step multicore and n_parallel in manifest
+            manifest_path = group_dir / "manifest.json"
+            per_step_tuning = rp.get("_per_step_tuning")
+            if manifest_path.is_file() and (ncpus or per_step_tuning):
+                try:
+                    import json as _json
+                    with open(manifest_path) as _f:
+                        _manifest = _json.load(_f)
+                    changed = False
+                    for i, step in enumerate(_manifest.get("steps", [])):
+                        step_key = str(i)
+                        st = per_step_tuning.get(step_key) if per_step_tuning else None
+                        if st:
+                            tuned_nt = st.get("tuned_nthreads")
+                            n_par = st.get("n_parallel", 1)
+                            if tuned_nt and tuned_nt != step.get("multicore"):
+                                step["multicore"] = tuned_nt
+                                changed = True
+                            if n_par > 1 and step.get("n_parallel", 1) != n_par:
+                                step["n_parallel"] = n_par
+                                changed = True
+                        elif ncpus and step.get("multicore", 0) != ncpus:
+                            step["multicore"] = ncpus
+                            changed = True
+                    if changed:
+                        with open(manifest_path, "w") as _f:
+                            _json.dump(_manifest, _f, indent=2)
+                except Exception:
+                    pass
 
     # Job environment — X509 proxy is delegated by HTCondor via
     # use_x509userproxy (set in _write_submit_file), not passed via
@@ -1538,10 +1597,17 @@ def _generate_group_dag(
         else:
             proc_transfer_files.append("../wms2_stageout.py")
 
-    # Add pileup_files.json to proc transfer files for PSet injection
-    pileup_json_path = str(group_dir / "pileup_files.json")
+    # Add pileup_files.json to proc transfer files for PSet injection.
+    # In spool mode, the file is at submit_dir (shared); in local mode, per-WU.
+    if spool_mode:
+        pileup_json_path = str(submit_dir / "pileup_files.json")
+    else:
+        pileup_json_path = str(group_dir / "pileup_files.json")
     if pileup_files and os.path.isfile(pileup_json_path):
-        proc_transfer_files.append(f"{fp}pileup_files.json")
+        if spool_mode:
+            proc_transfer_files.append("pileup_files.json")
+        else:
+            proc_transfer_files.append(f"{fp}pileup_files.json")
 
     proc_nodes = merge_group.processing_nodes
 
@@ -1719,9 +1785,16 @@ def _generate_group_dag(
     if output_info_path:
         merge_args += f" --output-info {os.path.basename(output_info_path)}"
         merge_transfer.append(f"{fp}output_info.json")
-    manifest_path = str(group_dir / "manifest.json")
+    # manifest.json: at submit_dir in spool mode (shared), at group_dir in local mode
+    if spool_mode:
+        manifest_path = str(submit_dir / "manifest.json")
+    else:
+        manifest_path = str(group_dir / "manifest.json")
     if os.path.isfile(manifest_path):
-        merge_transfer.append(f"{fp}manifest.json")
+        if spool_mode:
+            merge_transfer.append("manifest.json")
+        else:
+            merge_transfer.append(f"{fp}manifest.json")
     if stageout_mode == "grid" and os.path.isfile(stageout_utility_path):
         if spool_mode:
             merge_transfer.append("wms2_stageout.py")
