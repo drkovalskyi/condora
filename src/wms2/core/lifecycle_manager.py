@@ -493,6 +493,8 @@ class RequestLifecycleManager:
                         req_name = request.request_name
                         try:
                             await self.evaluate_request(request)
+                            # Log per-request progress at INFO level
+                            await self._log_request_progress(request, repo)
                             await session.commit()
                         except Exception:
                             logger.exception("Error evaluating %s", req_name)
@@ -531,6 +533,41 @@ class RequestLifecycleManager:
         handler = self._dispatch.get(status)
         if handler:
             await handler(request)
+
+    async def _log_request_progress(self, request, repo):
+        """Log a one-line per-request progress summary at INFO level."""
+        # Re-fetch to get post-evaluation state
+        request = await repo.get_request(request.request_name)
+        if not request:
+            return
+        status = request.status
+        workflow = await repo.get_workflow_by_request(request.request_name)
+        if not workflow:
+            logger.info("  %s [%s]", request.request_name, status)
+            return
+
+        parts = [request.request_name, f"[{status}]"]
+
+        # Events progress
+        produced = workflow.events_produced or 0
+        target = workflow.target_events or 0
+        if target > 0:
+            pct = 100.0 * produced / target
+            parts.append(f"events={produced:,}/{target:,}({pct:.0f}%)")
+
+        # Round
+        parts.append(f"r{workflow.current_round or 0}")
+
+        # Node counts from workflow aggregate
+        done = workflow.nodes_done or 0
+        run = workflow.nodes_running or 0
+        idle = workflow.nodes_queued or 0
+        fail = workflow.nodes_failed or 0
+        total = workflow.total_nodes or 0
+        if total > 0:
+            parts.append(f"nodes={done}/{total}done {run}run {idle}idle {fail}fail")
+
+        logger.info("  %s", " ".join(parts))
 
     # ── State Handlers ──────────────────────────────────────────
 
