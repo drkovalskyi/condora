@@ -2,7 +2,7 @@
 
 import pytest
 
-from wms2.core.stepchain import StepChainSpec, StepSpec, _normalize_arch, parse_stepchain, to_manifest
+from condora.core.stepchain import StepChainSpec, StepSpec, _normalize_arch, parse_stepchain, to_manifest
 
 
 class TestParseStepchain:

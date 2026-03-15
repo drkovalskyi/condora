@@ -1,4 +1,4 @@
-# WMS2 — Implementation Log
+# Condora — Implementation Log
 
 <!-- Entries are in reverse chronological order (newest first). -->
 
@@ -42,7 +42,7 @@ new WU cap setting.
 **What**: Added `condor_chirp set_job_attr` calls to the proc script so that
 running jobs report their current step and phase (cmsRun vs stageout) back to
 the schedd in real time. These classads are queryable via `condor_q` and the
-WMS2 API without firewall issues.
+Condora API without firewall issues.
 
 **Why**: A proc job at T1_US_FNAL ran for 17+ hours with no way to determine
 which step it was on. `condor_tail` was blocked by firewall, `StreamErr` is
@@ -52,9 +52,9 @@ cover per-cmsRun invocation, not stageout. We needed per-step visibility.
 **Changes**:
 - `dag_planner.py` — Submit file: `+WantRemoteUpdates = true` on proc nodes
   only (enables chirp classad propagation to schedd)
-- `dag_planner.py` — Proc script: chirps `WMS2_CurrentStep`, `WMS2_StepName`,
-  `WMS2_NumSteps`, `WMS2_Phase` before each cmsRun step; `WMS2_StepDone`,
-  `WMS2_StepWallSec` after; `WMS2_Phase="stageout"`, `WMS2_StageoutStart`
+- `dag_planner.py` — Proc script: chirps `CONDORA_CurrentStep`, `CONDORA_StepName`,
+  `CONDORA_NumSteps`, `CONDORA_Phase` before each cmsRun step; `CONDORA_StepDone`,
+  `CONDORA_StepWallSec` after; `CONDORA_Phase="stageout"`, `CONDORA_StageoutStart`
   before stageout. Covers both parallel step 0 and sequential step paths.
   All calls use `2>/dev/null || true` for sites without `condor_chirp`.
 - `condor.py` — Jobs API: added 7 chirp classads to projection, 6 fields
@@ -144,7 +144,7 @@ xrdcp before any actual merging. Since all CMS sites provide XRootD endpoints
 download phase, reduces peak scratch from ~8 GB to ~4 GB, and should
 significantly cut merge wall time.
 
-**Files**: `src/wms2/core/dag_planner.py` (merge script), `docs/spec.md` (DD-19).
+**Files**: `src/condora/core/dag_planner.py` (merge script), `docs/spec.md` (DD-19).
 
 **Verification**: Deployed to service. Will validate with next round's merge
 jobs (current round's merges use the already-deployed old script).
@@ -471,9 +471,9 @@ The `condor_pool` value is threaded from `plan_production_dag()` →
 
 ### Files modified
 
-- `src/wms2/core/dag_planner.py` — A1 (classad), C (elect_site.sh rewrite +
+- `src/condora/core/dag_planner.py` — A1 (classad), C (elect_site.sh rewrite +
   condor_pool parameter threading)
-- `src/wms2/core/post_classifier.py` — A2 (regex fallback), A3 (elected_site
+- `src/condora/core/post_classifier.py` — A2 (regex fallback), A3 (elected_site
   file fallback), B (stageout error upgrade)
 
 ### Verification
@@ -535,10 +535,10 @@ Three related changes to the adaptive optimization system:
 
 ### Files changed
 
-- `src/wms2/core/adaptive.py` — tune_adaptive(), compute_job_split()
-- `src/wms2/core/dag_planner.py` — _effective_fraction(), _plan_gen_nodes(),
+- `src/condora/core/adaptive.py` — tune_adaptive(), compute_job_split()
+- `src/condora/core/dag_planner.py` — _effective_fraction(), _plan_gen_nodes(),
   proc wrapper, resource_params
-- `src/wms2/core/lifecycle_manager.py` — stores effective_fraction per round
+- `src/condora/core/lifecycle_manager.py` — stores effective_fraction per round
 - `docs/spec.md` — Sections 5.3 (effective_fraction), 5.5 (memory estimation
   rewrite with empirical data), DD-18 (new design decision)
 
@@ -694,7 +694,7 @@ quick request re-import with incremented processing version.
      Rucio 502 retries could take 2+ minutes)
 
 3. **Disk-backed pileup cache** (`dag_planner.py`)
-   - Cache persisted to `/mnt/shared/tmp/wms2/pileup_cache.json`
+   - Cache persisted to `/mnt/shared/tmp/condora/pileup_cache.json`
    - `_load_pileup_cache()` reads from disk on first access (lazy)
    - `_save_pileup_cache()` writes after successful Rucio queries
    - Survives service restarts — avoids 2+ minute Rucio queries for the same
@@ -730,16 +730,16 @@ quick request re-import with incremented processing version.
 
 | File | What |
 |------|------|
-| `src/wms2/adapters/base.py` | New `list_temp_rses()`, `get_rse_pfn_prefix()` base methods |
-| `src/wms2/adapters/mock.py` | Mock implementation of `list_temp_rses()` |
-| `src/wms2/adapters/rucio.py` | _Temp RSE listing, PFN prefix lookup, pileup timeout, rule dedup |
-| `src/wms2/api/import_endpoint.py` | Pass SiteManager to DAGPlanner during import |
-| `src/wms2/api/requests.py` | New clone endpoint |
-| `src/wms2/core/dag_planner.py` | Disk-backed pileup cache, stageout fixes, regex fixes |
-| `src/wms2/core/lifecycle_manager.py` | Pass rucio_adapter to SiteManager, site_manager to OutputManager |
-| `src/wms2/core/output_manager.py` | Dynamic RSE lookups, registration retry, consolidation dedup |
-| `src/wms2/core/site_manager.py` | _Temp RSE sync/cache/lookup methods |
-| `src/wms2/main.py` | Pass rucio_adapter to SiteManager in lifespan and CRIC sync |
+| `src/condora/adapters/base.py` | New `list_temp_rses()`, `get_rse_pfn_prefix()` base methods |
+| `src/condora/adapters/mock.py` | Mock implementation of `list_temp_rses()` |
+| `src/condora/adapters/rucio.py` | _Temp RSE listing, PFN prefix lookup, pileup timeout, rule dedup |
+| `src/condora/api/import_endpoint.py` | Pass SiteManager to DAGPlanner during import |
+| `src/condora/api/requests.py` | New clone endpoint |
+| `src/condora/core/dag_planner.py` | Disk-backed pileup cache, stageout fixes, regex fixes |
+| `src/condora/core/lifecycle_manager.py` | Pass rucio_adapter to SiteManager, site_manager to OutputManager |
+| `src/condora/core/output_manager.py` | Dynamic RSE lookups, registration retry, consolidation dedup |
+| `src/condora/core/site_manager.py` | _Temp RSE sync/cache/lookup methods |
+| `src/condora/main.py` | Pass rucio_adapter to SiteManager in lifespan and CRIC sync |
 
 ### Verification
 
@@ -761,7 +761,7 @@ quick request re-import with incremented processing version.
 
 ### What was done
 
-Added crash detection and auto-recovery for WMS2 background tasks. The service
+Added crash detection and auto-recovery for Condora background tasks. The service
 previously had no supervision — if the lifecycle manager or CRIC sync task died
 from an unhandled exception, uvicorn kept serving HTTP but background work stopped
 silently. The `/lifecycle/status` and `/health` endpoints reported everything as
@@ -769,7 +769,7 @@ fine regardless of actual task state.
 
 ### Changes
 
-1. **Background task watchdog + auto-restart** (`src/wms2/main.py`)
+1. **Background task watchdog + auto-restart** (`src/condora/main.py`)
    - Added `_make_task_watchdog()` — returns an `asyncio.Task` done callback that
      logs the exception and schedules a restart via `loop.call_later(10s)`
    - Attached watchdog callbacks to both `lifecycle_task` and `cric_sync_task`
@@ -780,19 +780,19 @@ fine regardless of actual task state.
    - Shutdown logic now cancels current tasks from `app.state` (handles
      watchdog-replaced tasks correctly)
 
-2. **Lifecycle cycle callback** (`src/wms2/core/lifecycle_manager.py`)
+2. **Lifecycle cycle callback** (`src/condora/core/lifecycle_manager.py`)
    - Added optional `on_cycle` parameter to `RequestLifecycleManager.__init__`
    - `main_loop()` calls `on_cycle(None)` on success, `on_cycle(exc)` on error,
      at the end of each iteration (after sleep)
 
-3. **Fixed `/lifecycle/status`** (`src/wms2/api/lifecycle.py`)
+3. **Fixed `/lifecycle/status`** (`src/condora/api/lifecycle.py`)
    - Was: `lm is not None` (attribute existence — always true after first cycle)
    - Now: `task is not None and not task.done()` (actual task liveness)
    - Added `cycle_count`, `last_cycle_at`, `last_error`, `restarts` to response
    - `restart_lifecycle()` now attaches watchdog callback, passes `on_cycle`,
      resets health counters
 
-4. **Enhanced `/health`** (`src/wms2/api/monitoring.py`)
+4. **Enhanced `/health`** (`src/condora/api/monitoring.py`)
    - Was: always returned `{"status": "ok"}`
    - Now: checks DB connectivity (`SELECT 1` with 5s timeout) and background
      task liveness (`task.done()`)
@@ -800,16 +800,16 @@ fine regardless of actual task state.
 
 5. **Start script** (`scripts/start-service.sh`)
    - Convenience nohup launcher: clears .pyc, kills old uvicorn, starts fresh,
-     logs to `wms2.log`
+     logs to `condora.log`
 
 ### Files changed
 
 | File | What |
 |------|------|
-| `src/wms2/main.py` | Watchdog callbacks, task_health dict, auto-restart |
-| `src/wms2/core/lifecycle_manager.py` | `on_cycle` callback hook |
-| `src/wms2/api/lifecycle.py` | Fix status check, attach watchdog on restart |
-| `src/wms2/api/monitoring.py` | Real health checks (DB + task liveness) |
+| `src/condora/main.py` | Watchdog callbacks, task_health dict, auto-restart |
+| `src/condora/core/lifecycle_manager.py` | `on_cycle` callback hook |
+| `src/condora/api/lifecycle.py` | Fix status check, attach watchdog on restart |
+| `src/condora/api/monitoring.py` | Real health checks (DB + task liveness) |
 | `scripts/start-service.sh` (new) | Convenience nohup launcher |
 
 ### Verification
@@ -994,13 +994,13 @@ across rounds, vs the incorrect 5,604 shown previously for all).
 
 ### Files changed (4)
 
-- `src/wms2/core/adaptive.py` — added `historical_peak_rss_mb` parameter to
+- `src/condora/core/adaptive.py` — added `historical_peak_rss_mb` parameter to
   `compute_round_optimization()`, enforced as floor in memory sizing
-- `src/wms2/core/lifecycle_manager.py` — scan all previous rounds' wu_metrics
+- `src/condora/core/lifecycle_manager.py` — scan all previous rounds' wu_metrics
   for historical peak RSS, pass to optimization
-- `src/wms2/static/js/components/workflow-detail.js` — reverse sort, merged
+- `src/condora/static/js/components/workflow-detail.js` — reverse sort, merged
   nodes column, fixed memory fallback logic
-- `src/wms2/templates/workflow_detail.html` — merged Done/Failed into single column
+- `src/condora/templates/workflow_detail.html` — merged Done/Failed into single column
 
 ### Verification
 
@@ -1056,14 +1056,14 @@ they compose.
 
 ### Files changed (12)
 
-- `src/wms2/config.py` — removed `adaptive_mode`, added `min_request_cpus`
-- `src/wms2/core/adaptive.py` — rewrote orchestrator, removed probe code
-- `src/wms2/core/lifecycle_manager.py` — simplified `_compute_adaptive_params`
-- `src/wms2/core/dag_planner.py` — unified adaptive_params application
-- `src/wms2/api/lifecycle.py` — settings endpoint updated
-- `src/wms2/templates/settings.html` — show min_request_cpus
-- `src/wms2/templates/workflow_detail.html` — show memory_source
-- `src/wms2/static/js/components/workflow-detail.js` — remove mode references
+- `src/condora/config.py` — removed `adaptive_mode`, added `min_request_cpus`
+- `src/condora/core/adaptive.py` — rewrote orchestrator, removed probe code
+- `src/condora/core/lifecycle_manager.py` — simplified `_compute_adaptive_params`
+- `src/condora/core/dag_planner.py` — unified adaptive_params application
+- `src/condora/api/lifecycle.py` — settings endpoint updated
+- `src/condora/templates/settings.html` — show min_request_cpus
+- `src/condora/templates/workflow_detail.html` — show memory_source
+- `src/condora/static/js/components/workflow-detail.js` — remove mode references
 - `docs/adaptive.md` — full v2.0 rewrite
 - `docs/spec.md` — updated §5.1, §5.4, §5.5, §5.7, DD-13
 - `tests/matrix/adaptive.py` — removed probe analysis, kept backward compat
@@ -1072,7 +1072,7 @@ they compose.
 ### Verification
 
 - All module imports verified working
-- App creation (`uvicorn wms2.main:create_app --factory`) verified
+- App creation (`uvicorn condora.main:create_app --factory`) verified
 - Smoke tests: 4/5 passed (150.0 timeout is pre-existing simulator timing issue)
 - Adaptive test 391.4: failed due to missing pileup data on local XRootD (pre-existing)
 - Direct unit tests of `compute_round_optimization()`: 4/4 passed (job split,
@@ -1084,7 +1084,7 @@ they compose.
 
 ### What was done
 
-Fixed a bug where rescue DAG submission failed because WMS2 was passing the rescue
+Fixed a bug where rescue DAG submission failed because Condora was passing the rescue
 file path (e.g. `workflow.dag.rescue001`) to `Submit.from_dag()`. DAGMan rescue
 files are not standalone DAGs — they only contain `DONE` markers for completed
 nodes. DAGMan's `AutoRescue` mechanism expects the *original* DAG file to be
@@ -1126,7 +1126,7 @@ redirector, same as the existing `lfn_to_xrootd()` pattern for primary inputs.
 ### Changes
 
 - **`config.py`**: Added `pileup_remote_read: bool = True` setting, controllable
-  via `WMS2_PILEUP_REMOTE_READ` env var
+  via `CONDORA_PILEUP_REMOTE_READ` env var
 - **`dag_planner.py`**: Added `--pileup-remote-read` CLI flag to proc script;
   both PSet injection sites (single-pipeline and parallel-instance paths) now
   conditionally prefix pileup LFNs based on the flag; threaded setting through
@@ -1178,7 +1178,7 @@ When HTCondor holds a job for exceeding cgroup memory limit (HoldReasonCode 34),
 the POST script never fires (it only runs on termination), so the DAG gets stuck
 forever. Added automatic OOM recovery to the DAG Monitor.
 
-1. **Condor adapter — held job helpers** (`src/wms2/adapters/condor.py`, `base.py`, `mock.py`):
+1. **Condor adapter — held job helpers** (`src/condora/adapters/condor.py`, `base.py`, `mock.py`):
    - `_query_dag_jobs_sync()` now includes `HoldReason` and `HoldReasonCode` in
      projection; held jobs expose `hold_reason` and `hold_reason_code` in response dict
    - New `query_held_jobs(cluster_id)` — queries held payload jobs under DAG hierarchy
@@ -1186,7 +1186,7 @@ forever. Added automatic OOM recovery to the DAG Monitor.
    - New `release_jobs(constraint)` — wraps `schedd.act(JobAction.Release)`
    - Base class has default no-ops; mock records calls and supports `_held_jobs` attribute
 
-2. **OOM recovery in DAG Monitor** (`src/wms2/core/dag_monitor.py`):
+2. **OOM recovery in DAG Monitor** (`src/condora/core/dag_monitor.py`):
    - `__init__` takes optional `settings` param (for `max_memory_per_core`)
    - New `_handle_held_oom_jobs(dag)` — called from `poll_dag()` when `held > 0`:
      filters for HoldReasonCode 34, bumps `request_memory` by 50% (capped at
@@ -1275,7 +1275,7 @@ Six groups of improvements across frontend, backend, and configuration:
 | `cli.py` | `--merged-lfn-base` flag, calls `determine_merged_lfn_base()` |
 | `adapters/base.py` | `list_files()` method on DBSAdapter |
 | `adapters/dbs.py` | `list_files()` implementation |
-| `/etc/condor/config.d/50-wms2-dev.conf` | `GLIDEIN_CMSSite = "T2_LOCAL_DEV"` |
+| `/etc/condor/config.d/50-condora-dev.conf` | `GLIDEIN_CMSSite = "T2_LOCAL_DEV"` |
 
 ### Verification
 
@@ -1299,11 +1299,11 @@ inject via CLI, lifecycle manager monitors and advances rounds automatically.
 
 | File | Change |
 |---|---|
-| `src/wms2/core/lifecycle_manager.py` | Per-cycle sessions with explicit commit/rollback. Constructor accepts both session_factory (service) and repository (tests). Workers rebuilt each cycle via `_build_workers()`. |
-| `src/wms2/main.py` | Simplified `run_lifecycle()`: passes session_factory + adapters to lifecycle manager instead of pre-building all workers with a single long-lived session. |
-| `src/wms2/config.py` | Fixed default DB password (`wms2pass` → `wms2dev`). |
-| `src/wms2/cli.py` | Added `--no-monitor` flag: import + submit DAG, then exit. Lifecycle manager handles monitoring. |
-| `src/wms2/core/dag_planner.py` | Always use absolute paths for wrapper scripts (wms2_proc.sh, wms2_merge.py, wms2_cleanup.py). Fixes round 1+ jobs failing with "executable not found". |
+| `src/condora/core/lifecycle_manager.py` | Per-cycle sessions with explicit commit/rollback. Constructor accepts both session_factory (service) and repository (tests). Workers rebuilt each cycle via `_build_workers()`. |
+| `src/condora/main.py` | Simplified `run_lifecycle()`: passes session_factory + adapters to lifecycle manager instead of pre-building all workers with a single long-lived session. |
+| `src/condora/config.py` | Fixed default DB password (`condorapass` → `condoradev`). |
+| `src/condora/cli.py` | Added `--no-monitor` flag: import + submit DAG, then exit. Lifecycle manager handles monitoring. |
+| `src/condora/core/dag_planner.py` | Always use absolute paths for wrapper scripts (condora_proc.sh, condora_merge.py, condora_cleanup.py). Fixes round 1+ jobs failing with "executable not found". |
 
 ### Design decisions
 
@@ -1329,7 +1329,7 @@ inject via CLI, lifecycle manager monitors and advances rounds automatically.
 
 ### Known issues
 
-- Service started with `WMS2_CERT_FILE`/`WMS2_KEY_FILE` set (from venv activate)
+- Service started with `CONDORA_CERT_FILE`/`CONDORA_KEY_FILE` set (from venv activate)
   will use real CRIC/DBS/Rucio adapters, which fail on SSL if no valid proxy.
   Workaround: unset those vars when running the service without grid certs.
 - `site_bans` table was missing from DB — created via `Base.metadata.create_all()`.
@@ -1343,42 +1343,42 @@ inject via CLI, lifecycle manager monitors and advances rounds automatically.
 Built the interactive layer on top of the Phase 1 read-only dashboard. Phase 2 adds
 operator actions, workflow and DAG detail pages, toast notifications, and a request
 import form. The existing API endpoints for request actions (stop, release, fail,
-restart) were already in `src/wms2/api/requests.py` — Phase 2 adds the UI layer and
+restart) were already in `src/condora/api/requests.py` — Phase 2 adds the UI layer and
 one new backend endpoint (`POST /api/v1/import`).
 
 ### New files
 
 | File | Purpose |
 |---|---|
-| `src/wms2/api/import_endpoint.py` | `POST /api/v1/import` — imports request from ReqMgr2 |
-| `src/wms2/static/js/components/toast.js` | Toast notification Alpine component (global event-driven) |
-| `src/wms2/static/js/components/workflow-detail.js` | Workflow detail page data/logic |
-| `src/wms2/static/js/components/dag-detail.js` | DAG detail page data/logic |
-| `src/wms2/static/js/components/import-form.js` | Import form data/validation/submission |
-| `src/wms2/templates/workflow_detail.html` | Workflow detail: splitting, metrics, blocks, progress |
-| `src/wms2/templates/dag_detail.html` | DAG detail: node bar, work units, history timeline |
-| `src/wms2/templates/import.html` | Import form: request name, sandbox mode, test fraction, etc. |
+| `src/condora/api/import_endpoint.py` | `POST /api/v1/import` — imports request from ReqMgr2 |
+| `src/condora/static/js/components/toast.js` | Toast notification Alpine component (global event-driven) |
+| `src/condora/static/js/components/workflow-detail.js` | Workflow detail page data/logic |
+| `src/condora/static/js/components/dag-detail.js` | DAG detail page data/logic |
+| `src/condora/static/js/components/import-form.js` | Import form data/validation/submission |
+| `src/condora/templates/workflow_detail.html` | Workflow detail: splitting, metrics, blocks, progress |
+| `src/condora/templates/dag_detail.html` | DAG detail: node bar, work units, history timeline |
+| `src/condora/templates/import.html` | Import form: request name, sandbox mode, test fraction, etc. |
 
 ### Modified files
 
-- **`src/wms2/static/js/api.js`** — Added `post()` helper, action methods (`stopRequest`,
+- **`src/condora/static/js/api.js`** — Added `post()` helper, action methods (`stopRequest`,
   `releaseRequest`, `failRequest`, `restartRequest`), workflow/DAG fetch methods
   (`getWorkflow`, `getWorkflowBlocks`, `getDAGHistory`), and `importRequest`.
   Also improved error handling to extract `detail` from JSON error responses.
-- **`src/wms2/static/js/components/request-detail.js`** — Added action state
+- **`src/condora/static/js/components/request-detail.js`** — Added action state
   (`actionLoading`, dialog visibility flags), visibility getters (`canStop`, `canRelease`,
   `canFail`, `canRestart`), and action methods with toast feedback.
-- **`src/wms2/templates/request_detail.html`** — Action buttons row (conditional on
+- **`src/condora/templates/request_detail.html`** — Action buttons row (conditional on
   status), three `<dialog>` elements for Stop (with reason textarea), Fail, and Restart
   confirmations. Added cross-links to workflow and DAG detail pages.
-- **`src/wms2/templates/base.html`** — Toast container div, toast.js script include,
+- **`src/condora/templates/base.html`** — Toast container div, toast.js script include,
   Import nav link in sidebar.
-- **`src/wms2/static/css/style.css`** — Toast positioning/animation, dialog styles,
+- **`src/condora/static/css/style.css`** — Toast positioning/animation, dialog styles,
   action button row, node bar (stacked colored segments), timeline table, form page styles.
-- **`src/wms2/ui/routes.py`** — Three new routes: `/ui/workflows/{workflow_id}`,
+- **`src/condora/ui/routes.py`** — Three new routes: `/ui/workflows/{workflow_id}`,
   `/ui/dags/{dag_id}`, `/ui/import`.
-- **`src/wms2/api/router.py`** — Included `import_endpoint.router`.
-- **`src/wms2/main.py`** — Stored adapters (`condor`, `reqmgr`, `dbs`, `rucio`) on
+- **`src/condora/api/router.py`** — Included `import_endpoint.router`.
+- **`src/condora/main.py`** — Stored adapters (`condor`, `reqmgr`, `dbs`, `rucio`) on
   `app.state` during lifespan so the import endpoint can use them.
 
 ### Design decisions
@@ -1386,7 +1386,7 @@ one new backend endpoint (`POST /api/v1/import`).
 - **Native `<dialog>` element** for confirmations — Pico CSS styles it automatically,
   no modal library needed. Controlled via Alpine `:open` binding.
 - **Toast as global Alpine component** — Lives in `base.html`, any page component
-  dispatches a `wms2:toast` CustomEvent. Auto-dismisses after 5 seconds, click to close.
+  dispatches a `condora:toast` CustomEvent. Auto-dismisses after 5 seconds, click to close.
 - **Import endpoint reuses app adapters** — Rather than constructing new adapter
   instances, the import endpoint uses the same ReqMgr2/DBS/Rucio/Condor adapters
   created during `lifespan()` and stored on `app.state`.
@@ -1429,7 +1429,7 @@ Also fixed two bugs discovered by running the matrix smoke tests.
 
 ### Changes
 
-**`src/wms2/core/lifecycle_manager.py`** — extracted shared functions:
+**`src/condora/core/lifecycle_manager.py`** — extracted shared functions:
 - `_count_events_from_disk()` — reads output events from work_unit_metrics.json
   (safety net for events_produced=0)
 - `_compute_adaptive_params()` — runs adaptive optimization via core.adaptive
@@ -1439,11 +1439,11 @@ Also fixed two bugs discovered by running the matrix smoke tests.
 - `_handle_round_completion()` now delegates to `complete_round()` and only
   handles termination checks + state transitions.
 
-**`src/wms2/cli.py`** — replaced ~30 lines of duplicated round-advancement
+**`src/condora/cli.py`** — replaced ~30 lines of duplicated round-advancement
 code with a single `complete_round()` call. Now properly tracks events_produced,
 step_metrics, and adaptive_params.
 
-**`src/wms2/core/dag_planner.py`** — fixed cleanup job: added
+**`src/condora/core/dag_planner.py`** — fixed cleanup job: added
 `cleanup_manifest.json` to `transfer_input_files` in `cleanup.sub`. The merge
 job writes this manifest at runtime, but the cleanup job couldn't find it
 because it wasn't transferred to the execute directory.
@@ -1488,15 +1488,15 @@ Matrix smoke tests (5 workflows): all passed
 
 ---
 
-## 2026-03-01 — Integrate adaptive optimization into WMS2 core
+## 2026-03-01 — Integrate adaptive optimization into Condora core
 
 ### What was built
 
 Moved the adaptive execution algorithms from `tests/matrix/adaptive.py` into the
-production code path (`src/wms2/core/adaptive.py`) and wired them into the
+production code path (`src/condora/core/adaptive.py`) and wired them into the
 lifecycle manager and DAG planner for automatic inter-round optimization.
 
-**New file: `src/wms2/core/adaptive.py`** (1108 lines)
+**New file: `src/condora/core/adaptive.py`** (1108 lines)
 - All algorithm functions from `tests/matrix/adaptive.py`: `analyze_wu_metrics`,
   `load_cgroup_metrics`, `analyze_probe_metrics`, `merge_round_metrics`,
   `compute_per_step_nthreads`, `compute_job_split`, `compute_all_step_split`,
@@ -1505,11 +1505,11 @@ lifecycle manager and DAG planner for automatic inter-round optimization.
   for inter-round optimization: reads WU metrics, merges across rounds, calls the
   appropriate compute function based on adaptive_mode, returns tuned parameters
 
-**Config (`src/wms2/config.py`)** — 4 new settings:
+**Config (`src/condora/config.py`)** — 4 new settings:
 - `default_memory_per_core` (2000 MB), `max_memory_per_core` (3000 MB),
   `safety_margin` (0.20), `adaptive_mode` ("per_step")
 
-**Lifecycle manager (`src/wms2/core/lifecycle_manager.py`)** — 3 changes:
+**Lifecycle manager (`src/condora/core/lifecycle_manager.py`)** — 3 changes:
 1. **Fix: events_produced=0** — Added `_count_events_from_disk()` safety net that
    reads work_unit_metrics.json when DB shows 0 events despite completed WUs
    (session/commit timing issue)
@@ -1519,7 +1519,7 @@ lifecycle manager and DAG planner for automatic inter-round optimization.
    `compute_round_optimization()` between rounds, stores result in
    `step_metrics["adaptive_params"]` for the DAG planner to consume
 
-**DAG planner (`src/wms2/core/dag_planner.py`)** — reads `adaptive_params`:
+**DAG planner (`src/condora/core/dag_planner.py`)** — reads `adaptive_params`:
 - When `adaptive=True` and `current_round > 0`, reads
   `workflow.step_metrics["adaptive_params"]` and overrides `memory_mb`
 - For job_split mode: also overrides `ncpus`, `events_per_job`, and
@@ -1527,7 +1527,7 @@ lifecycle manager and DAG planner for automatic inter-round optimization.
 - Moved merge_groups planning after resource_params to allow adaptive overrides
 
 **Test wrapper (`tests/matrix/adaptive.py`)** — thin import wrapper:
-- All algorithm functions replaced with re-exports from `wms2.core.adaptive`
+- All algorithm functions replaced with re-exports from `condora.core.adaptive`
 - CLI entry points (`_replan_cli`, `main`) preserved for intra-DAG replan
 
 ### Design decisions
@@ -1537,7 +1537,7 @@ lifecycle manager and DAG planner for automatic inter-round optimization.
   `default_memory_per_core × request_cpus` (which is 32 GB for 16-core jobs).
   This allows memory to drop from 32 GB to ~11 GB based on cgroup measurements.
 - **Lazy import of adaptive module**: The lifecycle manager imports
-  `wms2.core.adaptive` inside `_compute_adaptive_params()` to avoid circular
+  `condora.core.adaptive` inside `_compute_adaptive_params()` to avoid circular
   imports and allow graceful fallback if the module is unavailable.
 - **Guard against mock objects**: The dag_planner checks `isinstance(step_metrics, dict)`
   and `isinstance(adaptive_params, dict)` before accessing, since mock workflows
@@ -1690,7 +1690,7 @@ The adaptive round termination in `_handle_round_completion` used `next_first_ev
 
 ### Problem
 
-WMS2 had the wrong convention for `events_per_job` in GenFilter workflows. It treated the value as *output* events and divided by `filter_efficiency` in PSet injection to get the number of events CMSSW should generate. This caused a double-inflation:
+Condora had the wrong convention for `events_per_job` in GenFilter workflows. It treated the value as *output* events and divided by `filter_efficiency` in PSet injection to get the number of events CMSSW should generate. This caused a double-inflation:
 
 - `events_per_job = 689,092` (from WMAgent/cmsunified, already calculated as *generated* events)
 - Old PSet injection: `maxEvents = 689,092 / 0.00034 = 2,026,741,176` (2 billion events per job → 4 years wall time)
@@ -1740,17 +1740,17 @@ Three additional bugs discovered during the end-to-end test with `--test-fractio
 #### Bug #10: Test mode maxEvents too large for GenFilter workflows
 - **Problem**: `events_per_job` was correctly reduced by test_fraction (689092 → 6891), but PSet injection then divided by filter_eff (6891 / 0.00034 ≈ 20M), resulting in ~33 days runtime per job.
 - **Fix**: In PSet injection code, when `test_fraction > 0`, use `gen_events = events_per_job` directly (skip filter_eff division). In test mode, we want to run only the reduced number of events.
-- **File**: `src/wms2/core/dag_planner.py` (PSet injection block, ~line 2017)
+- **File**: `src/condora/core/dag_planner.py` (PSet injection block, ~line 2017)
 
 #### Bug #11: GenFilter 0-event output fatal in test mode
 - **Problem**: With only 6891 GEN events and filter_eff=0.00034, expected output is ~2.3 events/job. Jobs can legitimately produce 0 events (P≈10% per job). The script exited with code 80, POST script returned 43 (DAG abort).
 - **Fix**: In test mode, 0-event output from step 1 prints a WARNING and sets `ZERO_EVENT_TEST_MODE=1` flag. Subsequent steps continue with 0-event input. In production mode, behavior unchanged (fatal exit 80).
-- **File**: `src/wms2/core/dag_planner.py` (~line 2252)
+- **File**: `src/condora/core/dag_planner.py` (~line 2252)
 
 #### Bug #12: `set -euo pipefail` killed script before exit code captured
-- **Problem**: `run_step` returned non-zero (e.g., 139 for segfault), and `set -e` killed the entire `wms2_proc.sh` before `STEP_RC=$?` on the next line could capture the exit code. The ZERO_EVENT_TEST_MODE tolerance check never ran.
+- **Problem**: `run_step` returned non-zero (e.g., 139 for segfault), and `set -e` killed the entire `condora_proc.sh` before `STEP_RC=$?` on the next line could capture the exit code. The ZERO_EVENT_TEST_MODE tolerance check never ran.
 - **Fix**: Changed `run_step ...\nSTEP_RC=$?` to `run_step ... && STEP_RC=0 || STEP_RC=$?` so exit code is captured in a single statement that doesn't trigger `set -e`.
-- **File**: `src/wms2/core/dag_planner.py` (~lines 2179, 2194)
+- **File**: `src/condora/core/dag_planner.py` (~lines 2179, 2194)
 
 ### End-to-End Test Result
 
@@ -1774,7 +1774,7 @@ Outputs registered:
 
 ### Known Limitation
 
-NanoAOD step (step 7) crashes with SIGSEGV in `Rivet::HiggsTemplateCrossSections::printClassificationSummary()` → `numEvents()` when processing 0 events. This is a CMSSW_10_6_47 bug, not a WMS2 issue. In test mode with 0-event output, this crash is tolerated. NANOAODSIM output is absent from the merge.
+NanoAOD step (step 7) crashes with SIGSEGV in `Rivet::HiggsTemplateCrossSections::printClassificationSummary()` → `numEvents()` when processing 0 events. This is a CMSSW_10_6_47 bug, not a Condora issue. In test mode with 0-event output, this crash is tolerated. NANOAODSIM output is absent from the merge.
 
 ### Design Decision
 
@@ -1801,10 +1801,10 @@ The BPH workflow (`BdToKstarTauTau`) crashed because step 1 generated 0 output e
 
 | File | Change |
 |------|--------|
-| `src/wms2/cli.py` | Fixed key normalization with explicit snake_case map; store `filter_efficiency` in `config_data`; use parsed StepChain spec's `filter_efficiency` for StepChain requests |
-| `src/wms2/core/stepchain.py` | Fall back to `Step1.FilterEfficiency` when top-level is absent or 0 |
-| `src/wms2/core/dag_planner.py` | Pass `filter_efficiency` in `resource_params` and as `--filter-eff` proc arg; fix PSet injection: `maxEvents = events_per_job / filter_eff` for sequential, parallel, and pipeline modes; add 0-event safety net (exit 80) after step 1 |
-| `src/wms2/core/post_classifier.py` | Classify exit code 80 as permanent (non-retryable) in both module-level and embedded collector script |
+| `src/condora/cli.py` | Fixed key normalization with explicit snake_case map; store `filter_efficiency` in `config_data`; use parsed StepChain spec's `filter_efficiency` for StepChain requests |
+| `src/condora/core/stepchain.py` | Fall back to `Step1.FilterEfficiency` when top-level is absent or 0 |
+| `src/condora/core/dag_planner.py` | Pass `filter_efficiency` in `resource_params` and as `--filter-eff` proc arg; fix PSet injection: `maxEvents = events_per_job / filter_eff` for sequential, parallel, and pipeline modes; add 0-event safety net (exit 80) after step 1 |
+| `src/condora/core/post_classifier.py` | Classify exit code 80 as permanent (non-retryable) in both module-level and embedded collector script |
 | `tests/unit/test_stepchain.py` | 4 new tests: Step1 fallback, top-level preferred, zero defaults to 1.0, absent defaults to 1.0 |
 | `tests/unit/test_post_classifier.py` | 3 new tests: exit 80 classification (module + collector) |
 | `tests/unit/test_dag_planner.py` | 2 new tests: `--filter-eff` present when < 1.0, absent when 1.0 |
@@ -1879,9 +1879,9 @@ With the BPH test workflow, all 50 proc nodes (7 WUs) were submitted in round 0.
 
 | File | Change |
 |------|--------|
-| `src/wms2/config.py` | Added `first_round_work_units: int = 1` |
-| `src/wms2/core/dag_planner.py` | Round-aware `max_jobs`: `first_round_work_units` for round 0, `work_units_per_round` for round 1+ |
-| `src/wms2/cli.py` | Pass `adaptive=True`, multi-round lifecycle loop with offset advancement |
+| `src/condora/config.py` | Added `first_round_work_units: int = 1` |
+| `src/condora/core/dag_planner.py` | Round-aware `max_jobs`: `first_round_work_units` for round 0, `work_units_per_round` for round 1+ |
+| `src/condora/cli.py` | Pass `adaptive=True`, multi-round lifecycle loop with offset advancement |
 | `docs/spec.md` | Updated §5.3, DD-12 for 1 WU pilot |
 | `docs/processing.md` | Updated config table, §6.2–6.5, §7.2, OQ-P8, §9.1–9.2 |
 | `tests/unit/test_dag_planner.py` | 4 new tests for `first_round_work_units` behavior |
@@ -1908,7 +1908,7 @@ Before each DAG submission round, the DAG Planner queries Rucio for on-disk pile
 1. **`cli.py`**: Stores `manifest_steps` (with `mc_pileup`/`data_pileup` per step) in `config_data`
 2. **`dag_planner.py` plan_production_dag()**: Reads manifest_steps, queries `rucio.get_available_pileup_files(dataset)` for each unique pileup dataset
 3. **`dag_planner.py` _generate_dag_files()**: Writes `pileup_files.json` to each merge group directory; adds it to `transfer_input_files` in processing submit files
-4. **`dag_planner.py` wms2_proc.sh PSet injection**: Both pipeline and standard code paths read `pileup_files.json` + `manifest.json`, determine which pileup dataset the current step needs, and override `process.mixData.input.fileNames` (or `process.mix.input.fileNames`) with on-disk LFNs
+4. **`dag_planner.py` condora_proc.sh PSet injection**: Both pipeline and standard code paths read `pileup_files.json` + `manifest.json`, determine which pileup dataset the current step needs, and override `process.mixData.input.fileNames` (or `process.mix.input.fileNames`) with on-disk LFNs
 5. **`rucio.py`**: Uses rucio-clients Python API (`list_replicas`) in a thread to query for files with non-tape RSE replicas
 6. **`config.py`**: Added `rucio_home` setting for native rucio-client configuration
 
@@ -1916,12 +1916,12 @@ Before each DAG submission round, the DAG Planner queries Rucio for on-disk pile
 
 | File | Change |
 |------|--------|
-| `src/wms2/adapters/base.py` | Added `get_available_pileup_files()` abstract method to `RucioAdapter` |
-| `src/wms2/adapters/rucio.py` | Implemented via `rucio.client.Client.list_replicas()` in thread |
-| `src/wms2/adapters/mock.py` | Mock implementation returning `_pileup_files` attribute |
-| `src/wms2/core/dag_planner.py` | Pileup query in planner, `pileup_files.json` write, PSet injection in both code paths |
-| `src/wms2/cli.py` | Store `manifest_steps` in `config_data`, set `RUCIO_HOME` env var |
-| `src/wms2/config.py` | Added `rucio_home` setting |
+| `src/condora/adapters/base.py` | Added `get_available_pileup_files()` abstract method to `RucioAdapter` |
+| `src/condora/adapters/rucio.py` | Implemented via `rucio.client.Client.list_replicas()` in thread |
+| `src/condora/adapters/mock.py` | Mock implementation returning `_pileup_files` attribute |
+| `src/condora/core/dag_planner.py` | Pileup query in planner, `pileup_files.json` write, PSet injection in both code paths |
+| `src/condora/cli.py` | Store `manifest_steps` in `config_data`, set `RUCIO_HOME` env var |
+| `src/condora/config.py` | Added `rucio_home` setting |
 | `docs/spec.md` | Added pileup file resolution to DAG Planner section (4.5) |
 | `tests/unit/test_dag_planner.py` | 5 new tests for pileup resolution |
 
@@ -1954,7 +1954,7 @@ Added a pattern-detection block to the POST script (`_write_post_script()` in `d
 
 | File | Change |
 |------|--------|
-| `src/wms2/core/dag_planner.py` | Added 18-line early abort block in `_write_post_script()`, between memory adjustment and classification `case` statement |
+| `src/condora/core/dag_planner.py` | Added 18-line early abort block in `_write_post_script()`, between memory adjustment and classification `case` statement |
 
 ### Verification
 
@@ -1975,14 +1975,14 @@ Running full production-scale CMSSW jobs during development takes hours. We want
 
 The fraction is applied at the lowest level — inside the proc wrapper script, right after argument parsing — so it affects all sandbox modes (cmssw, synthetic, simulator, pilot, parallel, pipeline) uniformly. The DAG structure stays identical to production; only `EVENTS_PER_JOB` is reduced. Since step 0 uses `EVENTS_PER_JOB` and all downstream steps use `-1` (all input from previous step), reducing step 0's count automatically cascades.
 
-Flow: `CLI --test-fraction` → `config_data["test_fraction"]` → `resource_params["test_fraction"]` → proc submit file `--test-fraction N` → `wms2_proc.sh` reduces `EVENTS_PER_JOB` to `max(1, int(EVENTS_PER_JOB * TEST_FRACTION))`.
+Flow: `CLI --test-fraction` → `config_data["test_fraction"]` → `resource_params["test_fraction"]` → proc submit file `--test-fraction N` → `condora_proc.sh` reduces `EVENTS_PER_JOB` to `max(1, int(EVENTS_PER_JOB * TEST_FRACTION))`.
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
-| `src/wms2/cli.py` | Added `--test-fraction` argument, warning banner, pass via `config_data` |
-| `src/wms2/core/dag_planner.py` | Read `test_fraction` into `resource_params`; append `--test-fraction` to proc submit args; add parsing + application in embedded `wms2_proc.sh` |
+| `src/condora/cli.py` | Added `--test-fraction` argument, warning banner, pass via `config_data` |
+| `src/condora/core/dag_planner.py` | Read `test_fraction` into `resource_params`; append `--test-fraction` to proc submit args; add parsing + application in embedded `condora_proc.sh` |
 
 ### Verification
 
@@ -2038,7 +2038,7 @@ Verified against CMS unified source (`WmAgentScripts`):
 
 ### Verification
 
-- `python scripts/fetch-workflow-info.py --from-file /mnt/shared/work/wms2_real_test/request.json` — output matches NPS request.json fields
+- `python scripts/fetch-workflow-info.py --from-file /mnt/shared/work/condora_real_test/request.json` — output matches NPS request.json fields
 - All 4 original workflows + BPH fetched live from ReqMgr2, data cross-checked against IMPLEMENTATION_LOG and `tests/matrix/catalog.py`
 
 ---
@@ -2089,7 +2089,7 @@ Delegate to `/cvmfs/cms.cern.ch/common/cmssw-env`, the CMS production wrapper th
 
 | File | Change |
 |------|--------|
-| `src/wms2/core/dag_planner.py` | Replace 6 bash functions + 2 Python functions with cmssw-env delegation (net -150 lines) |
+| `src/condora/core/dag_planner.py` | Replace 6 bash functions + 2 Python functions with cmssw-env delegation (net -150 lines) |
 | `tests/unit/test_dag_generator.py` | Update 3 tests to check for cmssw-env patterns instead of old apptainer patterns |
 
 ### Verification
@@ -2137,9 +2137,9 @@ The CERN Grid CA chain (Root CA 2 + Grid CA intermediate) was needed for ReqMgr2
 
 | File | Change |
 |------|--------|
-| `src/wms2/cli.py` | `--sandbox-mode` now required, choices: `synthetic`/`cmssw`/`simulator` (no `auto`) |
-| `src/wms2/core/sandbox.py` | Removed auto-detection logic; `_build_simulator_steps()` maps kept steps to OutputDatasets tiers |
-| `src/wms2/core/dag_planner.py` | Merge/cleanup use basename for output_info + transfer_input_files; `DAGMAN_USE_STRICT=0` |
+| `src/condora/cli.py` | `--sandbox-mode` now required, choices: `synthetic`/`cmssw`/`simulator` (no `auto`) |
+| `src/condora/core/sandbox.py` | Removed auto-detection logic; `_build_simulator_steps()` maps kept steps to OutputDatasets tiers |
+| `src/condora/core/dag_planner.py` | Merge/cleanup use basename for output_info + transfer_input_files; `DAGMAN_USE_STRICT=0` |
 | `tests/unit/test_sandbox.py` | Replaced auto-mode tests with explicit mode tests |
 
 ### Verification
@@ -2155,7 +2155,7 @@ The CERN Grid CA chain (Root CA 2 + Grid CA intermediate) was needed for ReqMgr2
 
 ### Bug Fixes (CLI)
 
-Three crash bugs in `src/wms2/cli.py` that would break real request runs:
+Three crash bugs in `src/condora/cli.py` that would break real request runs:
 
 1. **OutputManager constructor** (line 374): Called with 4 args `(repo, dbs, rucio, settings)` but `OutputManager.__init__` takes 3 `(repository, dbs_adapter, rucio_adapter)`. Fixed: removed `settings` arg.
 
@@ -2185,15 +2185,15 @@ Also improved existing endpoints:
 
 - `pytest tests/unit/test_api_workflows.py -v` — 18 tests pass (11 workflow, 7 DAG)
 - `pytest tests/unit/ -v` — 438 tests pass, no regressions
-- `python -c "from wms2.cli import main"` — CLI imports clean
+- `python -c "from condora.cli import main"` — CLI imports clean
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
-| `src/wms2/cli.py` | Fixed OutputManager constructor (3 args not 4), fixed method names (`handle_work_unit_completion`, `process_blocks_for_workflow`), replaced `get_output_summary` with block query |
-| `src/wms2/api/workflows.py` | Added `by-request/{name}`, `{id}/blocks` endpoints, `?request_name=` filter, richer serialization |
-| `src/wms2/api/dags.py` | Added `{id}/history` endpoint, richer list/detail serialization |
+| `src/condora/cli.py` | Fixed OutputManager constructor (3 args not 4), fixed method names (`handle_work_unit_completion`, `process_blocks_for_workflow`), replaced `get_output_summary` with block query |
+| `src/condora/api/workflows.py` | Added `by-request/{name}`, `{id}/blocks` endpoints, `?request_name=` filter, richer serialization |
+| `src/condora/api/dags.py` | Added `{id}/history` endpoint, richer list/detail serialization |
 | `tests/unit/test_api_workflows.py` | **New** — 18 tests for workflow and DAG API endpoints |
 
 ---
@@ -2204,16 +2204,16 @@ Also improved existing endpoints:
 
 ### What Was Built
 
-Implemented the CRIC (Computing Resource Information Catalogue) sync pipeline so that WMS2's `sites` table is populated from CMS's central site registry. This unblocks site banning (which requires sites to exist in the DB) and provides site metadata for operators and the DAG planner.
+Implemented the CRIC (Computing Resource Information Catalogue) sync pipeline so that Condora's `sites` table is populated from CMS's central site registry. This unblocks site banning (which requires sites to exist in the DB) and provides site metadata for operators and the DAG planner.
 
 ### Components
 
 | Component | File | Description |
 |-----------|------|-------------|
-| `CRICClient` | `src/wms2/adapters/cric.py` | HTTP adapter following the `dbs.py` pattern: httpx + X.509 cert auth + exponential backoff retry (3 attempts). Fetches `GET /api/cms/site/query/?json&rcsite_state=ANY`, maps CRIC fields to `SiteRow` columns, stores full CRIC response in `config_data` JSONB. |
-| CRIC settings | `src/wms2/config.py` | Added `cric_url` (default: `https://cms-cric.cern.ch/`) and `cric_sync_interval` (default: 3600s, 0=disabled). |
-| `SiteManager.sync_from_cric()` | `src/wms2/core/site_manager.py` | Replaced stub with full implementation. Accepts optional `cric_adapter` param (backward compatible). Iterates CRIC results, upserts to DB, returns stats dict `{added, updated, total, errors}`. Graceful error handling per-site and for CRIC fetch failures. |
-| Startup + periodic sync | `src/wms2/main.py` | CRIC adapter built alongside other adapters (real if certs configured, mock otherwise). Startup sync runs once during `lifespan()`. Background task re-syncs every `cric_sync_interval` seconds. Both are cancellation-safe. |
+| `CRICClient` | `src/condora/adapters/cric.py` | HTTP adapter following the `dbs.py` pattern: httpx + X.509 cert auth + exponential backoff retry (3 attempts). Fetches `GET /api/cms/site/query/?json&rcsite_state=ANY`, maps CRIC fields to `SiteRow` columns, stores full CRIC response in `config_data` JSONB. |
+| CRIC settings | `src/condora/config.py` | Added `cric_url` (default: `https://cms-cric.cern.ch/`) and `cric_sync_interval` (default: 3600s, 0=disabled). |
+| `SiteManager.sync_from_cric()` | `src/condora/core/site_manager.py` | Replaced stub with full implementation. Accepts optional `cric_adapter` param (backward compatible). Iterates CRIC results, upserts to DB, returns stats dict `{added, updated, total, errors}`. Graceful error handling per-site and for CRIC fetch failures. |
+| Startup + periodic sync | `src/condora/main.py` | CRIC adapter built alongside other adapters (real if certs configured, mock otherwise). Startup sync runs once during `lifespan()`. Background task re-syncs every `cric_sync_interval` seconds. Both are cancellation-safe. |
 
 ### CRIC Field Mapping
 
@@ -2240,16 +2240,16 @@ Implemented the CRIC (Computing Resource Information Catalogue) sync pipeline so
 - `pytest tests/unit/test_cric_adapter.py -v` — 14 tests pass (field mapping, HTTP success/error/retry, edge cases)
 - `pytest tests/unit/test_site_manager.py -v` — 19 tests pass (12 existing ban tests + 7 new sync tests)
 - `pytest tests/unit/ -v` — 420 tests pass, no regressions
-- `python -c "from wms2.adapters.cric import CRICClient"` — imports clean
+- `python -c "from condora.adapters.cric import CRICClient"` — imports clean
 
 ### Files Changed
 
 | File | Change |
 |------|--------|
-| `src/wms2/adapters/cric.py` | **New** — `CRICClient` with httpx + cert auth + retry + CRIC→SiteRow field mapping |
-| `src/wms2/config.py` | Added `cric_url`, `cric_sync_interval` settings |
-| `src/wms2/core/site_manager.py` | Added `cric_adapter` param, replaced `sync_from_cric()` stub with full implementation |
-| `src/wms2/main.py` | Built CRIC adapter in `_build_adapters()`, added startup sync + periodic background task in `lifespan()` |
+| `src/condora/adapters/cric.py` | **New** — `CRICClient` with httpx + cert auth + retry + CRIC→SiteRow field mapping |
+| `src/condora/config.py` | Added `cric_url`, `cric_sync_interval` settings |
+| `src/condora/core/site_manager.py` | Added `cric_adapter` param, replaced `sync_from_cric()` stub with full implementation |
+| `src/condora/main.py` | Built CRIC adapter in `_build_adapters()`, added startup sync + periodic background task in `lifespan()` |
 | `tests/unit/test_cric_adapter.py` | **New** — 14 tests: field mapping (6), HTTP success/edge cases (5), retry behavior (3) |
 | `tests/unit/test_site_manager.py` | Added 7 tests: no-adapter, add/update/mixed, fetch error, upsert error, kwarg verification |
 
@@ -2275,7 +2275,7 @@ DAG submission and tracking path: `SUBMITTED → QUEUED → ACTIVE → COMPLETED
 
 3. **pytest wrapper** — Added `TestProductionPipeline.test_production_pipeline_e2e` with `@pytest.mark.level2`
    - First attempt failed: DAGMan's `DAGMAN_USE_STRICT` rejects node log files in `/tmp` (pytest's `tmp_path` fixture uses `/tmp/pytest-of-agent/...`). The error is: *"Warning: default node log file ... is in /tmp"* → *"Warning is fatal error because of DAGMAN_USE_STRICT setting"* → DAGMan exits immediately.
-   - Fix: Changed the `pipeline_work_dir` fixture to use `/mnt/shared/work/wms2_matrix/pytest_<uuid>/` instead of `tmp_path`, with cleanup on teardown.
+   - Fix: Changed the `pipeline_work_dir` fixture to use `/mnt/shared/work/condora_matrix/pytest_<uuid>/` instead of `tmp_path`, with cleanup on teardown.
    - Second attempt: PASSED, 13/13 checks in ~122 seconds.
 
 4. **Unit tests** — All 399 pass (no regressions).
@@ -2362,9 +2362,9 @@ Added `HELD` as a first-class request state for operator review, replacing the p
 
 | File | Change |
 |------|--------|
-| `src/wms2/models/enums.py` | Added `HELD = "held"` to RequestStatus (12→13 values) |
-| `src/wms2/core/lifecycle_manager.py` | Added `_handle_held` (no-op), changed PARTIAL→HELD transitions, added `release_held_request`, `fail_request`, `restart_request`, `get_error_summary` |
-| `src/wms2/api/requests.py` | Added 4 endpoints: `POST /release`, `POST /fail`, `POST /restart` (replaced stub), `GET /errors` |
+| `src/condora/models/enums.py` | Added `HELD = "held"` to RequestStatus (12→13 values) |
+| `src/condora/core/lifecycle_manager.py` | Added `_handle_held` (no-op), changed PARTIAL→HELD transitions, added `release_held_request`, `fail_request`, `restart_request`, `get_error_summary` |
+| `src/condora/api/requests.py` | Added 4 endpoints: `POST /release`, `POST /fail`, `POST /restart` (replaced stub), `GET /errors` |
 | `tests/unit/test_enums.py` | Updated count 12→13, added HELD assertion |
 | `tests/unit/test_lifecycle.py` | Updated 2 existing tests (PARTIAL→HELD), added 11 new tests |
 
@@ -2402,17 +2402,17 @@ Implemented the full POST script error classification and data collection pipeli
 
 | File | Purpose |
 |------|---------|
-| `src/wms2/core/post_classifier.py` | Error classification logic + collector script generator |
+| `src/condora/core/post_classifier.py` | Error classification logic + collector script generator |
 | `tests/unit/test_post_classifier.py` | 64 unit tests for classification and collector |
 
 #### Modified Files
 
 | File | Changes |
 |------|---------|
-| `src/wms2/core/dag_planner.py` | Full POST script (was stub), collector writer, UNLESS-EXIT 42, ABORT-DAG-ON 43, expanded POST macros ($JOB $RETURN $RETRY $MAX_RETRIES), merge node POST script |
-| `src/wms2/core/error_handler.py` | Single 20% threshold (was three-tier 5%/30%), unified `handle_dag_completion()` (was separate `handle_dag_failure()` + `handle_dag_partial_failure()`), `read_post_data()`, `analyze_site_failures()` |
-| `src/wms2/config.py` | `error_hold_threshold=0.20` replaces `error_auto_rescue_threshold=0.05` + `error_abort_threshold=0.30` |
-| `src/wms2/core/lifecycle_manager.py` | Updated to use `handle_dag_completion()`, PARTIAL and FAILED both go through same path, "hold" maps to PARTIAL |
+| `src/condora/core/dag_planner.py` | Full POST script (was stub), collector writer, UNLESS-EXIT 42, ABORT-DAG-ON 43, expanded POST macros ($JOB $RETURN $RETRY $MAX_RETRIES), merge node POST script |
+| `src/condora/core/error_handler.py` | Single 20% threshold (was three-tier 5%/30%), unified `handle_dag_completion()` (was separate `handle_dag_failure()` + `handle_dag_partial_failure()`), `read_post_data()`, `analyze_site_failures()` |
+| `src/condora/config.py` | `error_hold_threshold=0.20` replaces `error_auto_rescue_threshold=0.05` + `error_abort_threshold=0.30` |
+| `src/condora/core/lifecycle_manager.py` | Updated to use `handle_dag_completion()`, PARTIAL and FAILED both go through same path, "hold" maps to PARTIAL |
 | `tests/unit/test_dag_generator.py` | Updated assertions for UNLESS-EXIT 42, ABORT-DAG-ON, expanded macros, collector file, merge POST |
 | `tests/unit/test_error_handler.py` | Rewritten for single threshold model, read_post_data, analyze_site_failures |
 | `tests/unit/test_lifecycle.py` | Updated for `handle_dag_completion()`, FAILED+hold→PARTIAL |
@@ -2423,7 +2423,7 @@ Implemented the full POST script error classification and data collection pipeli
 | Decision | Rationale |
 |----------|-----------|
 | POST script is shell, collector is Python | Shell handles DAGMan exit code logic (sleep, case/esac). Python handles FJR XML parsing and JSON output. Clean separation. |
-| Collector is self-contained (no wms2 imports) | Runs on submit host in DAGMan context where wms2 package may not be installed. All classification tables embedded inline. |
+| Collector is self-contained (no condora imports) | Runs on submit host in DAGMan context where condora package may not be installed. All classification tables embedded inline. |
 | Classification tables from WMAgent's WMExceptions.py | Proven taxonomy from years of CMS production. Adapted but not reinvented. |
 | `infrastructure_memory` sub-category | Memory kills need special handling (bump request_memory by 50%) before retry. Separate from general infrastructure. |
 | ABORT-DAG-ON exit code 43 | Circuit breaker for catastrophic errors. Separate from UNLESS-EXIT 42 (per-node permanent) vs 43 (entire DAG abort). |
@@ -2447,7 +2447,7 @@ Implemented the full POST script error classification and data collection pipeli
 - `pytest tests/unit/test_dag_generator.py -v` — 48/48 passed
 - `pytest tests/unit/test_error_handler.py -v` — 17/17 passed
 - `pytest tests/unit/ -v` — 369/369 passed (zero regressions)
-- Generated `wms2_post_collect.py` compiles as valid Python
+- Generated `condora_post_collect.py` compiles as valid Python
 - Generated `post_script.sh` handles all classification categories
 - Collector integration test: writes correct post.json from mock FJR XML
 
@@ -2461,22 +2461,22 @@ Implemented the full site banning flow per `docs/error_handling.md` Section 6. T
 
 | File | Purpose |
 |------|---------|
-| `src/wms2/core/site_manager.py` | Core component: ban creation, promotion, querying, removal |
-| `src/wms2/models/site_ban.py` | Pydantic models for API (SiteBan, SiteBanCreate) |
+| `src/condora/core/site_manager.py` | Core component: ban creation, promotion, querying, removal |
+| `src/condora/models/site_ban.py` | Pydantic models for API (SiteBan, SiteBanCreate) |
 | `tests/unit/test_site_manager.py` | 12 unit tests for SiteManager |
 
 #### Modified Files
 
 | File | Changes |
 |------|---------|
-| `src/wms2/db/tables.py` | Added `SiteBanRow` table (FK to sites, workflows; expiry, removal tracking) |
-| `src/wms2/db/repository.py` | 7 new methods: create/query/remove site bans, count for promotion |
-| `src/wms2/config.py` | 4 new settings: `site_ban_duration_days`, `site_ban_promotion_threshold`, `site_ban_min_failures`, `site_ban_failure_ratio` |
-| `src/wms2/models/__init__.py` | Export SiteBan, SiteBanCreate |
-| `src/wms2/core/error_handler.py` | Accepts `site_manager`, calls `ban_site()` for problem sites, added `_build_failure_data()` |
-| `src/wms2/core/dag_planner.py` | `banned_sites` threaded through `_generate_dag_files` → `_generate_group_dag` → landing node's `_write_submit_file`; DAGPlanner queries SiteManager before DAG generation |
-| `src/wms2/api/sites.py` | 4 new endpoints: GET `/bans/active`, GET `/{site}/bans`, POST `/{site}/ban`, DELETE `/{site}/ban` |
-| `src/wms2/main.py` | Creates SiteManager, passes to ErrorHandler and DAGPlanner |
+| `src/condora/db/tables.py` | Added `SiteBanRow` table (FK to sites, workflows; expiry, removal tracking) |
+| `src/condora/db/repository.py` | 7 new methods: create/query/remove site bans, count for promotion |
+| `src/condora/config.py` | 4 new settings: `site_ban_duration_days`, `site_ban_promotion_threshold`, `site_ban_min_failures`, `site_ban_failure_ratio` |
+| `src/condora/models/__init__.py` | Export SiteBan, SiteBanCreate |
+| `src/condora/core/error_handler.py` | Accepts `site_manager`, calls `ban_site()` for problem sites, added `_build_failure_data()` |
+| `src/condora/core/dag_planner.py` | `banned_sites` threaded through `_generate_dag_files` → `_generate_group_dag` → landing node's `_write_submit_file`; DAGPlanner queries SiteManager before DAG generation |
+| `src/condora/api/sites.py` | 4 new endpoints: GET `/bans/active`, GET `/{site}/bans`, POST `/{site}/ban`, DELETE `/{site}/ban` |
+| `src/condora/main.py` | Creates SiteManager, passes to ErrorHandler and DAGPlanner |
 | `tests/unit/conftest.py` | Added mock methods for all 7 new repository methods |
 | `tests/unit/test_error_handler.py` | 3 new tests: ban integration, no-site-manager fallback, failure data builder |
 | `tests/unit/test_dag_generator.py` | 4 new tests: banned sites on landing node, not on proc nodes, no-ban no-Requirements, multiple bans |
@@ -2498,7 +2498,7 @@ Implemented the full site banning flow per `docs/error_handling.md` Section 6. T
 - `pytest tests/unit/test_error_handler.py -v` — 20/20 passed
 - `pytest tests/unit/test_dag_generator.py -v` — 52/52 passed
 - `pytest tests/unit/ -v` — 388/388 passed (zero regressions)
-- `python -c "from wms2.core.site_manager import SiteManager; print('OK')"` — import check passed
+- `python -c "from condora.core.site_manager import SiteManager; print('OK')"` — import check passed
 - Landing node submit file verified: `Requirements = (TARGET.GLIDEIN_CMSSite =!= "T2_US_Bad")`
 
 ---
@@ -2517,7 +2517,7 @@ Created `docs/error_handling.md` — a comprehensive error handling specificatio
 |---|---|
 | §1 Overview | Two-level model summary, design principles |
 | §2 Level 1: Immediate | POST script + DAGMan RETRY mechanics, data collection (`{node_name}.post.json`), classification logic, ABORT-DAG-ON, merge group behavior |
-| §3 Level 2: Delayed | WMS2 Error Handler + rescue DAG, 20% failure threshold, max rescue attempts, adaptive round recovery flow |
+| §3 Level 2: Delayed | Condora Error Handler + rescue DAG, 20% failure threshold, max rescue attempts, adaptive round recovery flow |
 | §4 Request States | HELD state (new), FAILED state (manual only), kill and clone with output lifecycle |
 | §5 Workflow-Type Recovery | MC generation (offset advance, no gap tracking), input workflows (per-file state: not-yet-processed/attempted/processed/excluded) |
 | §6 Site Banning | Detection, two-level banning (per-workflow + system-wide), DB schema, DAG Planner integration |
@@ -2545,14 +2545,14 @@ Created `docs/error_handling.md` — a comprehensive error handling specificatio
 
 | Decision | Rationale |
 |---|---|
-| Two-level model (not three) | Level 2 from spec (DAG-wide HTCondor feature) is aspirational. Practical model: POST+RETRY and WMS2+rescue. |
+| Two-level model (not three) | Level 2 from spec (DAG-wide HTCondor feature) is aspirational. Practical model: POST+RETRY and Condora+rescue. |
 | HELD replaces review + abort | Single operator-attention state. FAILED is manual only — prevents premature data loss from transient issues. |
 | 20% per-round threshold | Simple, configurable. Replaces three-tier 5%/30% split. |
 | Rescue first, then next round | Rescue handles transient issues. Next round only after rescue exhausted. |
 | No gap tracking for MC | Event offset advances past all planned events. 64-bit space, gaps are harmless. |
 | Per-file state tracking | Four states for input files. Attempted files deferred until fresh files exhausted. |
 | Two-level site banning | Per-workflow catches workflow-specific issues. Promotion to system-wide on N independent bans. |
-| POST script writes JSON side files | Bridge between Level 1 (per-node) and Level 2 (WMS2 aggregate). No per-job tracking in WMS2. |
+| POST script writes JSON side files | Bridge between Level 1 (per-node) and Level 2 (Condora aggregate). No per-job tracking in Condora. |
 
 ### Verification
 
@@ -2580,11 +2580,11 @@ Three issues remained after DAG planner offset consumption (`bcee75d`):
 
 ### What Was Built
 
-**Adaptive completion in DAG Planner** (`src/wms2/core/dag_planner.py`):
+**Adaptive completion in DAG Planner** (`src/condora/core/dag_planner.py`):
 - `plan_production_dag()` returns `None` when `adaptive=True` and no processing nodes are generated (instead of raising `ValueError`)
 - Non-adaptive requests still raise `ValueError` as before
 
-**Lifecycle Manager completion handling** (`src/wms2/core/lifecycle_manager.py`):
+**Lifecycle Manager completion handling** (`src/condora/core/lifecycle_manager.py`):
 - `_handle_queued()` round 2+ branch: captures return value, transitions to COMPLETED if `None`
 - `_handle_queued()` urgent branch: same pattern for adaptive + `None`
 - `_handle_round_completion()`: uses `dag.node_counts["processing"]` instead of `dag.nodes_done` for offset calculation. `node_counts` is set at planning time and correctly reflects the number of processing jobs in the round, regardless of the outer DAG's SUBDAG structure.
@@ -2601,7 +2601,7 @@ Three issues remained after DAG planner offset consumption (`bcee75d`):
 
 **Multi-round adaptive integration test** (`tests/integration/test_adaptive_rounds.py`):
 - Modeled on `test_production_pipeline.py`
-- Real PostgreSQL (wms2test), real HTCondor, mock DBS/Rucio/ReqMgr
+- Real PostgreSQL (condoratest), real HTCondor, mock DBS/Rucio/ReqMgr
 - Settings: `work_units_per_round=1`, `jobs_per_work_unit=2`, `events_per_job=10`, `request_num_events=40`
 - Expected flow:
   - Round 0: 2 jobs (events 1–20), 1 merge group
@@ -2641,7 +2641,7 @@ The round-completion handler (commit `58ab99b`) advances `next_first_event`, `fi
 
 ### What Was Built
 
-#### 1. DAG Planner: Adaptive offset consumption (`src/wms2/core/dag_planner.py`)
+#### 1. DAG Planner: Adaptive offset consumption (`src/condora/core/dag_planner.py`)
 
 **`plan_production_dag()`** — new `*, adaptive: bool = False` keyword parameter:
 - When adaptive, computes `max_jobs = settings.work_units_per_round * settings.jobs_per_work_unit` (default: 10 × 8 = 80 jobs per round)
@@ -2662,7 +2662,7 @@ The round-completion handler (commit `58ab99b`) advances `next_first_event`, `fi
 
 **`handle_pilot_completion()`** — new `*, adaptive: bool = False` parameter, forwarded to `plan_production_dag()`
 
-#### 2. Lifecycle Manager: Round-aware dispatch (`src/wms2/core/lifecycle_manager.py`)
+#### 2. Lifecycle Manager: Round-aware dispatch (`src/condora/core/lifecycle_manager.py`)
 
 **`_handle_queued()`** — three-way branch replacing the previous urgent/pilot branch:
 - `current_round > 0`: Skip pilot, call `plan_production_dag(adaptive=True)` directly → ACTIVE
@@ -2723,12 +2723,12 @@ Propagated new fields from spec v2.8.0 (multi-round adaptive lifecycle) into the
 
 | File | Change |
 |---|---|
-| `src/wms2/models/request.py` | Added `adaptive: bool = True` to `RequestCreate`, `RequestUpdate`, `Request` |
-| `src/wms2/models/workflow.py` | Renamed `pilot_metrics` → `step_metrics`, added `current_round`, `next_first_event`, `file_offset` |
-| `src/wms2/db/tables.py` | Added `adaptive` to `RequestRow`, renamed + added fields to `WorkflowRow` |
-| `src/wms2/db/migrations/versions/002_adaptive_round_fields.py` | New Alembic migration (add_column, alter_column rename, with downgrade) |
-| `src/wms2/core/dag_planner.py` | Renamed `pilot_metrics=` → `step_metrics=` in `update_workflow()` call |
-| `src/wms2/api/workflows.py` | Renamed field in serialization, added `current_round`, `next_first_event`, `file_offset` |
+| `src/condora/models/request.py` | Added `adaptive: bool = True` to `RequestCreate`, `RequestUpdate`, `Request` |
+| `src/condora/models/workflow.py` | Renamed `pilot_metrics` → `step_metrics`, added `current_round`, `next_first_event`, `file_offset` |
+| `src/condora/db/tables.py` | Added `adaptive` to `RequestRow`, renamed + added fields to `WorkflowRow` |
+| `src/condora/db/migrations/versions/002_adaptive_round_fields.py` | New Alembic migration (add_column, alter_column rename, with downgrade) |
+| `src/condora/core/dag_planner.py` | Renamed `pilot_metrics=` → `step_metrics=` in `update_workflow()` call |
+| `src/condora/api/workflows.py` | Renamed field in serialization, added `current_round`, `next_first_event`, `file_offset` |
 | `tests/unit/test_models.py` | Added 3 tests: adaptive default/override, workflow round-tracking defaults |
 
 ### Design Decisions
@@ -2761,8 +2761,8 @@ This is the **lifecycle manager side only** — it advances progress offsets and
 
 | File | Change |
 |---|---|
-| `src/wms2/config.py` | Added `work_units_per_round: int = 10` setting |
-| `src/wms2/core/lifecycle_manager.py` | Added `_aggregate_round_metrics()` module-level function, `_handle_round_completion()` method, modified `_handle_active()` at two DAG-completion points |
+| `src/condora/config.py` | Added `work_units_per_round: int = 10` setting |
+| `src/condora/core/lifecycle_manager.py` | Added `_aggregate_round_metrics()` module-level function, `_handle_round_completion()` method, modified `_handle_active()` at two DAG-completion points |
 | `tests/unit/conftest.py` | Added `adaptive=False` default to `make_request_row()` |
 | `tests/unit/test_lifecycle.py` | Added 6 tests for round-completion logic |
 
@@ -3204,7 +3204,7 @@ Added tmpfs support to the regular step 0 path in dag_planner.py (not just the p
 |---|---|
 | `tests/matrix/definitions.py` | Added `job_split: bool = False` field |
 | `tests/matrix/adaptive.py` | New `compute_job_split()`, `rewrite_wu_for_job_split()`, `--job-split` CLI flag |
-| `src/wms2/core/dag_planner.py` | Tmpfs support for non-parallel step 0 |
+| `src/condora/core/dag_planner.py` | Tmpfs support for non-parallel step 0 |
 | `tests/matrix/catalog.py` | Added 391.0 and 391.1 workflow definitions |
 | `tests/matrix/sets.py` | Added 391.0 to integration set |
 | `tests/matrix/runner.py` | Wired `--job-split`, `--events-per-job`, `--num-jobs` flags |
@@ -3290,7 +3290,7 @@ Two tier-matching bugs in `dag_planner.py`:
 **1. Staging code (embedded Python in bash `python3 -c "..."`):**
 The staging code maps per-job output files to unmerged store paths by matching file tiers (from FJR) to dataset tiers (from output_info.json). The NANOEDMAODSIM→NANOAODSIM EDM variant match used `"EDM"` in a `replace()` call, but inside a bash double-quoted heredoc, the quotes were interpreted by bash, producing `NameError: name 'EDM' is not defined`. All proc jobs failed at staging, never reaching the merge step.
 
-**2. Merge code (standalone Python `wms2_merge.py`):**
+**2. Merge code (standalone Python `condora_merge.py`):**
 The merge config selected input files by matching dataset tier to discovered file tiers. Loose bidirectional substring match (`ds_tier in tier or tier in ds_tier`) caused `"AODSIM" in "NANOAODSIM"` → True, picking step 3 AODSIM files instead of step 5 NANOEDMAODSIM files. The merge ran `mergeNANO=True` on AODSIM files, producing a flat NanoAOD tree with only trigger info surviving the format conversion.
 
 ### Fix
@@ -3376,10 +3376,10 @@ Simplified from computing `extra_memory = n_par × TMPFS` and adding to base req
 
 Return value changed from `int` (patched count) to `dict` with `patched`, `ideal_memory_mb`, `actual_memory_mb`.
 
-#### Proc Script (`src/wms2/core/dag_planner.py`)
+#### Proc Script (`src/condora/core/dag_planner.py`)
 
 - Added `/dev/shm` to apptainer bind mounts
-- Parallel instance working directories now use tmpfs (`/dev/shm/wms2_step0_$$`) instead of the virtiofs-backed work directory, avoiding file descriptor limits during gridpack extraction (29K+ files each)
+- Parallel instance working directories now use tmpfs (`/dev/shm/condora_step0_$$`) instead of the virtiofs-backed work directory, avoiding file descriptor limits during gridpack extraction (29K+ files each)
 - CVMFS autofs mount trigger before mode dispatch (`ls /cvmfs/cms.cern.ch/`)
 - Mode dispatch is now explicit (`cmssw` / `synthetic` / error) instead of falling back silently
 
@@ -3410,7 +3410,7 @@ Return value changed from `int` (patched count) to `dict` with `patched`, `ideal
 | `tests/matrix/runner.py` | Disk space checks, per-core memory computation, always keep artifacts |
 | `tests/matrix/reporter.py` | Memory limits display, ideal vs actual, step 0 split info |
 | `tests/matrix/sets.py` | Added 351.1 to integration set |
-| `src/wms2/core/dag_planner.py` | tmpfs for parallel instances, /dev/shm bind, CVMFS trigger, explicit mode dispatch |
+| `src/condora/core/dag_planner.py` | tmpfs for parallel instances, /dev/shm bind, CVMFS trigger, explicit mode dispatch |
 
 ### Verification
 
@@ -3448,31 +3448,31 @@ Per-step comparison:
 
 ### What Changed
 
-Replaced the old 10-state `OutputDataset` lifecycle with a 5-state `ProcessingBlock` model per spec v2.6.0. The old design had WMS2 tracking transfers, polling Rucio status, managing source protection lifecycle, and announcing datasets — duplicating Rucio's job. The new design uses fire-and-forget Rucio interaction.
+Replaced the old 10-state `OutputDataset` lifecycle with a 5-state `ProcessingBlock` model per spec v2.6.0. The old design had Condora tracking transfers, polling Rucio status, managing source protection lifecycle, and announcing datasets — duplicating Rucio's job. The new design uses fire-and-forget Rucio interaction.
 
 ### Files Modified (17 total)
 
 **Models & Enums (3 files)**
-- `src/wms2/models/enums.py` — `OutputStatus` (10 states) → `BlockStatus` (5: OPEN, COMPLETE, ARCHIVED, FAILED, INVALIDATED)
-- `src/wms2/models/processing_block.py` — New model: block_index, total_work_units, completed_work_units, dbs_block_name/open/closed, source_rule_ids, tape_rule_id, rucio retry fields
-- `src/wms2/models/output_dataset.py` — Deleted
-- `src/wms2/models/__init__.py` — Updated exports
+- `src/condora/models/enums.py` — `OutputStatus` (10 states) → `BlockStatus` (5: OPEN, COMPLETE, ARCHIVED, FAILED, INVALIDATED)
+- `src/condora/models/processing_block.py` — New model: block_index, total_work_units, completed_work_units, dbs_block_name/open/closed, source_rule_ids, tape_rule_id, rucio retry fields
+- `src/condora/models/output_dataset.py` — Deleted
+- `src/condora/models/__init__.py` — Updated exports
 
 **Database (4 files)**
-- `src/wms2/db/tables.py` — `OutputDatasetRow` → `ProcessingBlockRow`
-- `src/wms2/db/repository.py` — 3 old methods → 5 new methods (added `get_processing_block`, `count_processing_blocks_by_status`)
-- `src/wms2/db/migrations/versions/001_initial_schema.py` — `output_datasets` table → `processing_blocks` table
-- `src/wms2/db/migrations/env.py` — Updated import
+- `src/condora/db/tables.py` — `OutputDatasetRow` → `ProcessingBlockRow`
+- `src/condora/db/repository.py` — 3 old methods → 5 new methods (added `get_processing_block`, `count_processing_blocks_by_status`)
+- `src/condora/db/migrations/versions/001_initial_schema.py` — `output_datasets` table → `processing_blocks` table
+- `src/condora/db/migrations/env.py` — Updated import
 
 **Adapters (3 files)**
-- `src/wms2/adapters/base.py` — Added 4 abstract methods: `open_block`, `register_files`, `close_block`, `invalidate_block`
-- `src/wms2/adapters/dbs.py` — Real httpx implementations for block operations
-- `src/wms2/adapters/mock.py` — Mock implementations for block operations
+- `src/condora/adapters/base.py` — Added 4 abstract methods: `open_block`, `register_files`, `close_block`, `invalidate_block`
+- `src/condora/adapters/dbs.py` — Real httpx implementations for block operations
+- `src/condora/adapters/mock.py` — Mock implementations for block operations
 
 **Core Logic (3 files)**
-- `src/wms2/core/output_manager.py` — Complete rewrite with fire-and-forget Rucio, backoff retry, failure dump
-- `src/wms2/core/lifecycle_manager.py` — `_handle_active` uses `handle_work_unit_completion()`, `process_blocks_for_workflow()`, `all_blocks_archived()`
-- `src/wms2/core/workflow_manager.py` — `get_output_datasets()` → `get_processing_blocks()`
+- `src/condora/core/output_manager.py` — Complete rewrite with fire-and-forget Rucio, backoff retry, failure dump
+- `src/condora/core/lifecycle_manager.py` — `_handle_active` uses `handle_work_unit_completion()`, `process_blocks_for_workflow()`, `all_blocks_archived()`
+- `src/condora/core/workflow_manager.py` — `get_output_datasets()` → `get_processing_blocks()`
 
 **Tests & Fixtures (4 files)**
 - `tests/unit/test_output_manager.py` — Complete rewrite: 24 tests across 6 classes
@@ -3520,7 +3520,7 @@ Source request: `cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_21
 **Files:**
 - `tests/matrix/catalog.py` — Added `_WF_301_0` and `_GEN_DY2L_OUTPUT_DATASETS`
 - `tests/matrix/sets.py` — Added 301.0 to integration set
-- Sandbox: `/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz`
+- Sandbox: `/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz`
 
 #### X509 Proxy Permission Fix in Proc Script
 
@@ -3576,7 +3576,7 @@ A **processing block** is a group of work units that forms the atomic unit of DB
 
 - Work unit completes → immediate DBS file registration + Rucio source protection rule (urgent, protects local storage)
 - Processing block completes (all work units done) → DBS block closure + single tape archival rule for the entire block
-- After creating rules, WMS2 is done — Rucio owns the outcome (fire-and-forget)
+- After creating rules, Condora is done — Rucio owns the outcome (fire-and-forget)
 
 #### Replaced OutputDataset with ProcessingBlock
 
@@ -3613,7 +3613,7 @@ Rucio call failures use exponential backoff: 1m → 5m → 30m → 2h → 4h →
 
 ### Design Decisions
 
-1. **Fire-and-forget Rucio interaction**: WMS2 creates rules and does not track their progress. Rucio owns transfer execution, retry, and completion. WMS2's only follow-up is retrying rule creation on temporary failures.
+1. **Fire-and-forget Rucio interaction**: Condora creates rules and does not track their progress. Rucio owns transfer execution, retry, and completion. Condora's only follow-up is retrying rule creation on temporary failures.
 
 2. **Immediate source protection**: Source protection rules are created per work unit immediately on completion, not batched with block completion. Output files sit on the producing site's local storage which could be reclaimed.
 
@@ -3654,7 +3654,7 @@ Algorithm:
    - Take first (highest) n_pipelines that fits memory
 3. Returns `{n_pipelines, per_step: {tuned_nthreads, projected_rss_mb, ...}}`
 
-### Pipeline Mode Proc Script (`src/wms2/core/dag_planner.py`)
+### Pipeline Mode Proc Script (`src/condora/core/dag_planner.py`)
 
 New bash function `run_all_steps_pipeline()` in the proc script, dispatched from `run_cmssw_mode()` when `manifest.json` contains `n_pipelines > 1`.
 
@@ -3677,7 +3677,7 @@ Pipeline execution pattern:
 |---|---|
 | `tests/matrix/definitions.py` | Added `split_all_steps: bool = False` field (supersedes `adaptive_split` when True) |
 | `tests/matrix/adaptive.py` | New `compute_all_step_split()`, `--split-all-steps` CLI flag, `patch_wu_manifests()` accepts `n_pipelines`, writes `n_pipelines` to manifest and `replan_decisions.json`, `[PIPE]` flag in replan output |
-| `src/wms2/core/dag_planner.py` | New `run_all_steps_pipeline()` bash function, pipeline dispatch in `run_cmssw_mode()`, extended metrics extraction for pipeline FJRs, output manifest handles `pipe*_` prefix |
+| `src/condora/core/dag_planner.py` | New `run_all_steps_pipeline()` bash function, pipeline dispatch in `run_cmssw_mode()`, extended metrics extraction for pipeline FJRs, output manifest handles `pipe*_` prefix |
 | `tests/matrix/catalog.py` | Added `_WF_380_0` (adaptive all-step pipeline split) |
 | `tests/matrix/sets.py` | Added 380.0 to `_INTEGRATION_IDS` |
 | `tests/matrix/runner.py` | Passes `--split-all-steps` to replan args when `wf.split_all_steps` is True |
@@ -3798,7 +3798,7 @@ Implemented parallel cmsRun execution for step 0 (GEN steps) in the adaptive exe
 | File | Change |
 |---|---|
 | `tests/matrix/adaptive.py` | New file: adaptive replan logic — `analyze_wu_metrics()`, `compute_per_step_nthreads()` (with `request_cpus` and `request_memory_mb` for memory-capped n_parallel), `patch_wu_manifests()`, CLI entry point |
-| `src/wms2/core/dag_planner.py` | Added `parse_fjr_output()`, `inject_pset_parallel()`, `run_step0_parallel()` bash functions; step loop branch for parallel step 0; comma-separated PREV_OUTPUT handling for multi-file input to step 1; metrics glob updated for instance FJRs |
+| `src/condora/core/dag_planner.py` | Added `parse_fjr_output()`, `inject_pset_parallel()`, `run_step0_parallel()` bash functions; step loop branch for parallel step 0; comma-separated PREV_OUTPUT handling for multi-file input to step 1; metrics glob updated for instance FJRs |
 | `tests/matrix/runner.py` | Added adaptive execution mode (`_execute_adaptive()`): two-round DAG with replan node between work units; passes `--request-cpus` and `--request-memory` to replan |
 | `tests/matrix/reporter.py` | Added adaptive comparison report (`_print_adaptive_comparison()`): per-step tuning table with n_par column, round-over-round performance comparison |
 | `tests/matrix/catalog.py` | Added adaptive workflow definitions (350.x series) and `WorkflowDef.memory_mb` field |
@@ -3931,7 +3931,7 @@ A declarative test matrix module (`tests/matrix/`, 11 files, ~1200 lines) inspir
 
 #### Performance Collection — 3-Tier Strategy
 
-1. **`proc_N_metrics.json`** — Structured per-job per-step data written by `wms2_proc.sh` FJR parser. Each proc job writes a uniquely-named file (no overwrites). Contains `step_index`, `wall_time_sec`, `cpu_efficiency`, `peak_rss_mb`, `events_processed`, `throughput_ev_s`.
+1. **`proc_N_metrics.json`** — Structured per-job per-step data written by `condora_proc.sh` FJR parser. Each proc job writes a uniquely-named file (no overwrites). Contains `step_index`, `wall_time_sec`, `cpu_efficiency`, `peak_rss_mb`, `events_processed`, `throughput_ev_s`.
 
 2. **Proc stdout FJR metric lines** — Pattern: `Step N: wall=Xs cpu_eff=Y rss=ZMB events=N`. Available from all proc jobs (each has its own stdout file). Parsed when no metrics JSON files exist.
 
@@ -3949,7 +3949,7 @@ Parses `group.dag.dagman.out` for `ULOG_EXECUTE`/`ULOG_JOB_TERMINATED` timestamp
 
 #### Result Persistence
 
-- Results saved as JSON to `/mnt/shared/work/wms2_matrix/results/` after each run
+- Results saved as JSON to `/mnt/shared/work/condora_matrix/results/` after each run
 - `WorkflowResult`, `PerfData`, `StepPerf` all have `to_dict()`/`from_dict()` serialization
 - Raw per-job per-step data and CPU samples preserved for re-analysis
 - `--report` re-renders from saved data without re-running
@@ -4077,7 +4077,7 @@ Added `TestMetrics` class with 4 tests:
 ### Design Decisions
 
 - **Metrics are best-effort**: Extraction uses `2>/dev/null || true`, staging is conditional on file existence, aggregation skips unreadable files. A metrics failure never blocks job completion.
-- **Aggregation in merge script, not WMS2 core**: Keeps WMS2's "no per-job tracking" invariant — the merge job (which already reads per-proc manifests) does the aggregation as a side effect. WMS2 can later read `work_unit_metrics.json` for resource calibration without needing per-job data.
+- **Aggregation in merge script, not Condora core**: Keeps Condora's "no per-job tracking" invariant — the merge job (which already reads per-proc manifests) does the aggregation as a side effect. Condora can later read `work_unit_metrics.json` for resource calibration without needing per-job data.
 - **Events use total, not mean**: `events_processed` aggregation reports min/max/total (not mean) since total events per step across all proc jobs is more useful for throughput analysis.
 
 ---
@@ -4108,7 +4108,7 @@ The Phase 11 E2E test completed the full pipeline (8 proc jobs → merge → cle
 
 4. **Merged output filename** used the input tier (`NANOEDMAODSIM`) rather than the converted tier (`NANOAODSIM`).
 
-### Changes (`src/wms2/core/dag_planner.py`)
+### Changes (`src/condora/core/dag_planner.py`)
 
 #### 1. `write_merge_pset()` — add `file:` prefix
 Input file paths and output file path now get `file:` prefix so CMSSW PoolSource treats them as local PFN, not LFN. Idempotent — skips if prefix already present.
@@ -4174,7 +4174,7 @@ The script creates an `agent` user that owns the repo, submits to HTCondor, and 
 1. Create `agent` user
 2. Sudoers — limited `systemctl`, `dnf`, `chown`, `condor_reconfig`, `psql`
 3. System packages — python3.12, git, postgresql-server, condor, jq
-4. PostgreSQL — init, scram-sha-256 auth, wms2 role + databases + pgcrypto
+4. PostgreSQL — init, scram-sha-256 auth, condora role + databases + pgcrypto
 5. HTCondor — dev config with `ALLOW_ADMINISTRATOR = *` (fixes condor_reconfig denied)
 6. CMS siteconf — `/opt/cms/siteconf/` with site-local-config, storage.json, PhEDEx
 7. Directory ownership — `/mnt/shared/work`, `/mnt/shared/store`, repo dir
@@ -4268,7 +4268,7 @@ The prefix is now a pure LFN→PFN mapping site prefix, not a partial path with 
 - Writes `cleanup_manifest.json` listing unmerged directories for cleanup
 - Text file merge (`merge_text_files()`) updated to use `lfn_to_pfn()` for output paths
 
-**Cleanup script — new `_write_cleanup_script()` generating `wms2_cleanup.py`**:
+**Cleanup script — new `_write_cleanup_script()` generating `condora_cleanup.py`**:
 - Reads `cleanup_manifest.json` from group directory (written by merge job)
 - Removes all listed unmerged directories via `shutil.rmtree()`
 - Graceful no-op if no manifest found
@@ -4276,7 +4276,7 @@ The prefix is now a pure LFN→PFN mapping site prefix, not a partial path with 
 
 **Cleanup submit file**:
 - Now receives `--output-info` argument to find the group directory
-- Uses generated `wms2_cleanup.py` instead of `/bin/true` in test mode
+- Uses generated `condora_cleanup.py` instead of `/bin/true` in test mode
 
 ### Tests
 
@@ -4292,7 +4292,7 @@ The prefix is now a pure LFN→PFN mapping site prefix, not a partial path with 
 - New: `test_merge_script_uses_lfn_to_pfn`, `test_merge_script_reads_from_unmerged`, `test_merge_script_writes_cleanup_manifest`
 - New: `TestCleanupWrapper` class: `test_cleanup_script_generated`, `test_cleanup_script_reads_manifest`, `test_cleanup_submit_has_output_info`
 - Updated: `test_test_mode_uses_wrapper_scripts` — cleanup now also uses generated script
-- Updated: `test_wrapper_scripts_generated` — includes `wms2_cleanup.py`
+- Updated: `test_wrapper_scripts_generated` — includes `condora_cleanup.py`
 
 **`test_output_manager.py`** — Updated for renamed config field (`local_pfn_prefix`) and new PFN path structure.
 
@@ -4313,7 +4313,7 @@ The prefix is now a pure LFN→PFN mapping site prefix, not a partial path with 
 - **Stage-out in proc wrapper, not HTCondor transfer**: HTCondor's `transfer_output_files` moves files to the group directory (DAGMan's working directory). Stage-out to site storage must happen *inside* the proc job, before HTCondor cleans up the sandbox.
 - **Cleanup manifest written by merge, read by cleanup**: The merge job knows which unmerged directories it read from. Writing a `cleanup_manifest.json` decouples cleanup from knowing the full LFN structure — it just removes what merge tells it to.
 - **Backward compatibility**: Both merge script and proc wrapper handle missing `unmerged_lfn_base` gracefully (fall back to group directory reads). The merge script reads either `local_pfn_prefix` or `output_base_dir` from `output_info.json`.
-- **`lfn_to_pfn()` inline in merge script**: The merge script runs standalone on worker nodes without access to the `wms2` package. The 2-line helper is duplicated rather than imported.
+- **`lfn_to_pfn()` inline in merge script**: The merge script runs standalone on worker nodes without access to the `condora` package. The 2-line helper is duplicated rather than imported.
 
 ---
 
@@ -4453,7 +4453,7 @@ Added `[tool.pytest.ini_options].markers` for `level1`, `level2`, `level3`, and 
 
 ### Migration of Existing Tests
 
-Updated `tests/integration/test_condor_submit.py`: replaced ad-hoc `WMS2_CONDOR_HOST` env var gate with `@pytest.mark.level2`.
+Updated `tests/integration/test_condor_submit.py`: replaced ad-hoc `CONDORA_CONDOR_HOST` env var gate with `@pytest.mark.level2`.
 
 ## Verification Steps
 
@@ -4882,7 +4882,7 @@ New parameters:
 
 ## Design Decisions
 
-- **Sandbox is a tarball, not a pickle**: Unlike WMCore's WMSandbox (pickled Python objects), WMS2's sandbox uses JSON manifest + ready-to-use PSet.py files. No WMCore dependency on worker nodes.
+- **Sandbox is a tarball, not a pickle**: Unlike WMCore's WMSandbox (pickled Python objects), Condora's sandbox uses JSON manifest + ready-to-use PSet.py files. No WMCore dependency on worker nodes.
 - **Wrapper lives in submit_dir, not sandbox**: The processing wrapper is generated alongside the DAG files. The sandbox only contains config and PSet files. This keeps the wrapper updatable without re-creating sandboxes.
 - **CMSSW fallback to synthetic**: If CMSSW mode is requested but `/cvmfs/cms.cern.ch` is unavailable, the wrapper falls back to synthetic mode with a warning. This enables testing on non-CVMFS hosts.
 - **Resource requests optional**: `request_memory` and `request_disk` are omitted from submit files when set to 0. This avoids over-constraining jobs on development pools.
@@ -4893,11 +4893,11 @@ New parameters:
 Re-ran with same real ReqMgr2 workflow after capping synthetic output sizes:
 
 ```
-su -c '.venv/bin/python -m wms2 import \
+su -c '.venv/bin/python -m condora import \
   cmsunified_task_GEN-RunIII2024Summer24GS-00002__v1_T_260204_161305_1359 \
-  --max-files 5 --proxy /tmp/x509up_wms2 --submit-dir /mnt/shared/wms2_submit \
+  --max-files 5 --proxy /tmp/x509up_condora --submit-dir /mnt/shared/condora_submit \
   --poll-interval 5 --ca-bundle /tmp/cern-ca-bundle.pem --sandbox-mode synthetic \
-  --db-url "postgresql+asyncpg://wms2:wms2dev@localhost:5432/wms2"' wms2
+  --db-url "postgresql+asyncpg://condora:condoradev@localhost:5432/condora"' condora
 ```
 
 **Result**: All 5 work units completed, 15 output records (3 datasets × 5 groups), all ANNOUNCED.
@@ -4970,15 +4970,15 @@ CMS LFN convention utilities:
 
 Processing and merge jobs now produce real output instead of running `/bin/true`:
 
-**`wms2_proc.sh`** — Generated in submit dir, writes one line of job metadata to stdout:
+**`condora_proc.sh`** — Generated in submit dir, writes one line of job metadata to stdout:
 ```
 2026-02-17T15:32:58Z | pid=54134 | host=localhost.localdomain | args: --sandbox N/A --input synthetic://gen/events_1_100000
 ```
 HTCondor captures stdout as `proc_NNNNNN.out`.
 
-**`wms2_merge.py`** — Generated in submit dir, reads all `proc_*.out` files from the merge group directory, writes one `merged.txt` per output dataset to the local SE:
+**`condora_merge.py`** — Generated in submit dir, reads all `proc_*.out` files from the merge group directory, writes one `merged.txt` per output dataset to the local SE:
 ```
-# WMS2 Merged Output
+# Condora Merged Output
 # Dataset:     /QCD_.../AODSIM
 # Data tier:   AODSIM
 # Merge group: mg_000000
@@ -5057,11 +5057,11 @@ output_base_dir: str = "/mnt/shared/store"   # Local SE staging area
 Tested with real ReqMgr2 workflow `cmsunified_task_GEN-RunIII2024Summer24GS-00002__v1_T_260204_161305_1359`:
 
 ```
-su - wms2 -s /bin/bash -c 'source .venv/bin/activate && python -m wms2 import \
+su - condora -s /bin/bash -c 'source .venv/bin/activate && python -m condora import \
   cmsunified_task_GEN-RunIII2024Summer24GS-00002__v1_T_260204_161305_1359 \
-  --max-files 5 --proxy /tmp/x509up_wms2 --submit-dir /mnt/shared/wms2_submit \
+  --max-files 5 --proxy /tmp/x509up_condora --submit-dir /mnt/shared/condora_submit \
   --poll-interval 5 --ca-bundle /tmp/cern-ca-bundle.pem \
-  --db-url "postgresql+asyncpg://wms2:wms2dev@localhost:5432/wms2"'
+  --db-url "postgresql+asyncpg://condora:condoradev@localhost:5432/condora"'
 ```
 
 **Result**: All 5 work units completed, 15 output records (3 datasets × 5 merge groups), all ANNOUNCED.
@@ -5094,7 +5094,7 @@ Each file contains a header (dataset, tier, merge group, timestamp, host, job co
 ## Design Decisions
 
 - **Mock adapters for default output lifecycle**: With mock DBS/Rucio, the full 8-state pipeline runs in one call. When real adapters are configured, transfers will take time and `TRANSFERRING` state will persist across multiple poll cycles.
-- **Script generation over script installation**: `wms2_proc.sh` and `wms2_merge.py` are generated in the submit directory alongside the DAG files, not installed as package scripts. This keeps the submit directory self-contained.
+- **Script generation over script installation**: `condora_proc.sh` and `condora_merge.py` are generated in the submit directory alongside the DAG files, not installed as package scripts. This keeps the submit directory self-contained.
 - **ClassAd parser instead of JSON**: DAGMan's NODE_STATUS_FILE uses ClassAd format with `[key = value;]` blocks. The parser handles `DagStatus` (aggregate counts) and `NodeStatus` (per-node) block types.
 - **Output info as separate file**: Complex merge arguments (JSON with dataset info) can't be safely embedded in HTCondor submit file `arguments` lines. Writing to `output_info.json` and passing the file path avoids quoting issues.
 - **One merged.txt per dataset per merge group**: Each output dataset tier (AODSIM, MINIAODSIM, NANOAODSIM) gets its own merged file at its own LFN path. This matches the CMS convention where each data tier is a separate dataset in DBS.
@@ -5121,7 +5121,7 @@ Each file contains a header (dataset, tier, merge group, timestamp, host, job co
 
 ### CLI Runner (`cli.py`, `__main__.py`)
 
-**Entry point**: `python -m wms2 import <request_name> [options]`
+**Entry point**: `python -m condora import <request_name> [options]`
 
 **Options**:
 | Flag | Default | Description |
@@ -5130,7 +5130,7 @@ Each file contains a header (dataset, tier, merge group, timestamp, host, job co
 | `--cert`, `--key` | — | Separate cert/key paths (alternative to --proxy) |
 | `--condor-host` | `localhost:9618` | HTCondor collector address |
 | `--schedd-name` | auto-discover | Explicit schedd name |
-| `--submit-dir` | `/tmp/wms2` | DAG file output directory |
+| `--submit-dir` | `/tmp/condora` | DAG file output directory |
 | `--max-files N` | `0` (all) | Limit DBS file query |
 | `--files-per-job N` | from request | Override splitting parameter |
 | `--dry-run` | off | Plan DAG but don't submit to HTCondor |
@@ -5201,8 +5201,8 @@ ssl_ca_path: str = "/etc/grid-security/certificates"
 
 **`docker-compose.yml`** — Service definitions:
 - `db`: PostgreSQL 15, port 5432, healthcheck
-- `condor`: htcondor/mini, port 9618, mounts `condor/config` as `99-wms2.conf`
-- `wms2`: App build, port 8000, depends on db
+- `condor`: htcondor/mini, port 9618, mounts `condor/config` as `99-condora.conf`
+- `condora`: App build, port 8000, depends on db
 
 **`install.sh`** — Native setup script (RHEL 9):
 - HTCondor 25.x from official repo (EPEL + CRB required)
@@ -5217,7 +5217,7 @@ Tested with workflow `cmsunified_task_TSG-Run3Summer23BPixGS-00097__v1_T_231129_
 
 **Dry-run (verified working)**:
 ```
-python -m wms2 import cmsunified_task_TSG-Run3Summer23BPixGS-00097__v1_T_231129_092644_4472 \
+python -m condora import cmsunified_task_TSG-Run3Summer23BPixGS-00097__v1_T_231129_092644_4472 \
   --dry-run --max-files 10 --proxy /tmp/x509up_u11792
 ```
 - ReqMgr2 fetch: OK (StepChain, normalized successfully)
@@ -5233,8 +5233,8 @@ python -m wms2 import cmsunified_task_TSG-Run3Summer23BPixGS-00097__v1_T_231129_
 
 1. `source .venv/bin/activate`
 2. `pytest tests/unit/ tests/integration/test_dag_planner.py -v` — 96 tests pass
-3. Dry-run: `python -m wms2 import <request_name> --dry-run --max-files 10`
-4. Full run: `python -m wms2 import <request_name> --max-files 10` (requires working HTCondor)
+3. Dry-run: `python -m condora import <request_name> --dry-run --max-files 10`
+4. Full run: `python -m condora import <request_name> --max-files 10` (requires working HTCondor)
 
 ## Key Bugs Fixed
 
@@ -5245,7 +5245,7 @@ python -m wms2 import cmsunified_task_TSG-Run3Summer23BPixGS-00097__v1_T_231129_
 | DBS 400 | `/files` endpoint rejects `limit` query param | Removed from params, slice in Python |
 | Rucio 400 | Proxy cert DN not recognized for token auth | Non-fatal fallback to empty replica map |
 | StepChain missing fields | `InputDataset`, `SplittingAlgo` in Step1 not top-level | `_normalize_request()` extracts from Step1/Task1 |
-| rucio_account garbage | Config had Unicode `\ufffd` char | Fixed to `"wms2"` |
+| rucio_account garbage | Config had Unicode `\ufffd` char | Fixed to `"condora"` |
 | condor_dagman not in PATH | `Submit.from_dag()` needs binary on PATH | Shim: `echo '#!/bin/sh' > /tmp/condor_dagman` |
 
 ## Design Decisions
@@ -5320,7 +5320,7 @@ Constructor: `Collector(condor_host)` → `locate(DaemonType.Schedd)` → `Sched
 |---|---|---|
 | `test_condor_adapter.py` | 10 | submit_dag, submit_job, query (found/not), check_completed (running/history/gone), remove, ping (success/fail) — all with mocked htcondor2 |
 | `test_dag_monitor.py` | 16 | Status parsing (valid/missing/failed/held), metrics parsing, work unit detection (new/already-reported/non-mg), poll_dag (alive→running, gone→completed/partial/failed), newly completed units, handle_dag_completion, lifecycle integration |
-| `test_condor_submit.py` (integration) | 2 | Submit+query+remove trivial DAG, DAGPlanner end-to-end with real condor — requires `WMS2_CONDOR_HOST` env var |
+| `test_condor_submit.py` (integration) | 2 | Submit+query+remove trivial DAG, DAGPlanner end-to-end with real condor — requires `CONDORA_CONDOR_HOST` env var |
 
 **Total: 96 tests passing** (93 unit + 3 integration)
 
@@ -5332,7 +5332,7 @@ Constructor: `Collector(condor_host)` → `locate(DaemonType.Schedd)` → `Sched
 2. `pytest tests/unit/ -v` — 93 tests pass
 3. `pytest tests/integration/test_dag_planner.py -v` — 3 tests pass
 4. `pytest tests/unit/ tests/integration/test_dag_planner.py -v` — 96 tests pass
-5. HTCondor integration tests: `WMS2_CONDOR_HOST=localhost:9618 pytest tests/integration/test_condor_submit.py -v`
+5. HTCondor integration tests: `CONDORA_CONDOR_HOST=localhost:9618 pytest tests/integration/test_condor_submit.py -v`
 
 ## Design Decisions
 
@@ -5356,7 +5356,7 @@ Constructor: `Collector(condor_host)` → `locate(DaemonType.Schedd)` → `Sched
 ### Config Expansion (`config.py`)
 New settings for external services and DAG submission:
 - `reqmgr2_url`, `dbs_url`, `rucio_url`, `rucio_account` — External service endpoints
-- `agent_name` — WMS2 instance identity in ReqMgr2
+- `agent_name` — Condora instance identity in ReqMgr2
 - `submit_base_dir` — Root directory for DAG file output
 - `target_merged_size_kb` — Target merged output size (default 4 GB)
 - `cert_file`, `key_file` — X.509 certificate paths (None = use mock adapters)
@@ -5514,17 +5514,17 @@ Splitter implementations (pure stateless computation):
 ### Project Scaffold
 - `pyproject.toml` — PEP 621, src layout, hatchling build backend
 - `Dockerfile` — Multi-stage Python 3.11-slim with uvicorn entrypoint
-- `docker-compose.yml` — PostgreSQL 15 (port 5432) + WMS2 app (port 8000)
+- `docker-compose.yml` — PostgreSQL 15 (port 5432) + Condora app (port 8000)
 - `docker-compose.test.yml` — Isolated test PostgreSQL (port 5433)
 - `alembic.ini` — Async Alembic configuration
-- `.env.example` — All `WMS2_` prefixed env vars documented
+- `.env.example` — All `CONDORA_` prefixed env vars documented
 - `.gitignore` — Python, IDE, env, testing, cache patterns
 
 ### Dependencies
 - **Runtime**: fastapi, uvicorn[standard], sqlalchemy[asyncio], asyncpg, pydantic, pydantic-settings, alembic, httpx, prometheus-client
 - **Dev**: pytest, pytest-asyncio, pytest-cov, httpx, ruff, mypy
 
-### Pydantic Models (`src/wms2/models/`)
+### Pydantic Models (`src/condora/models/`)
 | File | Contents |
 |---|---|
 | `enums.py` | 8 enums: RequestStatus (12), WorkflowStatus (10), DAGStatus (10), OutputStatus (10), SiteStatus (4), SplittingAlgo (4), CleanupPolicy (2), NodeRole (3) |
@@ -5541,7 +5541,7 @@ Splitter implementations (pure stateless computation):
 - `production_steps` priorities must be strictly decreasing
 - `ProductionStep.fraction` bounded to (0, 1) exclusive
 
-### SQLAlchemy Tables (`src/wms2/db/tables.py`)
+### SQLAlchemy Tables (`src/condora/db/tables.py`)
 6 table classes matching spec Section 3.2:
 1. `RequestRow` — 19 columns, JSONB for request_data/payload_config/splitting_params/production_steps/status_transitions
 2. `WorkflowRow` — 21 columns, JSONB for splitting_params/config_data/pilot_metrics/category_throttles
@@ -5555,7 +5555,7 @@ Single migration creating all 6 tables + 14 indexes from spec:
 - Standard indexes: idx_dags_workflow, idx_dags_status, idx_workflows_request, idx_workflows_status, idx_requests_status, idx_requests_campaign, idx_requests_priority, idx_dag_history_dag, idx_output_datasets_workflow, idx_output_datasets_status
 - Partial indexes: idx_dags_schedd (WHERE dagman_cluster_id IS NOT NULL), idx_dags_parent (WHERE parent_dag_id IS NOT NULL), idx_requests_non_terminal (WHERE status NOT IN ('completed','failed','aborted')), idx_requests_version_link (WHERE previous_version_request IS NOT NULL)
 
-### Repository (`src/wms2/db/repository.py`)
+### Repository (`src/condora/db/repository.py`)
 Single `Repository` class with `AsyncSession` injection:
 - **Requests**: create, get by name, list (with status/campaign filters), update, get_non_terminal, count_by_status
 - **Workflows**: create, get by id, get by request_name, update, get_queued_requests (ORDER BY priority DESC, created_at ASC)
@@ -5564,7 +5564,7 @@ Single `Repository` class with `AsyncSession` injection:
 - **Output Datasets**: create, get by workflow_id, update
 - **Sites**: upsert (ON CONFLICT DO UPDATE), get by name, list
 
-### Adapter Interfaces (`src/wms2/adapters/base.py`)
+### Adapter Interfaces (`src/condora/adapters/base.py`)
 5 abstract base classes:
 1. `CondorAdapter` — submit_job, submit_dag, query_job, check_job_completed, remove_job, ping_schedd
 2. `ReqMgrAdapter` — get_request
@@ -5576,7 +5576,7 @@ Mock implementations in `adapters/mock.py` with call history tracking for test a
 
 ### Core Business Logic
 
-**RequestLifecycleManager** (`src/wms2/core/lifecycle_manager.py`):
+**RequestLifecycleManager** (`src/condora/core/lifecycle_manager.py`):
 - Constructor injection of Repository, CondorAdapter, Settings, and optional Phase 2+ components
 - `main_loop()` — async infinite loop with CancelledError handling for graceful shutdown
 - `evaluate_request()` — stuck check + dispatch table
@@ -5587,14 +5587,14 @@ Mock implementations in `adapters/mock.py` with call history tracking for test a
 - `initiate_clean_stop()` — condor_rm + STOPPING transition
 - `_prepare_recovery()` — creates rescue DAG record, consumes production_step, demotes priority
 
-**AdmissionController** (`src/wms2/core/admission_controller.py`):
+**AdmissionController** (`src/condora/core/admission_controller.py`):
 - `has_capacity()` — active DAGs < max_active_dags
 - `get_next_pending()` — highest priority, oldest first
 - `get_queue_status()` — summary dict for API
 
 ### FastAPI Application
 
-**App factory** (`src/wms2/main.py`):
+**App factory** (`src/condora/main.py`):
 - `create_app()` returns configured FastAPI instance
 - Lifespan context manager: creates engine, session factory, starts Lifecycle Manager as asyncio.Task
 - Graceful shutdown: cancels lifecycle task, disposes engine
@@ -5643,9 +5643,9 @@ Mock implementations in `adapters/mock.py` with call history tracking for test a
 
 1. `source .venv/bin/activate`
 2. `pytest tests/unit/ -v` — 32 tests pass
-3. `python -c "from wms2.main import create_app; create_app()"` — app creates successfully with 23 routes
+3. `python -c "from condora.main import create_app; create_app()"` — app creates successfully with 23 routes
 4. For integration tests: `docker compose -f docker-compose.test.yml up -d` then `pytest tests/integration/ -v`
-5. For full app: `docker compose up -d db` then `alembic upgrade head` then `uvicorn wms2.main:create_app --factory`
+5. For full app: `docker compose up -d db` then `alembic upgrade head` then `uvicorn condora.main:create_app --factory`
 
 ## Rucio Pipeline, Import Hardening, and Observability (2026-03-08)
 

@@ -1,10 +1,10 @@
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from wms2.db.base import Base
-from wms2.db.engine import create_session_factory
-from wms2.db.repository import Repository
-from wms2.db.tables import (  # noqa: F401
+from condora.db.base import Base
+from condora.db.engine import create_session_factory
+from condora.db.repository import Repository
+from condora.db.tables import (  # noqa: F401
     DAGHistoryRow,
     DAGRow,
     ProcessingBlockRow,
@@ -13,7 +13,7 @@ from wms2.db.tables import (  # noqa: F401
     WorkflowRow,
 )
 
-TEST_DB_URL = "postgresql+asyncpg://wms2test:wms2test@localhost:5432/wms2test"
+TEST_DB_URL = "postgresql+asyncpg://condoratest:condoratest@localhost:5432/condoratest"
 
 
 @pytest.fixture

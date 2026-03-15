@@ -1,0 +1,451 @@
+{% extends "base.html" %}
+{% block title %}Condora — {{ request_name }}{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/request-detail.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="requestDetail('{{ request_name|e }}')" data-request-name="{{ request_name|e }}">
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+    <div x-show="loading && !request" style="opacity:0.6">Loading...</div>
+
+    <template x-if="request">
+        <div>
+            <!-- Header + actions on one line -->
+            <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                <h1 style="font-size:1.3rem; word-break:break-all; margin:0;">
+                    <span x-text="request.request_name"></span>
+                    <span x-html="statusBadge(request.status)" style="margin-left:0.5rem;"></span>
+                </h1>
+                <template x-if="canStop">
+                    <button class="outline" @click="showStopDialog = true" :disabled="actionLoading"
+                            style="font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;">Stop</button>
+                </template>
+                <template x-if="canFail">
+                    <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showFailDialog = true" :disabled="actionLoading">Fail</button>
+                </template>
+                <template x-if="canClone">
+                    <button class="outline" style="--pico-color: #f59e0b; --pico-border-color: #f59e0b; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showCloneDialog = true" :disabled="actionLoading">Clone</button>
+                </template>
+                <template x-if="canDelete">
+                    <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showDeleteDialog = true" :disabled="actionLoading">Delete</button>
+                </template>
+            </div>
+
+            <!-- Stop dialog -->
+            <dialog x-ref="stopDialog" :open="showStopDialog || undefined">
+                <h3>Stop Request</h3>
+                <p>Initiate a clean stop. Running jobs will finish; no new jobs will start.</p>
+                <div class="form-group">
+                    <label for="stop-reason">Reason</label>
+                    <textarea id="stop-reason" x-model="stopReason" rows="2" style="width:100%;"></textarea>
+                </div>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showStopDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button @click="doStop()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Stop</span>
+                        <span x-show="actionLoading">Stopping...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Fail dialog -->
+            <dialog x-ref="failDialog" :open="showFailDialog || undefined">
+                <h3>Fail Request</h3>
+                <p>This will stop the running DAG and mark the request as failed.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showFailDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
+                            @click="doFail()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Fail</span>
+                        <span x-show="actionLoading">Failing...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Delete dialog -->
+            <dialog x-ref="deleteDialog" :open="showDeleteDialog || undefined">
+                <h3>Delete Request</h3>
+                <p>Permanently delete this request and all related data (workflow, DAGs, blocks, history).</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showDeleteDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
+                            @click="doDelete()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Delete</span>
+                        <span x-show="actionLoading">Deleting...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Clone dialog -->
+            <dialog x-ref="cloneDialog" :open="showCloneDialog || undefined">
+                <h3>Clone Request</h3>
+                <p>This will stop the DAG, fail the request, and re-import from ReqMgr2 with an
+                   incremented processing version. The old request is kept as
+                   <code x-text="request.request_name + '_Failed_v' + (processingVersion || '?')"></code>
+                   for reference.</p>
+                <template x-if="processingVersion != null">
+                    <p>Version: <strong x-text="'v' + processingVersion"></strong>
+                       → <strong x-text="'v' + (processingVersion + 1)"></strong></p>
+                </template>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showCloneDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #f59e0b; --pico-border-color: #f59e0b;"
+                            @click="doClone()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Clone</span>
+                        <span x-show="actionLoading">Cloning...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <template x-if="testFraction">
+                <div class="banner-warning" style="background:#fef08a; border:2px solid #eab308; border-radius:4px; padding:0.5rem 0.75rem; margin-bottom:1rem; font-size:0.9rem; color:#713f12;">
+                    <strong>TEST MODE</strong> — test_fraction=<span x-text="testFraction"></span>,
+                    each job processes <span x-text="(testFraction * 100).toFixed(0)"></span>% of nominal events
+                </div>
+            </template>
+
+            <!-- Processing progress -->
+            <template x-if="hasWorkflow">
+                <div class="section">
+                    <h3>Processing Progress</h3>
+                    <dl class="detail-grid">
+                        <dt>Status</dt>
+                        <dd x-html="statusBadge(workflow.status)"></dd>
+                        <dt>Round</dt>
+                        <dd x-text="activeRoundsDisplay"></dd>
+                        <dt>Events Produced</dt>
+                        <dd>
+                            <span x-text="fmtNum(workflow.events_produced)"></span>
+                            / <span x-text="fmtNum(workflow.target_events)"></span>
+                        </dd>
+                        <dt>Progress</dt>
+                        <dd x-text="fmtPct(progressPct)"></dd>
+                    </dl>
+                    <div class="progress-bar" style="max-width:500px;">
+                        <div class="fill" :style="'width:' + Math.min(100, progressPct) + '%'"></div>
+                    </div>
+                    <div style="font-size:0.85rem; opacity:0.7; margin-top:0.25rem;">
+                        Nodes: <span x-text="fmtNum(workflow.nodes_done)"></span> done,
+                        <span x-text="fmtNum(workflow.nodes_running)"></span> running,
+                        <span x-text="fmtNum(workflow.nodes_queued)"></span> queued,
+                        <span x-text="fmtNum(workflow.nodes_failed)"></span> failed
+                    </div>
+                    <p style="margin-top:0.5rem;">
+                        <a :href="'/ui/workflows/' + encodeURIComponent(workflow.id)">View processing details &rarr;</a>
+                    </p>
+                </div>
+            </template>
+            <template x-if="!hasWorkflow">
+                <div class="section">
+                    <h3>Processing</h3>
+                    <p style="opacity:0.6">Not started yet.</p>
+                </div>
+            </template>
+
+            <!-- DAG node counts -->
+            <template x-if="hasDAG">
+                <div class="section">
+                    <h3>DAG Details</h3>
+                    <dl class="detail-grid">
+                        <dt>Status</dt>
+                        <dd x-html="statusBadge(dag.status)"></dd>
+                        <dt>DAGMan Cluster</dt>
+                        <dd x-text="dag.dagman_cluster_id || '—'"></dd>
+                        <dt>Work Units <span x-show="dag && dag.round_number != null" style="opacity:0.6; font-weight:normal;">(Round <span x-text="dag.round_number"></span>)</span></dt>
+                        <dd>
+                            <span x-text="Array.isArray(dag.completed_work_units) ? dag.completed_work_units.length : (dag.completed_work_units || 0)"></span>
+                            / <span x-text="dag.total_work_units || 0"></span> completed
+                        </dd>
+                    </dl>
+                    <div class="node-counts" style="margin-top:0.5rem;">
+                        <span>Total: <strong x-text="dag.total_nodes || 0"></strong></span>
+                        <span>Done: <strong x-text="dag.nodes_done || 0"></strong></span>
+                        <span>Running: <strong x-text="dag.nodes_running || 0"></strong></span>
+                        <span>Idle: <strong x-text="dag.nodes_idle || 0"></strong></span>
+                        <span>Failed: <strong x-text="dag.nodes_failed || 0"></strong></span>
+                        <span>Held: <strong x-text="dag.nodes_held || 0"></strong></span>
+                    </div>
+                    <p style="margin-top:0.5rem;">
+                        <a :href="'/ui/dags/' + encodeURIComponent(dag.id)">View DAG details &rarr;</a>
+                    </p>
+                </div>
+            </template>
+
+            <!-- Step metrics -->
+            <template x-if="stepMetrics.length > 0">
+                <div class="section">
+                    <h3>Step Metrics</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Step</th>
+                                <th>Avg CPU Eff</th>
+                                <th>Avg Memory (MB)</th>
+                                <th>Avg Time/Event (s)</th>
+                                <th>Avg Throughput</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="m in stepMetrics" :key="m.step">
+                                <tr>
+                                    <td x-text="m.step"></td>
+                                    <td x-text="m.avg_cpu_efficiency != null ? fmtPct(m.avg_cpu_efficiency) : '—'"></td>
+                                    <td x-text="m.avg_peak_rss != null ? fmtNum(Math.round(m.avg_peak_rss)) : '—'"></td>
+                                    <td x-text="m.avg_time_per_event != null ? Number(m.avg_time_per_event).toFixed(2) : '—'"></td>
+                                    <td x-text="m.avg_throughput != null ? Number(m.avg_throughput).toFixed(1) : '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Site performance -->
+            <template x-if="hasSitePerformance">
+                <div class="section">
+                    <h3>Site Performance</h3>
+                    <p style="font-size:0.85rem; opacity:0.7;">
+                        <span x-text="sitePerformance.total_wus"></span> work units across
+                        <span x-text="sitePerformance.sites.length"></span> sites (excluding round 0)
+                    </p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Site</th>
+                                <th style="text-align:right">Done</th>
+                                <th style="text-align:right">Running</th>
+                                <th style="text-align:right">Avg Proc</th>
+                                <th style="text-align:right">Avg Merge</th>
+                                <th style="text-align:right">Avg Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in sitePerformance.sites" :key="s.site">
+                                <tr>
+                                    <td x-text="s.site"></td>
+                                    <td style="text-align:right" x-text="s.wus_done"></td>
+                                    <td style="text-align:right" x-text="s.wus_running || ''"></td>
+                                    <td style="text-align:right" x-text="s.avg_proc_min != null ? s.avg_proc_min + ' min' : '—'"></td>
+                                    <td style="text-align:right" x-text="s.avg_merge_min != null ? s.avg_merge_min + ' min' : '—'"></td>
+                                    <td style="text-align:right; font-weight:600" x-text="s.avg_total_min != null ? s.avg_total_min + ' min' : '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Errors -->
+            <template x-if="hasErrors">
+                <div class="section">
+                    <h3>Errors</h3>
+                    <p>Total failures: <strong x-text="errors.total_failures || 0"></strong></p>
+                    <template x-if="errors.site_errors && errors.site_errors.length > 0">
+                        <table>
+                            <thead><tr><th>Site</th><th>Failures</th><th>Banned</th></tr></thead>
+                            <tbody>
+                                <template x-for="se in errors.site_errors" :key="se.site">
+                                    <tr>
+                                        <td x-text="se.site"></td>
+                                        <td x-text="se.failures"></td>
+                                        <td x-text="se.banned ? 'Yes' : 'No'"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Status history -->
+            <template x-if="transitions.length > 0">
+                <div class="section">
+                    <h3>Status History</h3>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>From</th>
+                                <th>To</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="(t, i) in transitions" :key="i">
+                                <tr>
+                                    <td x-html="statusBadge(t.from)"></td>
+                                    <td x-html="statusBadge(t.to)"></td>
+                                    <td x-text="fmtDateTime(t.timestamp)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Request info -->
+            <div class="section">
+                <h3>Request Info</h3>
+                <dl class="detail-grid">
+                    <dt>Campaign</dt>
+                    <dd x-text="request.campaign || '—'"></dd>
+                    <dt>Job Priority</dt>
+                    <dd x-text="currentJobPriority != null ? currentJobPriority : '—'"></dd>
+                    <dt>Requestor</dt>
+                    <dd x-text="request.requestor || '—'"></dd>
+                    <dt>Urgent</dt>
+                    <dd x-text="request.urgent ? 'Yes' : 'No'"></dd>
+                    <dt>Adaptive</dt>
+                    <dd x-text="request.adaptive ? 'Yes' : 'No'"></dd>
+                    <dt>Type</dt>
+                    <dd x-text="(request.request_data && request.request_data.RequestType) || '—'"></dd>
+                    <template x-if="request.input_dataset && !(request.request_data && request.request_data._is_gen)">
+                        <div style="display:contents;">
+                            <dt>Input Dataset</dt>
+                            <dd x-text="request.input_dataset" style="word-break:break-all;"></dd>
+                        </div>
+                    </template>
+                    <template x-if="stageoutMode">
+                        <div style="display:contents;">
+                            <dt>Stageout Mode</dt>
+                            <dd x-text="stageoutMode"></dd>
+                        </div>
+                    </template>
+                    <template x-if="processingVersion != null">
+                        <div style="display:contents;">
+                            <dt>Processing Version</dt>
+                            <dd x-text="'v' + processingVersion"></dd>
+                        </div>
+                    </template>
+                    <dt>Work Units</dt>
+                    <dd x-text="'Round 0: 1, Round 1+: ' + (workUnitsPerRound || '—')"></dd>
+                    <template x-if="consolidationRse">
+                        <div style="display:contents;">
+                            <dt>Consolidation RSE</dt>
+                            <dd x-text="consolidationRse"></dd>
+                        </div>
+                    </template>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(request.created_at)"></dd>
+                    <dt>Updated</dt>
+                    <dd x-text="fmtDateTime(request.updated_at)"></dd>
+                    <dt>Cleanup Policy</dt>
+                    <dd x-text="request.cleanup_policy || '—'"></dd>
+                    <template x-if="testFraction">
+                        <div style="display:contents;">
+                            <dt>Test Fraction</dt>
+                            <dd><span style="color:#b45309; font-weight:600;" x-text="testFraction"></span></dd>
+                        </div>
+                    </template>
+                </dl>
+            </div>
+
+            <!-- Priority profile -->
+            <div class="section">
+                <h3 style="display:flex; align-items:center; gap:0.5rem;">
+                    Priority Profile
+                    <template x-if="!editingPriority">
+                        <button class="outline" style="font-size:0.75rem; padding:0.15rem 0.5rem;"
+                                @click="startEditPriority()">Edit</button>
+                    </template>
+                </h3>
+                <template x-if="!editingPriority">
+                    <dl class="detail-grid">
+                        <dt>High Priority</dt>
+                        <dd x-text="priorityProfile ? priorityProfile.high : '—'"></dd>
+                        <dt>Nominal Priority</dt>
+                        <dd x-text="priorityProfile ? priorityProfile.nominal : '—'"></dd>
+                        <dt>Switch Fraction</dt>
+                        <dd x-text="priorityProfile ? (priorityProfile.switch_fraction * 100) + '%' : '—'"></dd>
+                    </dl>
+                </template>
+                <template x-if="editingPriority">
+                    <div>
+                        <dl class="detail-grid">
+                            <dt><label for="prio-high">High Priority</label></dt>
+                            <dd><input id="prio-high" type="number" x-model="prioHigh" style="width:80px;"></dd>
+                            <dt><label for="prio-nominal">Nominal Priority</label></dt>
+                            <dd><input id="prio-nominal" type="number" x-model="prioNominal" style="width:80px;"></dd>
+                            <dt><label for="prio-switch">Switch Fraction</label></dt>
+                            <dd><input id="prio-switch" type="number" x-model="prioSwitchFraction"
+                                       step="0.05" min="0" max="1" style="width:80px;"></dd>
+                        </dl>
+                        <div style="margin-top:0.5rem; display:flex; gap:0.5rem;">
+                            <button @click="savePriority()" :disabled="actionLoading"
+                                    style="font-size:0.85rem; padding:0.25rem 0.75rem;">Save</button>
+                            <button class="outline" @click="editingPriority = false" :disabled="actionLoading"
+                                    style="font-size:0.85rem; padding:0.25rem 0.75rem;">Cancel</button>
+                        </div>
+                        <p style="font-size:0.8rem; opacity:0.6; margin-top:0.25rem;">
+                            Changes take effect on the next DAG submission (next round).
+                        </p>
+                    </div>
+                </template>
+            </div>
+
+            <!-- Output Datasets -->
+            <template x-if="outputDatasets.length > 0">
+                <div class="section">
+                    <h3>Output Datasets</h3>
+                    <template x-for="ds in outputDatasets" :key="ds.dataset_name">
+                        <div style="margin-bottom:1rem; padding:0.75rem; border:1px solid var(--pico-muted-border-color); border-radius:4px;">
+                            <strong x-text="ds.rucio_did || ds.dataset_name" style="word-break:break-all;"></strong>
+                            <template x-if="ds.rucio_did">
+                                <div style="font-size:0.8rem; opacity:0.6; margin-top:0.15rem;"
+                                     x-text="'Production: ' + ds.dataset_name"></div>
+                            </template>
+                            <dl class="detail-grid" style="margin-top:0.5rem;">
+                                <dt>Data Tier</dt>
+                                <dd x-text="ds.data_tier || '—'"></dd>
+                                <dt>LFN Base</dt>
+                                <dd x-text="ds.merged_lfn_base || '—'" style="word-break:break-all; font-size:0.85rem;"></dd>
+                                <dt>Events</dt>
+                                <dd x-text="ds.event_count > 0 ? fmtNum(ds.event_count) : '—'"></dd>
+                                <dt>Files</dt>
+                                <dd><span x-text="ds.file_count"></span> .root files</dd>
+                                <dt>Total Size</dt>
+                                <dd x-text="ds.total_size_mb > 0 ? ds.total_size_mb + ' MB' : '—'"></dd>
+                            </dl>
+                        </div>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Steps -->
+            <template x-if="stepsInfo.length > 0">
+                <div class="section">
+                    <h3>Steps</h3>
+                    <table style="font-size:0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Name</th>
+                                <th>CMSSW</th>
+                                <th>Global Tag</th>
+                                <th>Arch</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="s in stepsInfo" :key="s.index">
+                                <tr>
+                                    <td x-text="s.index"></td>
+                                    <td x-text="s.name"></td>
+                                    <td x-text="s.cmssw"></td>
+                                    <td x-text="s.global_tag"></td>
+                                    <td x-text="s.scram_arch"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+
+            <!-- Back link -->
+            <p><a href="/ui/requests">&larr; All Requests</a></p>
+        </div>
+    </template>
+</div>
+{% endblock %}

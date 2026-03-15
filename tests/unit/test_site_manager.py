@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockCRICAdapter
-from wms2.config import Settings
-from wms2.core.site_manager import SiteManager
+from condora.adapters.mock import MockCRICAdapter
+from condora.config import Settings
+from condora.core.site_manager import SiteManager
 
 
 def _make_settings(**overrides):

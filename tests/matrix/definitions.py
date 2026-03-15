@@ -1,4 +1,4 @@
-"""Data classes for the WMS2 test matrix."""
+"""Data classes for the Condora test matrix."""
 
 from __future__ import annotations
 

@@ -16,20 +16,20 @@ pytestmark = [pytest.mark.level2, pytest.mark.condor]
 
 @pytest.fixture
 def condor_host():
-    return os.environ.get("WMS2_CONDOR_HOST", "localhost:9618")
+    return os.environ.get("CONDORA_CONDOR_HOST", "localhost:9618")
 
 
 @pytest.fixture
 def adapter(condor_host):
-    from wms2.adapters.condor import HTCondorAdapter
+    from condora.adapters.condor import HTCondorAdapter
     return HTCondorAdapter(condor_host)
 
 
 @pytest.fixture
 def dag_planner_with_condor(tmp_path, adapter):
-    from wms2.adapters.mock import MockDBSAdapter, MockRucioAdapter
-    from wms2.config import Settings
-    from wms2.core.dag_planner import DAGPlanner
+    from condora.adapters.mock import MockDBSAdapter, MockRucioAdapter
+    from condora.config import Settings
+    from condora.core.dag_planner import DAGPlanner
 
     repo = MagicMock()
     dag_row = MagicMock()

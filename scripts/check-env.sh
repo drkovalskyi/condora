@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-env.sh — Quick environment check for WMS2 development
+# check-env.sh — Quick environment check for Condora development
 # Run this to verify your dev environment or to generate initial diagnostics
 # on a fresh machine.
 
@@ -14,7 +14,7 @@ ok()   { echo -e "  ${GREEN}OK${NC}    $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}  $1"; }
 fail() { echo -e "  ${RED}MISS${NC}  $1"; }
 
-echo "=== WMS2 Environment Check ==="
+echo "=== Condora Environment Check ==="
 echo ""
 echo "Machine: $(hostname) | $(uname -r)"
 echo "CPUs: $(nproc) | Memory: $(free -h | awk '/Mem:/{print $2}')"
@@ -65,10 +65,10 @@ echo "--- Services ---"
 
 if systemctl is-active postgresql-16 &>/dev/null || systemctl is-active postgresql &>/dev/null; then
     ok "PostgreSQL — running"
-    if PGPASSWORD=wms2dev "$PSQL_BIN" -h 127.0.0.1 -U wms2 -d wms2 -c "SELECT 1" &>/dev/null; then
-        ok "PostgreSQL wms2 database — accessible"
+    if PGPASSWORD=condoradev "$PSQL_BIN" -h 127.0.0.1 -U condora -d condora -c "SELECT 1" &>/dev/null; then
+        ok "PostgreSQL condora database — accessible"
     else
-        warn "PostgreSQL running but wms2 database not accessible"
+        warn "PostgreSQL running but condora database not accessible"
     fi
 else
     fail "PostgreSQL — not running"

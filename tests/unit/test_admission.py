@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from wms2.core.admission_controller import AdmissionController
+from condora.core.admission_controller import AdmissionController
 from .conftest import make_request_row
 
 

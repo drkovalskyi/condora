@@ -1,4 +1,4 @@
-"""Unit tests for the WMS2 cmsRun simulator."""
+"""Unit tests for the Condora cmsRun simulator."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import uproot
 
-from wms2.core.simulator import (
+from condora.core.simulator import (
     allocate_memory,
     burn_cpu,
     compute_resource_profile,
@@ -336,7 +336,7 @@ class TestFJRXml:
 
 
 class TestFJRParsingCompat:
-    """Feed simulator FJR to the same parsing logic from wms2_proc.sh."""
+    """Feed simulator FJR to the same parsing logic from condora_proc.sh."""
 
     def _parse_fjr_metrics(self, fjr_path: str, step_index: int) -> dict:
         """Replicate the proc script's FJR metrics parser (embedded Python)."""
@@ -660,7 +660,7 @@ class TestSimulatorRun:
 class TestSimulatorManifestBuilding:
     def test_build_simulator_steps(self):
         """_build_simulator_steps creates correct step configs."""
-        from wms2.core.sandbox import _build_simulator_steps
+        from condora.core.sandbox import _build_simulator_steps
 
         request_data = {
             "RequestType": "StepChain",
@@ -685,7 +685,7 @@ class TestSimulatorManifestBuilding:
 
     def test_build_manifest_simulator_mode(self):
         """_build_manifest with mode=simulator returns correct structure."""
-        from wms2.core.sandbox import _build_manifest
+        from condora.core.sandbox import _build_manifest
 
         request_data = {
             "RequestType": "StepChain",

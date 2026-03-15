@@ -93,7 +93,7 @@ def _resolve_workflows(ids: list[float]) -> list[WorkflowDef]:
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tests.matrix",
-        description="WMS2 test matrix runner",
+        description="Condora test matrix runner",
     )
     parser.add_argument(
         "-l", "--workflows",
@@ -190,7 +190,7 @@ def main() -> int:
         return 0
 
     # Run
-    print(f"\nWMS2 Test Matrix — {len(workflows)} workflow(s)")
+    print(f"\nCondora Test Matrix — {len(workflows)} workflow(s)")
     print(f"  Set: {args.workflows}")
     print()
 

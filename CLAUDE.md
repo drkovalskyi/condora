@@ -1,4 +1,4 @@
-# CLAUDE.md — WMS2 Project Guide
+# CLAUDE.md — Condora Project Guide
 
 ## Current Plan of Work
 
@@ -16,7 +16,7 @@ See the comment at the top of PLANNING.md for the ownership rule. Obey it.
 
 ## What is this project?
 
-WMS2 is the next-generation CMS Workload Management System, replacing WMCore/WMAgent. It is a thin orchestration layer that delegates job-level execution to HTCondor DAGMan. Currently in the specification/design phase — no application code yet, only the spec document.
+Condora is the next-generation CMS Workload Management System, replacing WMCore/WMAgent. It is a thin orchestration layer that delegates job-level execution to HTCondor DAGMan. Currently in the specification/design phase — no application code yet, only the spec document.
 
 ## Project structure
 
@@ -43,7 +43,7 @@ LICENSE                         — License file
 - Python venv: `.venv/` (activate with `source .venv/bin/activate`)
 - Always use the venv Python, never system Python 3.9
 - HTCondor Python bindings: `import htcondor2` (v2 API), not `import htcondor`
-- PostgreSQL: local, db=`wms2`, user=`wms2`, password in environment.local.md
+- PostgreSQL: local, db=`condora`, user=`condora`, password in environment.local.md
 
 See `.claude/environment.md` for full project requirements.
 
@@ -67,18 +67,18 @@ This is the main deliverable. It is a comprehensive design spec (~3100 lines) co
 
 ## Service architecture
 
-WMS2 runs as a single uvicorn process:
+Condora runs as a single uvicorn process:
 
 ```bash
-uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
+uvicorn condora.main:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
 **Continuously running background tasks** (launched via `asyncio.create_task()` in FastAPI lifespan):
 
 | Task | Interval | What it does |
 |------|----------|-------------|
-| Lifecycle Manager | 60s (`WMS2_LIFECYCLE_CYCLE_INTERVAL`) | Evaluates all non-terminal requests each cycle — polls DAGs, handles completions, triggers replanning, error recovery |
-| CRIC Sync | 1h (`WMS2_CRIC_SYNC_INTERVAL`) | Fetches CMS site configuration from CRIC into the DB |
+| Lifecycle Manager | 60s (`CONDORA_LIFECYCLE_CYCLE_INTERVAL`) | Evaluates all non-terminal requests each cycle — polls DAGs, handles completions, triggers replanning, error recovery |
+| CRIC Sync | 1h (`CONDORA_CRIC_SYNC_INTERVAL`) | Fetches CMS site configuration from CRIC into the DB |
 
 **Stateless worker components** (rebuilt each lifecycle cycle with a fresh DB session):
 - DAGMonitor, DAGPlanner, ErrorHandler, OutputManager, WorkflowManager, SiteManager
@@ -94,19 +94,19 @@ uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
 - **Merge groups as SUBDAG EXTERNAL**: Each merge group (processing + merge + cleanup nodes) is a self-contained sub-DAG within one top-level DAG. A landing node lets HTCondor pick the site; remaining nodes are pinned to that site via PRE/POST scripts.
 - **Clean stop flow**: ACTIVE → STOPPING → RESUBMITTING → QUEUED → ACTIVE (rescue DAG)
 - **Catastrophic recovery**: Dataset versioning — increment `processing_version`, resubmit from scratch, invalidate old outputs based on cleanup policy.
-- **Delegation to HTCondor**: WMS2 does NOT track individual jobs. DAGMan owns per-node retry, dependency ordering, and scheduling. WMS2 operates at workflow/DAG level only.
+- **Delegation to HTCondor**: Condora does NOT track individual jobs. DAGMan owns per-node retry, dependency ordering, and scheduling. Condora operates at workflow/DAG level only.
 
 ## Design invariants (do not violate)
 
 - **Spec is the source of truth — always rebuildable.** The spec must capture not just *what* the design is, but *why* each decision was made. Every significant design choice should have its rationale documented in the spec (in the relevant section, in Section 16 Design Decisions, or in Open Questions). Code is derived from the spec, not the other way around. If the spec changes, everything can be rebuilt from it.
-- **No per-job tracking in WMS2.** WMS2 tracks requests, workflows, and DAGs. Individual job state is owned entirely by HTCondor/DAGMan. Never suggest adding job-level tables, job status polling, or per-job retry logic in WMS2.
-- **HTCondor is the engine, WMS2 is the orchestrator.** Where HTCondor lacks a needed capability, the long-term answer is a feature request to the HTCondor team (Section 12). However, WMS2 is in prototyping stage — pragmatic workarounds using existing DAGMan features (SUBDAG EXTERNAL, PRE/POST scripts, landing nodes, etc.) are expected and encouraged. Log the proper solution as a feature request, but build something that works today.
-- **Payload agnosticism.** WMS2 does not know or care what runs inside a job (single-step, multi-step, StepChain). The sandbox/wrapper handles payload execution. Never add payload-specific logic to WMS2 core.
+- **No per-job tracking in Condora.** Condora tracks requests, workflows, and DAGs. Individual job state is owned entirely by HTCondor/DAGMan. Never suggest adding job-level tables, job status polling, or per-job retry logic in Condora.
+- **HTCondor is the engine, Condora is the orchestrator.** Where HTCondor lacks a needed capability, the long-term answer is a feature request to the HTCondor team (Section 12). However, Condora is in prototyping stage — pragmatic workarounds using existing DAGMan features (SUBDAG EXTERNAL, PRE/POST scripts, landing nodes, etc.) are expected and encouraged. Log the proper solution as a feature request, but build something that works today.
+- **Payload agnosticism.** Condora does not know or care what runs inside a job (single-step, multi-step, StepChain). The sandbox/wrapper handles payload execution. Never add payload-specific logic to Condora core.
 - **Single state machine owner.** The Request Lifecycle Manager is the only component that transitions request status. Other components are stateless workers called by it. Never add independent polling loops to components.
-- **Site selection belongs to HTCondor.** WMS2 does not do load balancing or site assignment. The landing node mechanism lets HTCondor pick sites via normal negotiation. Never add site-selection logic to the DAG Planner.
+- **Site selection belongs to HTCondor.** Condora does not do load balancing or site assignment. The landing node mechanism lets HTCondor pick sites via normal negotiation. Never add site-selection logic to the DAG Planner.
 - **One DAG per round, multiple rounds per workflow.** Each round produces one top-level DAG. With pipelined rounds, multiple DAGs may be active concurrently for one workflow. Merge group sub-DAGs within each top-level DAG are DAGMan's internal concern. Each DAG is assigned to one schedd; different rounds may use different schedds.
 
-## Restarting the WMS2 service
+## Restarting the Condora service
 
 After changing Python source or templates, **restart the service automatically** — don't ask. This is safe and expected during development.
 
@@ -115,11 +115,11 @@ After changing Python source or templates, **restart the service automatically**
 find src -name "*.pyc" -delete
 
 # 2. Kill old uvicorn
-pkill -9 -f "uvicorn wms2" 2>/dev/null; sleep 2
+pkill -9 -f "uvicorn condora" 2>/dev/null; sleep 2
 
-# 3. Start fresh (background) — .env has all WMS2_* settings
+# 3. Start fresh (background) — .env has all CONDORA_* settings
 source .venv/bin/activate && \
-  uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
+  uvicorn condora.main:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
 **What is safe to restart without asking:**
@@ -140,7 +140,7 @@ source .venv/bin/activate && \
 
 - Bump the spec version in the metadata table when making substantial changes
 - **Document the "why"**: When adding or changing a design decision, include a brief rationale — either inline (a sentence explaining the reasoning), in the relevant component section, or as an entry in Section 16 (Design Decisions). Someone reading only the spec should understand not just what the system does but why it does it that way.
-- When a design choice was considered and rejected, note the alternative and why it was rejected (e.g., "WMS2 does not do site selection because that would duplicate HTCondor's negotiator")
+- When a design choice was considered and rejected, note the alternative and why it was rejected (e.g., "Condora does not do site selection because that would duplicate HTCondor's negotiator")
 - Update cross-references when renumbering sections
 - Section 4 subsections are numbered 4.1–4.10; the component overview (4.1) lists all 9 components
 - Enums (RequestStatus, WorkflowStatus, DAGStatus, OutputStatus, CleanupPolicy) must stay in sync between the data models (Section 3), the database schema (Section 3.2), and the Lifecycle Manager handlers (Section 4.2)
@@ -150,11 +150,11 @@ source .venv/bin/activate && \
 
 ## Related repositories
 
-- [WMCore](https://github.com/dmwm/WMCore) — The system WMS2 replaces. Reference for understanding current workflow management, WMAgent components, and ReqMgr2 schemas.
+- [WMCore](https://github.com/dmwm/WMCore) — The system Condora replaces. Reference for understanding current workflow management, WMAgent components, and ReqMgr2 schemas.
 - [CRABServer](https://github.com/dmwm/CRABServer) — CMS Remote Analysis Builder. User-facing analysis submission system that sits on top of WMCore.
 - [CMSRucio](https://github.com/dmwm/CMSRucio) — CMS-specific Rucio integration. Reference for data management patterns, rule creation, and transfer policies.
-- [DBS](https://github.com/dmwm/DBS) — Data Bookkeeping System. WMS2's Output Manager registers datasets here. Reference for the DBS API (dataset injection, file registration, invalidation).
-- [wmcoredb](https://github.com/dmwm/wmcoredb) — WMCore database schemas. Reference for understanding the existing data model that WMS2's PostgreSQL schema replaces.
+- [DBS](https://github.com/dmwm/DBS) — Data Bookkeeping System. Condora's Output Manager registers datasets here. Reference for the DBS API (dataset injection, file registration, invalidation).
+- [wmcoredb](https://github.com/dmwm/wmcoredb) — WMCore database schemas. Reference for understanding the existing data model that Condora's PostgreSQL schema replaces.
 
 ## Domain terminology
 
@@ -162,7 +162,7 @@ source .venv/bin/activate && \
 - **Schedd**: HTCondor scheduler daemon — manages job queues
 - **SUBDAG EXTERNAL**: DAGMan feature where a node in one DAG is itself another DAG
 - **Pilot**: A test job that measures performance before the full production DAG
-- **Work unit**: The atomic unit of progress in WMS2 — a self-contained set of processing jobs whose outputs feed a single merge job. Implemented as a merge group SUBDAG. Used for progress tracking, partial production fractions, and clean stop granularity
+- **Work unit**: The atomic unit of progress in Condora — a self-contained set of processing jobs whose outputs feed a single merge job. Implemented as a merge group SUBDAG. Used for progress tracking, partial production fractions, and clean stop granularity
 - **Merge group**: The SUBDAG EXTERNAL implementation of a work unit — a set of processing nodes whose outputs feed one merge job, executed as a self-contained sub-DAG at a single site
 - **Landing node**: A trivial `/bin/true` job per work unit that lets HTCondor pick the site via normal negotiation
 - **AAA (Any data, Anytime, Anywhere)**: CMS xrootd federation for remote data access

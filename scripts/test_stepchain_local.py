@@ -21,9 +21,9 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from wms2.core.pset_generator import generate_psets_from_mcm
-from wms2.core.sandbox import create_sandbox_from_spec
-from wms2.core.stepchain import StepChainSpec, StepSpec, to_manifest
+from condora.core.pset_generator import generate_psets_from_mcm
+from condora.core.sandbox import create_sandbox_from_spec
+from condora.core.stepchain import StepChainSpec, StepSpec, to_manifest
 
 # Real NPS chain prepids
 CHAIN_PREPIDS = [
@@ -112,10 +112,10 @@ def build_hardcoded_spec(events: int) -> StepChainSpec:
 
 
 def run_processing(sandbox_path: str, events: int, work_dir: str) -> bool:
-    """Run wms2_proc.sh with the sandbox and verify results."""
+    """Run condora_proc.sh with the sandbox and verify results."""
     # Copy the proc script from the DAG planner
-    from wms2.core.dag_planner import _write_proc_script, _write_file
-    proc_script = os.path.join(work_dir, "wms2_proc.sh")
+    from condora.core.dag_planner import _write_proc_script, _write_file
+    proc_script = os.path.join(work_dir, "condora_proc.sh")
     _write_proc_script(proc_script)
 
     cmd = [
@@ -188,7 +188,7 @@ def main():
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
     else:
-        work_dir = tempfile.mkdtemp(prefix="wms2_stepchain_test_")
+        work_dir = tempfile.mkdtemp(prefix="condora_stepchain_test_")
 
     print(f"Working directory: {work_dir}")
 

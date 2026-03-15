@@ -115,7 +115,7 @@ _WF_300_0 = WorkflowDef(
     wf_id=300.0,
     title="NPS 5-step StepChain, 1 work unit (2 jobs x 40 ev)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -165,7 +165,7 @@ _WF_310_0 = WorkflowDef(
     wf_id=310.0,
     title="DY2Mu-low 5-step StepChain, 1 work unit (2 jobs x 40 ev)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer23wmLHEGS-00057__v1_T_230922_115605_1852",
         "RequestType": "StepChain",
@@ -195,7 +195,7 @@ _WF_310_1 = WorkflowDef(
     wf_id=310.1,
     title="DY2Mu-low 5-step StepChain, local-grid mode (Singularity + xrdcp)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer23wmLHEGS-00057__v1_T_230922_115605_1852",
         "RequestType": "StepChain",
@@ -226,7 +226,7 @@ _WF_311_0 = WorkflowDef(
     wf_id=311.0,
     title="DY2Mu-low 5-step StepChain, scale test (8 jobs x 400 ev)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2mu_low.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer23wmLHEGS-00057__v1_T_230922_115605_1852",
         "RequestType": "StepChain",
@@ -271,7 +271,7 @@ _WF_301_0 = WorkflowDef(
     wf_id=301.0,
     title="DY2L 5-step StepChain, 8 cores (8 jobs x 400 ev, ~10% filter)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -300,7 +300,7 @@ _WF_351_0 = WorkflowDef(
     wf_id=351.0,
     title="DY2L adaptive step 1 split (2 jobs x 40 ev, ~10% filter)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -334,7 +334,7 @@ _WF_351_1 = WorkflowDef(
     wf_id=351.1,
     title="DY2L adaptive step 1 split (4 jobs x 400 ev, ~10% filter)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -370,7 +370,7 @@ _WF_391_0 = WorkflowDef(
     wf_id=391.0,
     title="DY2L adaptive job split (2 jobs x 40 ev, ~10% filter)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -406,7 +406,7 @@ _WF_391_1 = WorkflowDef(
     wf_id=391.1,
     title="DY2L adaptive job split (4 jobs x 400 ev, ~10% filter)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -442,7 +442,7 @@ _WF_392_0 = WorkflowDef(
     wf_id=392.0,
     title="DY2L adaptive job split 3-round (2 jobs x 40 ev, 3 GB/core)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -478,7 +478,7 @@ _WF_392_1 = WorkflowDef(
     wf_id=392.1,
     title="DY2L fixed 2T memory test (3 jobs x 10 ev — R1 4337 no tmpfs, R2 6000 tmpfs, R3 4337 tmpfs)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -510,7 +510,7 @@ _WF_391_2 = WorkflowDef(
     wf_id=391.2,
     title="DY2L adaptive job split (4 jobs x 400 ev, 3 GB/core)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -546,7 +546,7 @@ _WF_391_3 = WorkflowDef(
     wf_id=391.3,
     title="DY2L adaptive 3-round no-probe (8T, 2 GB/core, no tmpfs R1, 10% margin)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -584,7 +584,7 @@ _WF_391_4 = WorkflowDef(
     wf_id=391.4,
     title="DY2L adaptive 3-round no-probe (8T, 2 GB/core, no tmpfs R1, 10% margin, 40 ev)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox_gen_dy2l.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox_gen_dy2l.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_GEN-Run3Summer22EEwmLHEGS-00600__v1_T_250902_211552_8573",
         "RequestType": "StepChain",
@@ -624,7 +624,7 @@ _WF_350_0 = WorkflowDef(
     wf_id=350.0,
     title="Adaptive nThreads tuning, 40 ev/job",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -656,7 +656,7 @@ _WF_360_0 = WorkflowDef(
     wf_id=360.0,
     title="Adaptive overcommit only (no step 0 split)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -690,7 +690,7 @@ _WF_370_0 = WorkflowDef(
     wf_id=370.0,
     title="Adaptive split + overcommit (1.25x max)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -723,7 +723,7 @@ _WF_380_0 = WorkflowDef(
     wf_id=380.0,
     title="Adaptive all-step pipeline split",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -757,7 +757,7 @@ _WF_380_1 = WorkflowDef(
     wf_id=380.1,
     title="Pipeline split, uniform threads, 400 ev/job",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -792,7 +792,7 @@ _WF_300_1 = WorkflowDef(
     wf_id=300.1,
     title="NPS 5-step StepChain, 16-core jobs (4 jobs x 1000 ev)",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",
@@ -821,7 +821,7 @@ _WF_350_1 = WorkflowDef(
     wf_id=350.1,
     title="Adaptive nThreads tuning, 10 ev/job",
     sandbox_mode="cached",
-    cached_sandbox_path="/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz",
+    cached_sandbox_path="/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz",
     request_spec={
         "RequestName": "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54",
         "RequestType": "StepChain",

@@ -4,11 +4,11 @@
 Fetches a real ReqMgr2 request, builds a sandbox with ConfigCache PSets,
 plans a production DAG, and submits to HTCondor DAGMan.
 
-Must run as the wms2 Linux user (HTCondor forbids root).
+Must run as the condora Linux user (HTCondor forbids root).
 
 Usage:
-    su - wms2 -c "/mnt/shared/work/wms2/.venv/bin/python \
-        /mnt/shared/work/wms2/scripts/e2e_real_condor.py \
+    su - condora -c "/mnt/shared/work/condora/.venv/bin/python \
+        /mnt/shared/work/condora/scripts/e2e_real_condor.py \
         --request <reqmgr2_request_name> --events 1000"
 """
 from __future__ import annotations
@@ -29,9 +29,9 @@ from unittest.mock import AsyncMock, MagicMock
 # Ensure project is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from wms2.adapters.condor import HTCondorAdapter
-from wms2.config import Settings
-from wms2.core.dag_planner import DAGPlanner, PilotMetrics
+from condora.adapters.condor import HTCondorAdapter
+from condora.config import Settings
+from condora.core.dag_planner import DAGPlanner, PilotMetrics
 
 # ── CPU Monitoring ─────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ def cpu_utilization_percent(prev_busy, prev_total, cur_busy, cur_total):
 
 # ── Configuration ──────────────────────────────────────────────
 
-CONDOR_HOST = os.environ.get("WMS2_CONDOR_HOST", "localhost:9618")
+CONDOR_HOST = os.environ.get("CONDORA_CONDOR_HOST", "localhost:9618")
 POLL_INTERVAL = 10
 MAX_WAIT = 7200  # 2 hours
 X509_PROXY = os.environ.get("X509_USER_PROXY", "/mnt/creds/x509up")
@@ -261,13 +261,13 @@ def make_mock_repo():
 async def run_test(request_name: str, events: int, num_jobs: int = 1):
     total_events = events * num_jobs
     print("=" * 70)
-    print(f"WMS2 Real CMSSW HTCondor DAG Test")
+    print(f"Condora Real CMSSW HTCondor DAG Test")
     print(f"  Request: {request_name}")
     print(f"  Events:  {events}/job x {num_jobs} jobs = {total_events} total")
     print(f"  Condor:  {CONDOR_HOST}")
     print("=" * 70)
 
-    test_dir = Path("/mnt/shared/work/wms2_real_condor_test")
+    test_dir = Path("/mnt/shared/work/condora_real_condor_test")
     if test_dir.exists():
         for item in test_dir.iterdir():
             if item.is_dir():

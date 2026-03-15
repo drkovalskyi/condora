@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.core.lifecycle_manager import RequestLifecycleManager
-from wms2.models.enums import DAGStatus, RequestStatus, WorkflowStatus
+from condora.core.lifecycle_manager import RequestLifecycleManager
+from condora.models.enums import DAGStatus, RequestStatus, WorkflowStatus
 from .conftest import make_request_row
 
 
@@ -274,8 +274,8 @@ async def test_prepare_recovery_consumes_production_step(lifecycle_manager, mock
 
 async def test_handle_active_processes_work_units(mock_repository, mock_condor, settings):
     """_handle_active calls output_manager for each completed work unit."""
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     mock_output_manager = AsyncMock()
 
@@ -340,8 +340,8 @@ async def test_handle_active_processes_work_units(mock_repository, mock_condor, 
 
 async def test_handle_active_no_output_manager_skips(mock_repository, mock_condor, settings):
     """_handle_active with no output_manager skips output processing (backward compat)."""
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     dag = _make_dag(status="submitted")
     workflow = _make_workflow(dag_id=dag.id)
@@ -378,9 +378,9 @@ async def test_handle_active_no_output_manager_skips(mock_repository, mock_condo
 
 async def test_active_partial_with_rescue(mock_repository, mock_condor, settings):
     """PARTIAL + error_handler returns 'rescue' → request RESUBMITTING."""
-    from wms2.core.dag_monitor import DAGPollResult
+    from condora.core.dag_monitor import DAGPollResult
 
-    from wms2.core.error_handler import CompletionResult
+    from condora.core.error_handler import CompletionResult
 
     mock_error_handler = AsyncMock()
     mock_error_handler.handle_dag_completion.return_value = CompletionResult(
@@ -417,7 +417,7 @@ async def test_active_partial_with_rescue(mock_repository, mock_condor, settings
 
 async def test_active_partial_without_error_handler(mock_repository, mock_condor, settings):
     """PARTIAL without error_handler → request HELD."""
-    from wms2.core.dag_monitor import DAGPollResult
+    from condora.core.dag_monitor import DAGPollResult
 
     dag = _make_dag(status="submitted", nodes_done=19, nodes_failed=1)
     workflow = _make_workflow(dag_id=dag.id)
@@ -448,9 +448,9 @@ async def test_active_partial_without_error_handler(mock_repository, mock_condor
 
 async def test_active_failed_with_error_handler(mock_repository, mock_condor, settings):
     """FAILED + error_handler returns 'hold' → request HELD (held for operator)."""
-    from wms2.core.dag_monitor import DAGPollResult
+    from condora.core.dag_monitor import DAGPollResult
 
-    from wms2.core.error_handler import CompletionResult
+    from condora.core.error_handler import CompletionResult
 
     mock_error_handler = AsyncMock()
     mock_error_handler.handle_dag_completion.return_value = CompletionResult(
@@ -527,8 +527,8 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
     DD-21: Offsets and current_round are advanced at plan time, not at
     round completion. complete_round() only stores step_metrics.
     """
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     # GEN workflow: 1M total events, 100k per job, round 0 with 8 processing jobs
     dag = _make_dag(status="submitted", nodes_done=8, nodes_failed=0)
@@ -587,8 +587,8 @@ async def test_round_completion_gen_returns_to_queued(mock_repository, mock_cond
 
 async def test_round_completion_gen_all_done(mock_repository, mock_condor, settings):
     """Adaptive GEN request where all events produced → COMPLETED."""
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     dag = _make_dag(
         status="submitted", nodes_done=1, nodes_failed=0,
@@ -640,8 +640,8 @@ async def test_round_completion_file_based_returns_to_queued(
     mock_repository, mock_condor, settings
 ):
     """Adaptive file-based request → QUEUED, file_offset advanced."""
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     dag = _make_dag(
         status="submitted", nodes_done=5, nodes_failed=0,
@@ -697,8 +697,8 @@ async def test_round_completion_file_based_returns_to_queued(
 
 async def test_non_adaptive_skips_round_handler(mock_repository, mock_condor, settings):
     """Non-adaptive request → COMPLETED directly (existing behavior)."""
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     dag = _make_dag(status="submitted", nodes_done=10, nodes_failed=0)
     workflow = _make_workflow(dag_id=dag.id)
@@ -732,8 +732,8 @@ async def test_non_adaptive_skips_round_handler(mock_repository, mock_condor, se
 
 async def test_round_completion_priority_demotion(mock_repository, mock_condor, settings):
     """Adaptive request with production_steps → priority demoted when threshold crossed."""
-    from wms2.core.dag_monitor import DAGPollResult
-    from wms2.core.lifecycle_manager import RequestLifecycleManager
+    from condora.core.dag_monitor import DAGPollResult
+    from condora.core.lifecycle_manager import RequestLifecycleManager
 
     # 1000 events target, 500 already produced → 50% progress matches first step
     dag = _make_dag(
@@ -910,7 +910,7 @@ async def test_queued_round0_plans_dag(mock_repository, mock_condor, settings):
 
 async def test_aggregate_round_metrics():
     """Unit test for _aggregate_round_metrics()."""
-    from wms2.core.lifecycle_manager import _aggregate_round_metrics
+    from condora.core.lifecycle_manager import _aggregate_round_metrics
 
     dag = MagicMock()
     dag.nodes_done = 10

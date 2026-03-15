@@ -1,4 +1,4 @@
-# DQM Harvesting in CMS: Design Notes for WMS2
+# DQM Harvesting in CMS: Design Notes for Condora
 
 ## Overview
 
@@ -7,7 +7,7 @@ characterizing detector performance and physics object quality. These histograms
 are uploaded to the DQM GUI for visual inspection, comparison across runs, and
 data certification.
 
-WMS2 needs to support DQM eventually — both for data reprocessing (where DQM is
+Condora needs to support DQM eventually — both for data reprocessing (where DQM is
 mandatory) and for MC production (where it is done on demand for release
 validation and targeted quality checks).
 
@@ -214,7 +214,7 @@ The new DQM GUI uses a two-stage upload:
 | `DQMHarvestUnit` | `byRun` | `byRun` (one job/run) or `multiRun` (all runs) |
 | `DQMSequences` | `[]` | Which DQM sequences to run |
 
-## Implications for WMS2
+## Implications for Condora
 
 ### The Core Problem
 
@@ -227,7 +227,7 @@ is not kept in normal MC production. This means:
 - For MC central production, CMS currently accepts this trade-off
 - For RelVal and targeted validation, DQM is included explicitly
 
-### What WMS2 Needs to Support
+### What Condora Needs to Support
 
 1. **Request-level DQM configuration**: The request spec should be able to
    specify whether DQM should be included in the RECO step, and which DQM
@@ -248,11 +248,11 @@ is not kept in normal MC production. This means:
    ROOT file.
 
 5. **Upload to DQM GUI**: The harvested file is uploaded via HTTPS POST with
-   X.509 authentication. WMS2 would need proxy certificate handling.
+   X.509 authentication. Condora would need proxy certificate handling.
 
 ### Suggested Approach
 
-DQM support does not need to change the core WMS2 architecture. It is
+DQM support does not need to change the core Condora architecture. It is
 essentially:
 
 - An optional extra output module on the RECO step (DQMIO)
@@ -271,7 +271,7 @@ core processing/merge/cleanup flow.
 
 ### Open Questions
 
-1. Should WMS2 support DQM by default for all MC production, or only when
+1. Should Condora support DQM by default for all MC production, or only when
    explicitly requested? Adding DQM to every RECO step adds CPU overhead
    and DQMIO storage, but avoids the inability to produce DQM later.
 
@@ -285,5 +285,5 @@ core processing/merge/cleanup flow.
 4. What DQM sequences should be the default for MC? `DQMOfflinePOGMC`
    is lightweight, `@standardDQM` is comprehensive.
 
-5. How to handle X.509 proxy certificates for DQM upload in WMS2's
+5. How to handle X.509 proxy certificates for DQM upload in Condora's
    operational model?

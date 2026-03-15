@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "wms2"
+name = "condora"
 version = "0.1.0"
 description = "CMS Workload Management System v2"
 readme = "README.md"
@@ -36,10 +36,10 @@ dev = [
 ]
 
 [project.scripts]
-wms2 = "wms2.cli:main"
+condora = "condora.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/wms2"]
+packages = ["src/condora"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

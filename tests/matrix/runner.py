@@ -1,10 +1,10 @@
 """MatrixRunner — generic execution engine for the test matrix.
 
 Reuses the same code path as e2e_real_condor.py:
-  - wms2.core.sandbox.create_sandbox() for sandbox building
-  - wms2.core.dag_planner.DAGPlanner.plan_production_dag() for DAG + submit
-  - wms2.adapters.condor.HTCondorAdapter for real HTCondor ops
-  - wms2.core.dag_planner.PilotMetrics.from_request() for resource estimates
+  - condora.core.sandbox.create_sandbox() for sandbox building
+  - condora.core.dag_planner.DAGPlanner.plan_production_dag() for DAG + submit
+  - condora.adapters.condor.HTCondorAdapter for real HTCondor ops
+  - condora.core.dag_planner.PilotMetrics.from_request() for resource estimates
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ from tests.matrix.sweeper import remove_dagman_jobs, sweep_post, sweep_pre
 
 logger = logging.getLogger(__name__)
 
-CONDOR_HOST = os.environ.get("WMS2_CONDOR_HOST", "localhost:9618")
+CONDOR_HOST = os.environ.get("CONDORA_CONDOR_HOST", "localhost:9618")
 POLL_INTERVAL = 5
-RESULTS_DIR = Path("/mnt/shared/work/wms2_matrix/results")
+RESULTS_DIR = Path("/mnt/shared/work/condora_matrix/results")
 
 # Disk space requirements per concurrent CMSSW job (GB).
 # Measured from DY2L 5-step StepChain: sandbox extraction ~1 MB,
@@ -300,7 +300,7 @@ def _make_workflow_mock(wf: WorkflowDef, sandbox_path: str) -> MagicMock:
         "request_num_events": total_events,
         "_is_gen": True,
         "output_datasets": wf.output_datasets,
-        "extra_classads": {"WMS2_QuickJob": "True"},
+        "extra_classads": {"CONDORA_QuickJob": "True"},
         "stageout_mode": wf.stageout_mode,
     }
     # Adaptive round fields — must be real values, not MagicMock
@@ -596,7 +596,7 @@ def _collect_perf(wf: WorkflowDef, wf_dir: Path, cpu_samples: list[float]) -> Pe
     # Collect per-job per-step data: step_name -> [sample_dicts]
     job_step_data: dict[str, list[dict]] = {}
 
-    # Strategy 1: proc_N_metrics.json (written by wms2_proc.sh FJR parser)
+    # Strategy 1: proc_N_metrics.json (written by condora_proc.sh FJR parser)
     # Only use files with numeric node indices (skip literal ${NODE_INDEX})
     metrics_pattern = re.compile(r"proc_(\d+)_metrics\.json$")
     for gd in sorted(wf_dir.glob("mg_*")):
@@ -1071,8 +1071,8 @@ class MatrixRunner:
         """Lazy-init HTCondor adapter and settings."""
         if self._condor is not None:
             return
-        from wms2.adapters.condor import HTCondorAdapter
-        from wms2.config import Settings
+        from condora.adapters.condor import HTCondorAdapter
+        from condora.config import Settings
 
         self._condor = HTCondorAdapter(CONDOR_HOST)
         self._settings = Settings(
@@ -1113,12 +1113,12 @@ class MatrixRunner:
         return result
 
     async def _execute(self, wf: WorkflowDef, result: WorkflowResult) -> WorkflowResult:
-        from wms2.core.dag_planner import DAGPlanner, PilotMetrics
-        from wms2.core.sandbox import create_sandbox
+        from condora.core.dag_planner import DAGPlanner, PilotMetrics
+        from condora.core.sandbox import create_sandbox
 
         # 2. Pre-flight disk space check
         n_concurrent = wf.num_jobs * getattr(wf, "num_work_units", 1)
-        _check_disk_space(n_concurrent, Path(f"/mnt/shared/work/wms2_matrix/wf_{wf.wf_id}"))
+        _check_disk_space(n_concurrent, Path(f"/mnt/shared/work/condora_matrix/wf_{wf.wf_id}"))
 
         # 2b. Wait for free slots before submission
         needed_cpus = wf.multicore * n_concurrent
@@ -1272,7 +1272,7 @@ class MatrixRunner:
         4. Submit with real condor adapter
         5. Poll, collect per-round perf, verify, sweep
         """
-        from wms2.core.dag_planner import DAGPlanner, PilotMetrics
+        from condora.core.dag_planner import DAGPlanner, PilotMetrics
 
         submit_dir = str(work_dir / "submit")
 

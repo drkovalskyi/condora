@@ -1,6 +1,6 @@
-# WMS2 Development Environment Requirements
+# Condora Development Environment Requirements
 
-This file defines what the WMS2 project needs. It is committed to the repo.
+This file defines what the Condora project needs. It is committed to the repo.
 Each developer creates `.claude/environment.local.md` (gitignored) to describe
 what is actually available on their machine.
 
@@ -57,7 +57,7 @@ Copy the block below to `.claude/environment.local.md` and fill in your
 machine-specific details:
 
 ```markdown
-# WMS2 Local Environment — [machine name]
+# Condora Local Environment — [machine name]
 
 ## Machine
 - **Hostname**:

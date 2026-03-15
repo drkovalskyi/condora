@@ -15,7 +15,7 @@ Examples:
 
     # Use a local request.json (same format as ReqMgr2 response)
     python scripts/fetch-workflow-info.py \\
-        --from-file /mnt/shared/work/wms2_real_test/request.json
+        --from-file /mnt/shared/work/condora_real_test/request.json
 """
 
 from __future__ import annotations

@@ -44,7 +44,7 @@ LEVEL0_PACKAGES = [
 ]
 
 
-def check_postgres_reachable(dsn="postgresql://wms2:wms2dev@localhost:5432/wms2"):
+def check_postgres_reachable(dsn="postgresql://condora:condoradev@localhost:5432/condora"):
     """PostgreSQL accepts connections."""
     try:
         import psycopg2  # noqa: F811
@@ -57,7 +57,7 @@ def check_postgres_reachable(dsn="postgresql://wms2:wms2dev@localhost:5432/wms2"
     pg_isready = shutil.which("pg_isready")
     if pg_isready:
         r = subprocess.run(
-            [pg_isready, "-h", "localhost", "-p", "5432", "-U", "wms2", "-d", "wms2"],
+            [pg_isready, "-h", "localhost", "-p", "5432", "-U", "condora", "-d", "condora"],
             capture_output=True, timeout=5,
         )
         if r.returncode == 0:
@@ -238,7 +238,7 @@ def _check_https_endpoint(url, name):
             if os.path.isfile(candidate):
                 proxy_path = candidate
                 break
-    ca_path = os.environ.get("WMS2_CA_BUNDLE", "")
+    ca_path = os.environ.get("CONDORA_CA_BUNDLE", "")
     if not ca_path and os.path.isfile("/tmp/cern-ca-bundle.pem"):
         ca_path = "/tmp/cern-ca-bundle.pem"
     cmd = [curl, "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10"]

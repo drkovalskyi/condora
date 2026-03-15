@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from wms2.core.pilot_runner import compute_summary, parse_fjr, parse_pilot_report, write_pilot_script
+from condora.core.pilot_runner import compute_summary, parse_fjr, parse_pilot_report, write_pilot_script
 
 
 # ── Sample FJR XML fragments ──────────────────────────────────────
@@ -258,7 +258,7 @@ class TestComputeSummary:
 class TestWritePilotScript:
     def test_pilot_script_has_timeout_handling(self, tmp_path):
         """Script contains subprocess timeout logic."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
         content = script_path.read_text()
 
@@ -267,7 +267,7 @@ class TestWritePilotScript:
 
     def test_pilot_script_no_retry_loop(self, tmp_path):
         """Script does NOT contain retry loop (simplified pilot)."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
         content = script_path.read_text()
 
@@ -276,7 +276,7 @@ class TestWritePilotScript:
 
     def test_pilot_script_has_fjr_parsing(self, tmp_path):
         """Script contains XML parsing for FrameworkJobReport."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
         content = script_path.read_text()
 
@@ -285,14 +285,14 @@ class TestWritePilotScript:
 
     def test_pilot_script_is_executable(self, tmp_path):
         """Script has executable permission."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
 
         assert os.access(str(script_path), os.X_OK)
 
     def test_pilot_script_has_shebang(self, tmp_path):
         """Script starts with Python shebang."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
         content = script_path.read_text()
 
@@ -300,7 +300,7 @@ class TestWritePilotScript:
 
     def test_pilot_script_has_timeout_arg(self, tmp_path):
         """Script accepts --timeout argument."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
         content = script_path.read_text()
 
@@ -309,7 +309,7 @@ class TestWritePilotScript:
 
     def test_pilot_script_writes_partial_on_failure(self, tmp_path):
         """Script writes partial results on step failure."""
-        script_path = tmp_path / "wms2_pilot.py"
+        script_path = tmp_path / "condora_pilot.py"
         write_pilot_script(str(script_path))
         content = script_path.read_text()
 
@@ -356,7 +356,7 @@ class TestParseReport:
 
     def test_pilot_metrics_from_new_format(self):
         """PilotMetrics.from_json with steps + summary sections."""
-        from wms2.core.dag_planner import PilotMetrics
+        from condora.core.dag_planner import PilotMetrics
 
         data = {
             "steps": [
@@ -409,8 +409,8 @@ class TestParseReport:
 class TestComputePilotConfig:
     def test_low_filter_efficiency_increases_events(self):
         """Low filter efficiency requires more events for functional test."""
-        from wms2.config import Settings
-        from wms2.core.dag_planner import _compute_pilot_config
+        from condora.config import Settings
+        from condora.core.dag_planner import _compute_pilot_config
 
         settings = Settings()
         config = {
@@ -425,8 +425,8 @@ class TestComputePilotConfig:
 
     def test_very_low_filter_efficiency_caps_at_10000(self):
         """Very low filter eff still capped at 10000 events."""
-        from wms2.config import Settings
-        from wms2.core.dag_planner import _compute_pilot_config
+        from condora.config import Settings
+        from condora.core.dag_planner import _compute_pilot_config
 
         settings = Settings()
         config = {
@@ -438,8 +438,8 @@ class TestComputePilotConfig:
 
     def test_no_hints_uses_defaults(self):
         """Without filter efficiency, fall back to settings defaults."""
-        from wms2.config import Settings
-        from wms2.core.dag_planner import _compute_pilot_config
+        from condora.config import Settings
+        from condora.core.dag_planner import _compute_pilot_config
 
         settings = Settings()
         config = {}
@@ -452,8 +452,8 @@ class TestComputePilotConfig:
 
     def test_timeout_from_time_per_event(self):
         """Timeout is based on initial_events * time_per_event * 5."""
-        from wms2.config import Settings
-        from wms2.core.dag_planner import _compute_pilot_config
+        from condora.config import Settings
+        from condora.core.dag_planner import _compute_pilot_config
 
         settings = Settings()
         config = {"time_per_event": 1.0, "memory_mb": 4000, "multicore": 4}
@@ -468,8 +468,8 @@ class TestComputePilotConfig:
 
     def test_timeout_minimum_600(self):
         """Timeout never goes below 600s."""
-        from wms2.config import Settings
-        from wms2.core.dag_planner import _compute_pilot_config
+        from condora.config import Settings
+        from condora.core.dag_planner import _compute_pilot_config
 
         settings = Settings()
         config = {"time_per_event": 0.001}  # very fast
@@ -480,8 +480,8 @@ class TestComputePilotConfig:
 
     def test_no_retry_params(self):
         """Simplified config has no retry_fraction or min_events."""
-        from wms2.config import Settings
-        from wms2.core.dag_planner import _compute_pilot_config
+        from condora.config import Settings
+        from condora.core.dag_planner import _compute_pilot_config
 
         settings = Settings()
         pc = _compute_pilot_config({}, settings)

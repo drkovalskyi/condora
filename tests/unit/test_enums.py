@@ -1,4 +1,4 @@
-from wms2.models.enums import (
+from condora.models.enums import (
     BlockStatus,
     CleanupPolicy,
     DAGStatus,

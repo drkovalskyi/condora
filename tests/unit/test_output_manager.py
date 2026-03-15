@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockDBSAdapter, MockRucioAdapter
-from wms2.core.output_manager import OutputManager
-from wms2.models.enums import BlockStatus
+from condora.adapters.mock import MockDBSAdapter, MockRucioAdapter
+from condora.core.output_manager import OutputManager
+from condora.models.enums import BlockStatus
 
 
 def _make_block_row(

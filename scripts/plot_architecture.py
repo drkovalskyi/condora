@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate WMS2 architecture overview and request state machine diagram.
+"""Generate Condora architecture overview and request state machine diagram.
 
 To move a box, change its (x, y) or (dx, dy) — arrows follow automatically.
 To move the entire service group, change SVC_CENTER.
@@ -295,7 +295,7 @@ def draw_architecture(ax):
     ax.axis("off")
 
     # Title
-    ax.text(8.25, 14.7, "WMS2 Component Architecture", ha="center",
+    ax.text(8.25, 14.7, "Condora Component Architecture", ha="center",
             va="center", fontsize=FONT_TITLE, fontweight="bold",
             fontfamily="sans-serif")
 
@@ -411,7 +411,7 @@ def main():
     draw_state_machine(ax_sm)
 
     plt.tight_layout(pad=1.5)
-    out = "wms2_architecture.png"
+    out = "condora_architecture.png"
     fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white")
     print(f"Saved to {out}")
     plt.close()

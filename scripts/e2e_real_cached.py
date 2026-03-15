@@ -5,7 +5,7 @@ Runs 8 proc jobs (50 events each, 400 total) through the full 5-step NPS
 StepChain with proper unmerged→merged→cleanup output pipeline.
 This exercises one full work unit: 8 jobs x 8 cores = 64 cores.
 
-Must run as the wms2 Linux user.
+Must run as the condora Linux user.
 """
 from __future__ import annotations
 
@@ -22,19 +22,19 @@ from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from wms2.adapters.condor import HTCondorAdapter
-from wms2.config import Settings
-from wms2.core.dag_planner import DAGPlanner, PilotMetrics
+from condora.adapters.condor import HTCondorAdapter
+from condora.config import Settings
+from condora.core.dag_planner import DAGPlanner, PilotMetrics
 
 # ── Configuration ──────────────────────────────────────────────
 
-CONDOR_HOST = os.environ.get("WMS2_CONDOR_HOST", "localhost:9618")
+CONDOR_HOST = os.environ.get("CONDORA_CONDOR_HOST", "localhost:9618")
 PFN_PREFIX = "/mnt/shared"
 POLL_INTERVAL = 10
 MAX_WAIT = 7200  # 2 hours
 
 # Cached sandbox from previous fetch (has all 5 ConfigCache PSets)
-CACHED_SANDBOX = "/mnt/shared/work/wms2_real_condor_test/sandbox.tar.gz"
+CACHED_SANDBOX = "/mnt/shared/work/condora_real_condor_test/sandbox.tar.gz"
 
 REQUEST_NAME = "cmsunified_task_NPS-Run3Summer22EEGS-00049__v1_T_260126_110934_54"
 EVENTS_PER_JOB = 50
@@ -56,7 +56,7 @@ OUTPUT_DATASETS = [
     },
 ]
 
-TEST_DIR = Path("/mnt/shared/work/wms2_real_output_test")
+TEST_DIR = Path("/mnt/shared/work/condora_real_output_test")
 
 
 def setup():
@@ -111,7 +111,7 @@ def make_mock_repo():
 async def run():
     total_events = EVENTS_PER_JOB * NUM_JOBS
     print("=" * 70)
-    print("WMS2 Real CMSSW E2E Test — Output Pipeline")
+    print("Condora Real CMSSW E2E Test — Output Pipeline")
     print(f"  Request:      {REQUEST_NAME}")
     print(f"  Events:       {EVENTS_PER_JOB}/job x {NUM_JOBS} jobs = {total_events}")
     print(f"  Steps:        5 (GEN-SIM → DRPremix x2 → MiniAOD → NanoAOD)")

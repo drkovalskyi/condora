@@ -1,6 +1,6 @@
-"""Adaptive execution — CLI wrapper for WMS2 adaptive algorithms.
+"""Adaptive execution — CLI wrapper for Condora adaptive algorithms.
 
-Thin wrapper around wms2.core.adaptive — all algorithm functions live
+Thin wrapper around condora.core.adaptive — all algorithm functions live
 in the core module. This file provides the CLI entry point for intra-DAG
 replan (called by DAGMan replan nodes between work units).
 
@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 
 # Re-export all algorithm functions from core for backward compatibility
-from wms2.core.adaptive import (
+from condora.core.adaptive import (
     _nearest_power_of_2,
     analyze_wu_metrics,
     compute_all_step_split,
@@ -38,7 +38,7 @@ def _replan_cli(args: list[str]) -> None:
     """Called by the DAGMan replan job: analyze WU0, patch WU1 manifests."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="WMS2 adaptive replan")
+    parser = argparse.ArgumentParser(description="Condora adaptive replan")
     parser.add_argument("--wu0-dir", required=False, default="",
                         help="Completed WU0 group dir (legacy, use --prior-wu-dirs)")
     parser.add_argument("--prior-wu-dirs", default="",
@@ -94,7 +94,7 @@ def _replan_cli(args: list[str]) -> None:
     default_memory_mb = mem_per_core * ncores
     max_memory_mb = max_mem_per_core * ncores
 
-    print(f"=== WMS2 Adaptive Replan ===")
+    print(f"=== Condora Adaptive Replan ===")
     print(f"Prior dirs: {[str(d) for d in prior_dirs]}")
     print(f"WU1 dir: {wu1_dir}")
 

@@ -2,7 +2,7 @@
 """Run a real CMSSW StepChain locally (no HTCondor).
 
 Fetches ConfigCache PSets from CouchDB, builds a sandbox with the real
-manifest + PSets, then executes wms2_proc.sh in the working directory.
+manifest + PSets, then executes condora_proc.sh in the working directory.
 
 Usage:
     .venv/bin/python scripts/run_real_local.py \
@@ -26,7 +26,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from wms2.core.dag_planner import _write_proc_script
+from condora.core.dag_planner import _write_proc_script
 
 # ── Configuration ────────────────────────────────────────────
 REQMGR2_URL = "https://cmsweb.cern.ch/reqmgr2/data/request"
@@ -140,9 +140,9 @@ def run_proc_script(
     work_dir: str,
     nthreads: int,
 ) -> int:
-    """Run wms2_proc.sh locally."""
+    """Run condora_proc.sh locally."""
     # Generate the proc script
-    proc_script = os.path.join(work_dir, "wms2_proc.sh")
+    proc_script = os.path.join(work_dir, "condora_proc.sh")
     _write_proc_script(proc_script)
 
     cmd = [
@@ -179,7 +179,7 @@ def main():
     args = parser.parse_args()
 
     print(f"{'='*70}")
-    print(f"WMS2 Real CMSSW Local Run")
+    print(f"Condora Real CMSSW Local Run")
     print(f"  Request: {args.request}")
     print(f"  Events:  {args.events}")
     print(f"{'='*70}")
@@ -224,7 +224,7 @@ def main():
     if args.work_dir:
         base_dir = Path(args.work_dir)
     else:
-        base_dir = Path("/mnt/shared/work/wms2_real_test")
+        base_dir = Path("/mnt/shared/work/condora_real_test")
     base_dir.mkdir(parents=True, exist_ok=True)
 
     sandbox_path = str(base_dir / "sandbox.tar.gz")

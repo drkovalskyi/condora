@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from wms2.api.deps import get_repository
-from wms2.api.router import api_router
+from condora.api.deps import get_repository
+from condora.api.router import api_router
 
 
 def _make_app():
@@ -53,8 +53,8 @@ def _make_dag_row(**overrides):
     row = MagicMock()
     row.id = overrides.get("id", uuid.uuid4())
     row.workflow_id = overrides.get("workflow_id", uuid.uuid4())
-    row.dag_file_path = overrides.get("dag_file_path", "/data/wms2/submit/dag.txt")
-    row.submit_dir = overrides.get("submit_dir", "/data/wms2/submit")
+    row.dag_file_path = overrides.get("dag_file_path", "/data/condora/submit/dag.txt")
+    row.submit_dir = overrides.get("submit_dir", "/data/condora/submit")
     row.rescue_dag_path = overrides.get("rescue_dag_path", None)
     row.dagman_cluster_id = overrides.get("dagman_cluster_id", "12345")
     row.schedd_name = overrides.get("schedd_name", "schedd.example.com")
@@ -290,7 +290,7 @@ async def test_get_dag_detail(client, repo):
     data = resp.json()
     assert data["id"] == str(dag_id)
     assert data["completed_work_units"] == ["mg_000000"]
-    assert data["submit_dir"] == "/data/wms2/submit"
+    assert data["submit_dir"] == "/data/condora/submit"
     assert data["node_counts"] == {"Processing": 80, "Merge": 10, "Cleanup": 10}
 
 

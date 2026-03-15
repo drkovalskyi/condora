@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockCondorAdapter
-from wms2.core.dag_monitor import DAGMonitor, DAGPollResult, NodeSummary
-from wms2.models.enums import DAGStatus
+from condora.adapters.mock import MockCondorAdapter
+from condora.core.dag_monitor import DAGMonitor, DAGPollResult, NodeSummary
+from condora.models.enums import DAGStatus
 
 
 # ── ClassAd status file helpers ──────────────────────────────────
@@ -365,8 +365,8 @@ class TestHandleDagCompletion:
 class TestLifecycleIntegration:
     async def test_handle_active_calls_poll_dag(self, mock_repo, tmp_path):
         """Lifecycle _handle_active calls dag_monitor.poll_dag when DAG is SUBMITTED."""
-        from wms2.config import Settings
-        from wms2.core.lifecycle_manager import RequestLifecycleManager
+        from condora.config import Settings
+        from condora.core.lifecycle_manager import RequestLifecycleManager
 
         condor = MockCondorAdapter()
         settings = Settings(

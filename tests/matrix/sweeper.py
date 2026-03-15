@@ -12,7 +12,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MATRIX_BASE = "/mnt/shared/work/wms2_matrix"
+MATRIX_BASE = "/mnt/shared/work/condora_matrix"
 PFN_PREFIX = "/mnt/shared"
 
 

@@ -1,9 +1,9 @@
 #!/bin/bash
-# WMS2 development environment setup — run as: sudo bash install.sh
+# Condora development environment setup — run as: sudo bash install.sh
 # RHEL 9
 set -euo pipefail
 
-echo "=== WMS2 Dev Environment Setup ==="
+echo "=== Condora Dev Environment Setup ==="
 
 # ── 1. PostgreSQL (uncomment if not already set up) ─────────────
 # dnf install -y postgresql-server postgresql
@@ -13,12 +13,12 @@ echo "=== WMS2 Dev Environment Setup ==="
 # sed -i 's/^\(host.*all.*all.*127.0.0.1.*\)ident/\1md5/' /var/lib/pgsql/data/pg_hba.conf
 # sed -i 's/^\(host.*all.*all.*::1.*\)ident/\1md5/' /var/lib/pgsql/data/pg_hba.conf
 # systemctl restart postgresql
-# su -c "psql -c \"CREATE USER wms2 WITH PASSWORD 'wms2pass';\"" - postgres
-# su -c "psql -c \"CREATE DATABASE wms2 OWNER wms2;\"" - postgres
-# su -c "psql -c \"CREATE USER wms2test WITH PASSWORD 'wms2test';\"" - postgres
-# su -c "psql -c \"CREATE DATABASE wms2test OWNER wms2test;\"" - postgres
-# su -c "psql -d wms2 -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'" - postgres
-# su -c "psql -d wms2test -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'" - postgres
+# su -c "psql -c \"CREATE USER condora WITH PASSWORD 'condorapass';\"" - postgres
+# su -c "psql -c \"CREATE DATABASE condora OWNER condora;\"" - postgres
+# su -c "psql -c \"CREATE USER condoratest WITH PASSWORD 'condoratest';\"" - postgres
+# su -c "psql -c \"CREATE DATABASE condoratest OWNER condoratest;\"" - postgres
+# su -c "psql -d condora -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'" - postgres
+# su -c "psql -d condoratest -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'" - postgres
 
 # ── 2. HTCondor ─────────────────────────────────────────────────
 echo "--- Setting up HTCondor ---"

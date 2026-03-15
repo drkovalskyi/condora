@@ -1,7 +1,7 @@
 """Tests for merge group planning (fixed job count)."""
 
-from wms2.core.dag_planner import _plan_merge_groups
-from wms2.core.splitters import DAGNodeSpec, InputFile
+from condora.core.dag_planner import _plan_merge_groups
+from condora.core.splitters import DAGNodeSpec, InputFile
 
 
 def _make_node(index, events=10000, size=1_000_000_000):

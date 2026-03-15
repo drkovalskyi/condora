@@ -10,7 +10,7 @@ whether the means are consistent within N sigma (default 3) of the
 expected statistical fluctuation. This is the right comparison for
 physics validation of independent MC samples.
 
-Requires: uproot, numpy (available in WMS2 venv).
+Requires: uproot, numpy (available in Condora venv).
 """
 import sys
 import argparse

@@ -10,7 +10,7 @@ python scripts/fetch-workflow-info.py \
 
 # From a local request.json
 python scripts/fetch-workflow-info.py \
-    --from-file /mnt/shared/work/wms2_real_test/request.json
+    --from-file /mnt/shared/work/condora_real_test/request.json
 ```
 
 ## Quick Reference
@@ -317,7 +317,7 @@ of generated events is RequestNumEvents / FilterEfficiency.
 
 **Quick smoke test**: Use **B2G** — smallest event count (25k), fast per-event, single CMSSW version, completes quickly.
 
-**Full pipeline test**: Use **NPS** — well-characterized, two CMSSW versions, the first workflow tested with WMS2.
+**Full pipeline test**: Use **NPS** — well-characterized, two CMSSW versions, the first workflow tested with Condora.
 
 **High-volume / splitting tests**: Use **GEN-QCD** — 30M events with 0.11 s/event means many fast jobs. Good for testing DAG splitting, work unit management, and monitoring at scale.
 

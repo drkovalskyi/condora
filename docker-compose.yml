@@ -2,15 +2,15 @@ services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_USER: wms2
-      POSTGRES_PASSWORD: wms2pass
-      POSTGRES_DB: wms2
+      POSTGRES_USER: condora
+      POSTGRES_PASSWORD: condorapass
+      POSTGRES_DB: condora
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wms2"]
+      test: ["CMD-SHELL", "pg_isready -U condora"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -22,7 +22,7 @@ services:
       - "9618:9618"   # shared port (collector + schedd)
     volumes:
       - condor-submit:/home/submituser/submit  # shared submit dir
-      - ./condor/config:/etc/condor/config.d/99-wms2.conf:ro
+      - ./condor/config:/etc/condor/config.d/99-condora.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "condor_q >/dev/null 2>&1"]
       interval: 10s
@@ -30,12 +30,12 @@ services:
       retries: 10
       start_period: 30s
 
-  wms2:
+  condora:
     build: .
     ports:
       - "8000:8000"
     environment:
-      WMS2_DATABASE_URL: postgresql+asyncpg://wms2:wms2pass@db:5432/wms2
+      CONDORA_DATABASE_URL: postgresql+asyncpg://condora:condorapass@db:5432/condora
     depends_on:
       db:
         condition: service_healthy

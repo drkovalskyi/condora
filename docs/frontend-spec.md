@@ -1,4 +1,4 @@
-# WMS2 Web Frontend Specification
+# Condora Web Frontend Specification
 
 | Field           | Value                          |
 |-----------------|--------------------------------|
@@ -27,7 +27,7 @@
 
 ### 1.1 Purpose
 
-The WMS2 web frontend provides a browser-based interface for monitoring and managing CMS workflow processing. It replaces the CLI monitoring loop with a persistent, multi-user dashboard and gives operators direct access to all management actions (stop, release, restart, site bans) without requiring shell access.
+The Condora web frontend provides a browser-based interface for monitoring and managing CMS workflow processing. It replaces the CLI monitoring loop with a persistent, multi-user dashboard and gives operators direct access to all management actions (stop, release, restart, site bans) without requiring shell access.
 
 ### 1.2 Goals
 
@@ -63,7 +63,7 @@ The WMS2 web frontend provides a browser-based interface for monitoring and mana
 The frontend is served as static files by the existing FastAPI application. No separate web server needed.
 
 ```
-src/wms2/
+src/condora/
   static/           # JS, CSS, vendor libs
     js/
       app.js         # Main application logic
@@ -145,7 +145,7 @@ Pages are full HTML documents (not SPA fragments). Navigation uses normal `<a>` 
 
 ### 4.1 Authentication: CERN SSO (IAM)
 
-WMS2 integrates with CERN's Keycloak-based IAM (Identity and Access Management) using OpenID Connect (OIDC).
+Condora integrates with CERN's Keycloak-based IAM (Identity and Access Management) using OpenID Connect (OIDC).
 
 **Flow:**
 1. User visits `/ui/` → FastAPI checks for valid session cookie
@@ -172,7 +172,7 @@ WMS2 integrates with CERN's Keycloak-based IAM (Identity and Access Management) 
 - Map CERN e-groups to roles. For example:
   - `cms-comp-ops` → Operator
   - All authenticated users → Viewer
-- Configurable via WMS2 settings (not hardcoded)
+- Configurable via Condora settings (not hardcoded)
 
 **UI behavior:**
 - Viewers see all data but action buttons are hidden or disabled
@@ -203,7 +203,7 @@ When auth is disabled, all requests are treated as Operator role with the dev us
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  WMS2 Dashboard                          [Refresh] [15s ▾]  │
+│  Condora Dashboard                          [Refresh] [15s ▾]  │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐          │
@@ -545,7 +545,7 @@ For the prototype, charts can use point-in-time snapshots (re-fetched on each au
 
 ### 8.1 Existing Endpoints Used
 
-All endpoints listed in the WMS2 API (Section 7 of the main spec) are consumed by the frontend. The frontend JS wraps them in an `api.js` module:
+All endpoints listed in the Condora API (Section 7 of the main spec) are consumed by the frontend. The frontend JS wraps them in an `api.js` module:
 
 ```javascript
 // api.js — thin wrapper around fetch()
@@ -602,7 +602,7 @@ The following new API endpoints are needed to support the frontend:
 
 #### 8.2.1 `POST /api/v1/import`
 
-Import a request from ReqMgr2 (replaces CLI `wms2 import`).
+Import a request from ReqMgr2 (replaces CLI `condora import`).
 
 **Request body:**
 ```json
@@ -777,7 +777,7 @@ After every action:
 
 ### 9.4 Offline/Error States
 
-- If API is unreachable: banner "Cannot connect to WMS2 API" with retry button
+- If API is unreachable: banner "Cannot connect to Condora API" with retry button
 - If individual endpoint fails: component shows "Failed to load" with retry
 - Auto-refresh continues attempting; success clears error state
 
@@ -918,7 +918,7 @@ CREATE TABLE sessions (
 
 ## Appendix B: API Endpoints Not Yet Implemented (Needed for Frontend)
 
-These endpoints are referenced by the frontend but do not yet exist in the WMS2 backend. They must be implemented before the corresponding frontend feature can work.
+These endpoints are referenced by the frontend but do not yet exist in the Condora backend. They must be implemented before the corresponding frontend feature can work.
 
 | Priority | Endpoint                       | Frontend feature          | Section |
 |----------|--------------------------------|---------------------------|---------|

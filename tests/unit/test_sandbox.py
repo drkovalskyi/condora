@@ -6,13 +6,13 @@ import tarfile
 
 import pytest
 
-from wms2.core.sandbox import (
+from condora.core.sandbox import (
     create_sandbox,
     create_sandbox_from_spec,
     _build_manifest,
     _create_test_pset,
 )
-from wms2.core.stepchain import StepChainSpec, StepSpec, parse_stepchain
+from condora.core.stepchain import StepChainSpec, StepSpec, parse_stepchain
 
 
 class TestBuildManifest:

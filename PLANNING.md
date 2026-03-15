@@ -1,11 +1,11 @@
-# WMS2 Planning
+# Condora Planning
 
 <!-- Everything above and including the "---" divider is human-owned; Claude must not edit it.
      Everything below the "---" is Claude-owned; update as work progresses. -->
 
 ## Objectives
 
-We are commissioning WMS2 as a service with real CMSSW requests using
+We are commissioning Condora as a service with real CMSSW requests using
 ReqMgr2 as the configuration source. All processing is
 done in a fully automated mode. We need to test for failures and make
 sure that DAG configuration is optimized after the first pilot round
@@ -43,7 +43,7 @@ partial processing is used.
 
 Build the service that manages requests autonomously:
 
-- Requests are injected into WMS2 DB (via API or import tool)
+- Requests are injected into Condora DB (via API or import tool)
 - Lifecycle manager service runs continuously, discovers active requests,
   polls DAGs, handles round transitions, adaptive optimization
 - CLI becomes a thin client: import + optionally tail logs
@@ -52,7 +52,7 @@ Build the service that manages requests autonomously:
 
 ### Monitoring
 
-Build observability for WMS2:
+Build observability for Condora:
 
 - Dashboard showing active requests, workflow status, round progress
 - Per-workflow metrics: events_produced vs target, current round, job counts
@@ -122,10 +122,10 @@ instances before enabling.
   resubmission doesn't use spool mode.
 - **Chirp-based landing optimization** — eliminate the trivial `/bin/true`
   landing node by making proc_000000 elect the site. proc_000000 starts,
-  immediately calls `condor_chirp set_job_attr WMS2_ElectedSite` with
+  immediately calls `condor_chirp set_job_attr CONDORA_ElectedSite` with
   MATCH_GLIDEIN_CMSSite, then proceeds with real CMSSW processing. Other proc
   nodes have no DAG parent dependency on proc_000000; instead, their PRE scripts
-  poll `condor_q` for proc_000000's WMS2_ElectedSite attribute, rewrite their
+  poll `condor_q` for proc_000000's CONDORA_ElectedSite attribute, rewrite their
   submit files with site pinning, and exit. This saves ~1-2 min of landing
   overhead while proc_000000 does useful work during site election. Current
   `/bin/true` landing adds ~60s — this is a minor optimization for later.
@@ -159,7 +159,7 @@ Three stageout modes, selected at import time (`--stageout-mode`):
 | | local | test | production |
 |---|---|---|---|
 | Stageout | filesystem copy | xrdcp via storage.json | xrdcp via storage.json |
-| LFN prefix | N/A | `/store/temp/user/dmytro.wms2.*` | auto from ReqMgr2 (`/store/mc/...`) |
+| LFN prefix | N/A | `/store/temp/user/dmytro.condora.*` | auto from ReqMgr2 (`/store/mc/...`) |
 | Rucio scope | N/A | `user.dmytro` | `cms` |
 | RSE mapping | N/A | site → `_Temp` (e.g. `T2_CH_CERN_Temp`) | site → as-is (e.g. `T2_CH_CERN`) |
 | DID tier | N/A | `/USER#block` | `/AODSIM#block` |
@@ -171,7 +171,7 @@ Three stageout modes, selected at import time (`--stageout-mode`):
 
 Rucio DID registration and consolidation rule support is implemented as an
 intermediate solution. When `consolidation_rse` is set (per-request via
-`config_data` or globally via `WMS2_CONSOLIDATION_RSE`), the OutputManager:
+`config_data` or globally via `CONDORA_CONSOLIDATION_RSE`), the OutputManager:
 
 1. Registers merged output files as Rucio DIDs at the execution site RSE
 2. Creates a consolidation replication rule to move files to the target RSE
@@ -218,21 +218,21 @@ spec. DBS writes remain disabled.
   import/replan for DRPremix workflows. Pileup works at runtime via CVMFS so
   processing is unaffected, but planning is slow. Root cause: Rucio
   `list_replicas()` for large PREMIX datasets (millions of files) exceeds 60s
-  timeout. Files: `src/wms2/adapters/rucio.py:209`, `src/wms2/core/dag_planner.py:458`.
+  timeout. Files: `src/condora/adapters/rucio.py:209`, `src/condora/core/dag_planner.py:458`.
 - **Consolidation block retry log spam** — Blocks with no files at Rucio-enabled
   sites (e.g. pilot round NANOAODSIM) are retried every lifecycle cycle (30s),
   producing INFO-level log noise. Fix: downgrade to DEBUG.
-  File: `src/wms2/core/output_manager.py:466`.
+  File: `src/condora/core/output_manager.py:466`.
 - **Lifecycle manager lacks per-request INFO logging** — Each cycle only logs
   "N non-terminal request(s)" at INFO level. DAG polling details are DEBUG-only.
   Fix: add one-line per-request progress summary at INFO level.
-  File: `src/wms2/core/lifecycle_manager.py:719`.
+  File: `src/condora/core/lifecycle_manager.py:719`.
 - **~~WU sizing ignores merge disk footprint~~ (FIXED)** — Merge script
   reads proc outputs directly via root:// URLs (cmsRun native XRootD) — no
   download to scratch. Peak scratch ≈ 4 GB (merged output only). Oversized
   files (>= 75% of target) are remote-copied directly (gfal-copy TPC) without
   touching scratch. WU sizing driven purely by target merged file size.
-  File: `src/wms2/core/dag_planner.py`.
+  File: `src/condora/core/dag_planner.py`.
 - **SyntaxWarnings in dag_planner.py** — Invalid escape sequences `\s`, `\d` in
   embedded bash script at line ~1941 and regex at line ~4560. Will become errors
   in future Python versions. Fix: escape backslashes in the Python string.
@@ -241,13 +241,13 @@ spec. DBS writes remain disabled.
   a dict key. The merge itself succeeds (ROOT files uploaded to EOS) but the WU
   is marked failed because the script exits non-zero. Fix: assign
   `num_proc_jobs = len(all_proc_metrics)` before the dict literal.
-  File: `src/wms2/core/dag_planner.py:4749`.
+  File: `src/condora/core/dag_planner.py:4749`.
 - **~~NANOEDMAODSIM1 tier not staged out~~ (FIXED)** — Proc jobs produce
   `NANOEDMAODSIM1` output tier (EDM NanoAOD format), but the stageout tier
   matching regex `(EDM)?(\d+)$` fails to strip `EDM` from `NANOEDMAODSIM1`
   because `EDM` isn't adjacent to the trailing digit. Result: NanoAOD ROOT files
   are silently discarded. Fix: strip `EDM` and trailing digits separately.
-  File: `src/wms2/core/dag_planner.py:2360,4618`.
+  File: `src/condora/core/dag_planner.py:2360,4618`.
 
 - **~~Spool cleanup race loses WU metrics~~ (FIXED)** — `complete_round()`
   reads `work_unit_metrics.json` from disk, but in spool mode the schedd
@@ -267,7 +267,7 @@ spec. DBS writes remain disabled.
 
 ## Technical debt
 
-- **"Workflow" naming confusion** — WMS2 internally uses "workflow" for the
+- **"Workflow" naming confusion** — Condora internally uses "workflow" for the
   execution record of a request (DB table, API endpoints, data model, core
   components). This clashes with ReqMgr2's use of "workflow" for the request
   itself. The web UI now says "Processing Details" but the internal name is
@@ -336,10 +336,10 @@ Active requests:
 - **Service mode**: per-cycle DB sessions, explicit commit/rollback, CLI `--no-monitor`
 - **Multi-round service autonomy**: round 0 → adaptive optimization → round 1 planning
 - **Grid stageout**: xrdcp-based stageout via storage.json LFN→PFN resolution
-  - `WMS2_STAGEOUT_MODE=grid` — proc/merge/cleanup use XRootD (or gfal-copy/WebDAV)
-  - `WMS2_STAGEOUT_MODE=local` (default) — filesystem copy (backward compatible)
+  - `CONDORA_STAGEOUT_MODE=grid` — proc/merge/cleanup use XRootD (or gfal-copy/WebDAV)
+  - `CONDORA_STAGEOUT_MODE=local` (default) — filesystem copy (backward compatible)
   - Supports CMS storage.json formats: prefix, rules, chained rules
-  - Self-contained `wms2_stageout.py` utility transferred to worker nodes
+  - Self-contained `condora_stageout.py` utility transferred to worker nodes
   - Local XRootD server at T2_LOCAL_DEV for integration testing
 - **Global pool**: spool-mode submission, site election, grid merge/cleanup at CERN + FNAL
 
@@ -348,23 +348,23 @@ Active requests:
 Service mode with global pool:
 ```bash
 # Terminal 1: start service
-WMS2_CONDOR_HOST="localhost:9618" \
-  WMS2_EXTRA_COLLECTORS="cmsgwms-collector-global.cern.ch:9620" \
-  WMS2_LIFECYCLE_CYCLE_INTERVAL=30 \
-  WMS2_SPOOL_MOUNT="/mnt/remote_spool" \
-  WMS2_REMOTE_SPOOL_PREFIX="/data/srv/glidecondor/condor_local/spool" \
-  WMS2_REMOTE_SCHEDD="vocms047.cern.ch" \
-  WMS2_SEC_TOKEN_DIRECTORY="/mnt/creds/tokens.d" \
-  uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
+CONDORA_CONDOR_HOST="localhost:9618" \
+  CONDORA_EXTRA_COLLECTORS="cmsgwms-collector-global.cern.ch:9620" \
+  CONDORA_LIFECYCLE_CYCLE_INTERVAL=30 \
+  CONDORA_SPOOL_MOUNT="/mnt/remote_spool" \
+  CONDORA_REMOTE_SPOOL_PREFIX="/data/srv/glidecondor/condor_local/spool" \
+  CONDORA_REMOTE_SCHEDD="vocms047.cern.ch" \
+  CONDORA_SEC_TOKEN_DIRECTORY="/mnt/creds/tokens.d" \
+  uvicorn condora.main:create_app --factory --host 0.0.0.0 --port 8080
 
 # Terminal 2: import request (exits immediately)
-wms2 import <request_name> --sandbox-mode cmssw --test-fraction 0.01 --no-monitor
+condora import <request_name> --sandbox-mode cmssw --test-fraction 0.01 --no-monitor
 ```
 
 Local pool mode:
 ```bash
-WMS2_CONDOR_HOST="localhost:9618" WMS2_LIFECYCLE_CYCLE_INTERVAL=30 \
-  uvicorn wms2.main:create_app --factory --host 0.0.0.0 --port 8080
+CONDORA_CONDOR_HOST="localhost:9618" CONDORA_LIFECYCLE_CYCLE_INTERVAL=30 \
+  uvicorn condora.main:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
 Matrix smoke tests:
@@ -374,7 +374,7 @@ python -m tests.matrix -l smoke
 
 ### Known issues
 
-- NanoAOD Rivet segfault on 0 events (CMSSW_10_6_47 bug, not WMS2)
+- NanoAOD Rivet segfault on 0 events (CMSSW_10_6_47 bug, not Condora)
 - Grid listing via `gfal-ls` on `davs://` returns empty at T1_DE_KIT and
   T1_PL_NCBJ — `proc_node_indices` probe fallback deployed but not yet
   validated at those sites

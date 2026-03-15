@@ -1,0 +1,375 @@
+/**
+ * Alpine workflowDetail — fetches and exposes workflow, blocks, and DAG data.
+ */
+document.addEventListener('alpine:init', () => {
+    Alpine.data('workflowDetail', (workflowId) => ({
+        workflowId: workflowId,
+        workflow: null,
+        request: null,
+        dag: null,
+        allDags: [],
+        outputDatasets: [],
+        loading: true,
+        error: null,
+        selectedMetricsRound: 'all',  // 'all' or round number string
+
+        // Action state
+        actionLoading: false,
+        showStopDialog: false,
+        showFailDialog: false,
+        stopReason: 'Operator-initiated clean stop',
+
+        init() {
+            this.fetchAll();
+            window.addEventListener('condora:refresh', () => this.fetchAll());
+        },
+
+        async fetchAll() {
+            try {
+                this.loading = true;
+                this.error = null;
+                this.workflow = await CONDORA_API.getWorkflow(this.workflowId);
+                this.request = await CONDORA_API.getRequest(this.workflow.request_name).catch(() => null);
+
+                const [dags, ods] = await Promise.all([
+                    CONDORA_API.getWorkflowDags(this.workflowId).catch(() => []),
+                    CONDORA_API.getWorkflowOutputDatasets(this.workflowId).catch(() => []),
+                ]);
+                this.allDags = dags;
+                this.outputDatasets = ods;
+
+                if (this.workflow.dag_id) {
+                    this.dag = await CONDORA_API.getDAG(this.workflow.dag_id).catch(() => null);
+                } else {
+                    this.dag = null;
+                }
+            } catch (e) {
+                this.error = e.message;
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        get progressPct() {
+            if (!this.workflow) return 0;
+            return this.workflow.progress_pct || 0;
+        },
+
+        /** Available round numbers for the metrics dropdown. */
+        get metricsRoundOptions() {
+            const sm = this.workflow?.step_metrics;
+            if (!sm || !sm.rounds) return [];
+            return Object.keys(sm.rounds).sort((a, b) => Number(a) - Number(b));
+        },
+
+        /** Step metrics filtered by selected round. */
+        get stepMetrics() {
+            if (!this.workflow || !this.workflow.step_metrics) return [];
+            const nameFn = (idx) => this.stepName(idx);
+            if (this.selectedMetricsRound === 'all') {
+                return parseStepMetrics(this.workflow.step_metrics, nameFn);
+            }
+            // Parse single round
+            const sm = this.workflow.step_metrics;
+            const rounds = sm.rounds || {};
+            const roundData = rounds[this.selectedMetricsRound];
+            if (!roundData) return [];
+            const fake = { rounds: { [this.selectedMetricsRound]: roundData } };
+            return parseStepMetrics(fake, nameFn);
+        },
+
+        get splittingDisplay() {
+            if (!this.workflow) return {};
+            const params = { ...(this.workflow.splitting_params || {}) };
+            const tf = (this.workflow.config_data || {}).test_fraction;
+            if (tf && tf < 1) {
+                params.test_fraction = tf;
+                // Show effective events per job if events_per_job exists
+                if (params.events_per_job) {
+                    params.effective_events_per_job = Math.round(params.events_per_job * tf);
+                }
+            }
+            return params;
+        },
+
+        get testFraction() {
+            const tf = (this.workflow?.config_data || {}).test_fraction;
+            return (tf && tf < 1) ? tf : null;
+        },
+
+        get configData() {
+            if (!this.workflow) return {};
+            return this.workflow.config_data || {};
+        },
+
+        get isGen() {
+            return !!this.configData._is_gen;
+        },
+
+        get pileupDatasets() {
+            const steps = this.configData.manifest_steps || [];
+            const seen = new Set();
+            const result = [];
+            for (const s of steps) {
+                for (const key of ['mc_pileup', 'data_pileup']) {
+                    const ds = s[key];
+                    if (ds && !seen.has(ds)) {
+                        seen.add(ds);
+                        result.push({ type: key === 'mc_pileup' ? 'MC Pileup' : 'Data Pileup', dataset: ds });
+                    }
+                }
+            }
+            return result;
+        },
+
+        get stepsInfo() {
+            const steps = this.configData.manifest_steps || [];
+            return steps.map((s, i) => ({
+                index: i + 1,
+                name: s.name || `Step ${i + 1}`,
+                cmssw: s.cmssw_version || '—',
+                global_tag: s.global_tag || '—',
+                scram_arch: s.scram_arch || '—',
+            }));
+        },
+
+        /** Map step number (string "1","2",...) to step name from manifest. */
+        stepName(idx) {
+            const steps = this.configData.manifest_steps || [];
+            const i = Number(idx) - 1;
+            if (i >= 0 && i < steps.length && steps[i].name) return steps[i].name;
+            return 'Step ' + idx;
+        },
+
+        /**
+         * Merged round history — combines round performance metrics with
+         * DAG status/dates into a single table.
+         *
+         * Groups DAGs by round number (extracted from dag_file_path).
+         * For rounds with rescue DAGs, shows the latest DAG's status.
+         */
+        get roundHistory() {
+            const sm = this.workflow?.step_metrics;
+            const cd = this.workflow?.config_data || {};
+            const origMem = cd.memory_mb;
+            const origThreads = cd.multicore;
+            const rounds = sm?.rounds || {};
+
+            // Build DAG-by-round index using round_number field (DD-20).
+            // Falls back to creation-order inference for old DAGs without
+            // a round_number field.
+            const dagsByRound = {};
+            const sortedDags = [...this.allDags].sort((a, b) =>
+                (a.created_at || '').localeCompare(b.created_at || ''));
+            const hasRoundNumber = sortedDags.some(d => d.round_number != null && d.round_number > 0);
+            if (hasRoundNumber) {
+                for (const d of sortedDags) {
+                    const rnd = d.round_number || 0;
+                    if (!dagsByRound[rnd]) dagsByRound[rnd] = [];
+                    dagsByRound[rnd].push(d);
+                }
+            } else {
+                // Legacy fallback: infer round from creation order
+                let rnd = 0;
+                for (let i = 0; i < sortedDags.length; i++) {
+                    const d = sortedDags[i];
+                    if (i > 0) {
+                        const prev = sortedDags[i - 1];
+                        if (prev.status === 'completed') {
+                            rnd++;
+                        }
+                    }
+                    if (!dagsByRound[rnd]) dagsByRound[rnd] = [];
+                    dagsByRound[rnd].push(d);
+                }
+            }
+            // Sort each round's DAGs by created_at (latest last)
+            for (const rnd of Object.keys(dagsByRound)) {
+                dagsByRound[rnd].sort((a, b) =>
+                    (a.created_at || '').localeCompare(b.created_at || ''));
+            }
+
+            // Collect all round numbers from both sources
+            const allRounds = new Set();
+            for (const rk of Object.keys(rounds)) allRounds.add(Number(rk));
+            for (const rk of Object.keys(dagsByRound)) allRounds.add(Number(rk));
+            const sortedRounds = [...allRounds].sort((a, b) => b - a);
+
+            const history = [];
+            for (const roundNum of sortedRounds) {
+                const rk = String(roundNum);
+                const rd = rounds[rk];
+                const dags = dagsByRound[roundNum] || [];
+                const latestDag = dags.length > 0 ? dags[dags.length - 1] : null;
+
+                // Resources used for this round
+                let memUsed, threadsUsed;
+                if (rd?.resource_params) {
+                    // Stored at round-completion time — authoritative
+                    memUsed = rd.resource_params.memory_mb;
+                    threadsUsed = rd.resource_params.nthreads;
+                } else if (roundNum === 0) {
+                    memUsed = origMem;
+                    threadsUsed = origThreads;
+                } else {
+                    // Walk backwards to find the adaptive_params that determined
+                    // this round's resources (from the previous round that has them).
+                    let ap = null;
+                    for (let prev = roundNum - 1; prev >= 0; prev--) {
+                        const prevRd = rounds[String(prev)];
+                        if (prevRd?.adaptive_params) { ap = prevRd.adaptive_params; break; }
+                    }
+                    // Fall back to top-level adaptive_params (latest optimization
+                    // result, applies to the next round after the last completed).
+                    if (!ap && sm.adaptive_params) {
+                        ap = sm.adaptive_params;
+                    }
+                    if (ap) {
+                        memUsed = ap.tuned_memory_mb || origMem;
+                        threadsUsed = ap.tuned_nthreads || origThreads;
+                    } else {
+                        memUsed = origMem;
+                        threadsUsed = origThreads;
+                    }
+                }
+
+                // Compute average CPU efficiency and peak memory from wu_metrics
+                let cpuEff = null, peakMem = null, cgroupMem = null;
+                const wuMetrics = rd?.wu_metrics || [];
+                if (wuMetrics.length > 0) {
+                    let cpuSum = 0, cpuWeight = 0, maxMem = 0;
+                    for (const wu of wuMetrics) {
+                        const ps = wu.per_step || {};
+                        for (const [_sn, sd] of Object.entries(ps)) {
+                            const nJobs = sd.num_jobs || 1;
+                            if (sd.cpu_efficiency?.mean != null) {
+                                cpuSum += sd.cpu_efficiency.mean * nJobs;
+                                cpuWeight += nJobs;
+                            }
+                            if (sd.peak_rss_mb?.mean != null && sd.peak_rss_mb.mean > maxMem) {
+                                maxMem = sd.peak_rss_mb.mean;
+                            }
+                        }
+                    }
+                    if (cpuWeight > 0) cpuEff = cpuSum / cpuWeight;
+                    if (maxMem > 0) peakMem = Math.round(maxMem);
+                }
+
+                // Try per-round adaptive_params first, then top-level for the
+                // most recently completed round
+                let roundAp = rd?.adaptive_params;
+                if (!roundAp && sm.adaptive_params && roundNum === (sm.rounds_completed || 0) - 1) {
+                    roundAp = sm.adaptive_params;
+                }
+                const mSummary = roundAp?.metrics_summary;
+
+                // Fall back to metrics_summary for CPU/memory when wu_metrics absent
+                if (cpuEff == null && mSummary?.weighted_cpu_eff != null) {
+                    cpuEff = mSummary.weighted_cpu_eff;
+                }
+                if (peakMem == null && mSummary?.peak_rss_mb != null) {
+                    peakMem = Math.round(mSummary.peak_rss_mb);
+                }
+
+                // Cgroup peak memory — diagnostic
+                cgroupMem = mSummary?.cgroup_peak_mb || null;
+
+                const nodesDone = rd?.nodes_done || latestDag?.nodes_done || 0;
+                const nodesFailed = rd?.nodes_failed || latestDag?.nodes_failed || 0;
+                const nodesTotal = latestDag?.total_nodes || (nodesDone + nodesFailed);
+
+                history.push({
+                    round: roundNum,
+                    status: latestDag?.status || null,
+                    work_units: rd?.work_units || latestDag?.total_work_units || 0,
+                    wus_done: latestDag?.wus_done ?? (latestDag?.status === 'completed' ? (rd?.work_units || latestDag?.total_work_units || 0) : 0),
+                    wus_failed: latestDag?.wus_failed ?? 0,
+                    nodes_total: nodesTotal,
+                    nodes_done: nodesDone,
+                    nodes_failed: nodesFailed,
+                    memory_used: memUsed,
+                    threads_used: threadsUsed,
+                    cpu_eff: cpuEff,
+                    peak_memory: peakMem,
+                    cgroup_memory: cgroupMem,
+                    created_at: latestDag?.created_at || null,
+                    dag_id: latestDag?.id || null,
+                    num_dags: dags.length,
+                });
+            }
+            return history;
+        },
+
+        /** Latest adaptive optimization result summary. */
+        get adaptiveInfo() {
+            const sm = this.workflow?.step_metrics;
+            if (!sm || !sm.adaptive_params) return null;
+            const ap = sm.adaptive_params;
+            const cd = this.workflow.config_data || {};
+            const summary = ap.metrics_summary || {};
+            return {
+                original_memory: cd.memory_mb,
+                tuned_memory: ap.tuned_memory_mb,
+                original_nthreads: cd.multicore,
+                tuned_nthreads: ap.tuned_nthreads,
+                memory_source: ap.memory_source,
+                measured_memory: ap.measured_memory_mb || null,
+                peak_rss: summary.peak_rss_mb ? Math.round(summary.peak_rss_mb) : null,
+                cpu_eff: summary.weighted_cpu_eff,
+                rounds_completed: sm.rounds_completed || 0,
+                per_step: ap.per_step || null,
+            };
+        },
+
+        get reqmgrUrl() {
+            if (!this.workflow) return null;
+            return 'https://cmsweb.cern.ch/reqmgr2/fetch?rid=' + encodeURIComponent(this.workflow.request_name);
+        },
+
+        // Action visibility — based on request status
+        get canStop() {
+            return this.request && ['active', 'pilot_running'].includes(this.request.status);
+        },
+        get canFail() {
+            return this.request && ['held', 'partial', 'paused', 'active', 'pilot_running', 'stopping'].includes(this.request.status);
+        },
+        get hasActions() {
+            return this.canStop || this.canFail;
+        },
+
+        toast(type, message) {
+            window.dispatchEvent(new CustomEvent('condora:toast', {
+                detail: { type, message }
+            }));
+        },
+
+        async doStop() {
+            this.actionLoading = true;
+            try {
+                const result = await CONDORA_API.stopRequest(this.workflow.request_name, this.stopReason);
+                this.toast('success', result.message);
+                this.showStopDialog = false;
+                this.stopReason = 'Operator-initiated clean stop';
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Stop failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
+        async doFail() {
+            this.actionLoading = true;
+            try {
+                const result = await CONDORA_API.failRequest(this.workflow.request_name);
+                this.toast('success', result.message);
+                this.showFailDialog = false;
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Fail failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+    }));
+});

@@ -6,7 +6,7 @@ import textwrap
 
 import pytest
 
-from wms2.core.post_classifier import (
+from condora.core.post_classifier import (
     DATA_CODES,
     INFRASTRUCTURE_CODES,
     MEMORY_CODES,
@@ -163,7 +163,7 @@ class TestGenerateCollectorScript:
     def test_valid_python(self):
         """Generated script should be valid Python (compile without errors)."""
         script = generate_collector_script()
-        compile(script, "wms2_post_collect.py", "exec")
+        compile(script, "condora_post_collect.py", "exec")
 
     def test_contains_classification_tables(self):
         script = generate_collector_script()
@@ -199,7 +199,7 @@ class TestCollectorWritesPostJson:
     def test_collector_writes_json_on_failure(self, tmp_path):
         """Run collector with a mock failed job and check output."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         # Create a minimal FJR XML with exit code 8021 (FileReadError)
@@ -250,7 +250,7 @@ class TestCollectorWritesPostJson:
     def test_collector_success_case(self, tmp_path):
         """Exit code 0 produces success classification."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         import subprocess
@@ -272,7 +272,7 @@ class TestCollectorWritesPostJson:
     def test_collector_transient_not_final_on_first_attempt(self, tmp_path):
         """Transient error on attempt 0 of 3 → final=False."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         import subprocess
@@ -291,7 +291,7 @@ class TestCollectorWritesPostJson:
     def test_collector_transient_final_on_last_attempt(self, tmp_path):
         """Transient error on attempt 3 of 3 → final=True (retries exhausted)."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         import subprocess
@@ -308,7 +308,7 @@ class TestCollectorWritesPostJson:
     def test_collector_8001_site_local_config_is_infrastructure(self, tmp_path):
         """Exit 8001 with site-local-config message → infrastructure in collector."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         # FJR with exit 8001 and site-local-config error message
@@ -339,7 +339,7 @@ class TestCollectorWritesPostJson:
     def test_collector_8001_generic_stays_permanent(self, tmp_path):
         """Exit 8001 with generic message → permanent in collector."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         fjr = tmp_path / "report_step1.xml"
@@ -368,7 +368,7 @@ class TestCollectorWritesPostJson:
     def test_collector_exit_80_zero_event_output(self, tmp_path):
         """Exit 80 (0-event GenFilter output) → permanent in collector."""
         script = generate_collector_script()
-        script_path = tmp_path / "wms2_post_collect.py"
+        script_path = tmp_path / "condora_post_collect.py"
         script_path.write_text(script)
 
         import subprocess

@@ -5,11 +5,11 @@ Creates a sandbox, plans a production DAG with 1 work unit (5 processing
 nodes at 10% of nominal events), submits to HTCondor DAGMan, and polls
 until completion.
 
-Must run as the wms2 Linux user (HTCondor forbids root).
+Must run as the condora Linux user (HTCondor forbids root).
 
 Usage:
-    su - wms2 -c "/mnt/shared/work/wms2/.venv/bin/python \
-        /mnt/shared/work/wms2/scripts/e2e_reduced_test.py"
+    su - condora -c "/mnt/shared/work/condora/.venv/bin/python \
+        /mnt/shared/work/condora/scripts/e2e_reduced_test.py"
 """
 from __future__ import annotations
 
@@ -26,17 +26,17 @@ from unittest.mock import AsyncMock, MagicMock
 # Ensure project is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from wms2.adapters.condor import HTCondorAdapter
-from wms2.config import Settings
-from wms2.core.dag_planner import DAGPlanner, PilotMetrics
-from wms2.core.sandbox import create_sandbox
-from wms2.core.splitters import DAGNodeSpec, InputFile, get_splitter
+from condora.adapters.condor import HTCondorAdapter
+from condora.config import Settings
+from condora.core.dag_planner import DAGPlanner, PilotMetrics
+from condora.core.sandbox import create_sandbox
+from condora.core.splitters import DAGNodeSpec, InputFile, get_splitter
 
 
 # ── Configuration ──────────────────────────────────────────────
 
-TEST_DIR = Path("/mnt/shared/work/wms2_e2e_test")
-CONDOR_HOST = os.environ.get("WMS2_CONDOR_HOST", "localhost:9618")
+TEST_DIR = Path("/mnt/shared/work/condora_e2e_test")
+CONDOR_HOST = os.environ.get("CONDORA_CONDOR_HOST", "localhost:9618")
 POLL_INTERVAL = 5   # seconds between DAGMan polls
 MAX_WAIT = 600      # max seconds to wait for DAG completion
 
@@ -163,7 +163,7 @@ def make_mock_rucio() -> MagicMock:
 async def run_test():
     """Main test sequence."""
     print("=" * 60)
-    print("WMS2 E2E Reduced-Scale Test")
+    print("Condora E2E Reduced-Scale Test")
     print(f"  {NUM_FILES} files × {EVENTS_PER_FILE} events = "
           f"{NUM_FILES * EVENTS_PER_FILE} total events")
     print(f"  {FILES_PER_JOB} file(s)/job → {NUM_FILES} proc nodes → 1 work unit")
@@ -188,15 +188,15 @@ async def run_test():
         print(f"  Connected to schedd")
     except Exception as e:
         print(f"  ERROR: Cannot connect to HTCondor at {CONDOR_HOST}: {e}")
-        print("  Make sure HTCondor is running and WMS2_CONDOR_HOST is set.")
+        print("  Make sure HTCondor is running and CONDORA_CONDOR_HOST is set.")
         return False
 
     settings = Settings(
         database_url="postgresql+asyncpg://test:test@localhost:5432/test",
         submit_base_dir=str(submit_dir),
         jobs_per_work_unit=8,
-        processing_executable="/bin/true",  # triggers wms2_proc.sh
-        merge_executable="/bin/true",       # triggers wms2_merge.py
+        processing_executable="/bin/true",  # triggers condora_proc.sh
+        merge_executable="/bin/true",       # triggers condora_merge.py
         cleanup_executable="/bin/true",
         output_base_dir=str(output_dir),
         max_input_files=NUM_FILES,

@@ -4,14 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import (
+from condora.adapters.mock import (
     MockCondorAdapter,
     MockDBSAdapter,
     MockReqMgrAdapter,
     MockRucioAdapter,
 )
-from wms2.config import Settings
-from wms2.db.repository import Repository
+from condora.config import Settings
+from condora.db.repository import Repository
 
 
 @pytest.fixture

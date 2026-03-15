@@ -1,0 +1,352 @@
+{% extends "base.html" %}
+{% block title %}Condora — Processing {{ workflow_id[:8] }}{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/workflow-detail.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="workflowDetail('{{ workflow_id|e }}')" data-workflow-id="{{ workflow_id|e }}">
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+    <div x-show="loading && !workflow" style="opacity:0.6">Loading...</div>
+
+    <template x-if="workflow">
+        <div>
+            <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                <h1 style="font-size:1.3rem; margin:0;">
+                    Processing Details
+                    <span x-html="statusBadge(workflow.status)" style="margin-left:0.5rem;"></span>
+                </h1>
+                <template x-if="canStop">
+                    <button class="outline" @click="showStopDialog = true" :disabled="actionLoading"
+                            style="font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;">Stop</button>
+                </template>
+                <template x-if="canFail">
+                    <button class="outline" style="--pico-color: #ef4444; --pico-border-color: #ef4444; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showFailDialog = true" :disabled="actionLoading">Fail</button>
+                </template>
+            </div>
+            <p style="opacity:0.7; font-size:0.85rem; word-break:break-all;" x-text="workflow.id"></p>
+
+            <!-- Stop dialog -->
+            <dialog :open="showStopDialog || undefined">
+                <h3>Stop Request</h3>
+                <p>Initiate a clean stop. Running jobs will finish; no new jobs will start.</p>
+                <div class="form-group">
+                    <label for="stop-reason">Reason</label>
+                    <textarea id="stop-reason" x-model="stopReason" rows="2" style="width:100%;"></textarea>
+                </div>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showStopDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button @click="doStop()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Stop</span>
+                        <span x-show="actionLoading">Stopping...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Fail dialog -->
+            <dialog :open="showFailDialog || undefined">
+                <h3>Fail Request</h3>
+                <p>This will kill the running DAG and mark the request as failed. This cannot be undone.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showFailDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #ef4444; --pico-border-color: #ef4444;"
+                            @click="doFail()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Fail</span>
+                        <span x-show="actionLoading">Failing...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <template x-if="testFraction">
+                <div class="banner-warning" style="background:#fef08a; border:2px solid #eab308; border-radius:4px; padding:0.5rem 0.75rem; margin-bottom:1rem; font-size:0.9rem; color:#713f12;">
+                    <strong>TEST MODE</strong> — test_fraction=<span x-text="testFraction"></span>,
+                    each job processes <span x-text="(testFraction * 100).toFixed(0)"></span>% of nominal events
+                </div>
+            </template>
+
+            <!-- Progress -->
+            <div class="section">
+                <h3>Events Progress</h3>
+                <dl class="detail-grid">
+                    <dt>Events Produced</dt>
+                    <dd>
+                        <span x-text="fmtNum(workflow.events_produced)"></span>
+                        / <span x-text="fmtNum(workflow.target_events)"></span>
+                    </dd>
+                    <template x-if="!isGen">
+                        <div style="display:contents;">
+                            <dt>Files Processed</dt>
+                            <dd>
+                                <span x-text="fmtNum(workflow.files_processed)"></span>
+                                / <span x-text="fmtNum(workflow.total_input_files)"></span>
+                            </dd>
+                        </div>
+                    </template>
+                    <dt>Progress</dt>
+                    <dd x-text="fmtPct(progressPct)"></dd>
+                </dl>
+                <div class="progress-bar" style="max-width:500px;">
+                    <div class="fill" :style="'width:' + Math.min(100, progressPct) + '%'"></div>
+                </div>
+                <template x-if="dag && dag.total_work_units > 0">
+                    <div style="font-size:0.85rem; margin-top:0.25rem;">
+                        Work Units: <span x-text="fmtNum(dag.total_work_units)"></span> total,
+                        <strong x-text="fmtNum(dag.wus_done)"></strong> done,
+                        <span x-text="fmtNum(dag.wus_failed)"></span> failed
+                    </div>
+                </template>
+                <div style="font-size:0.85rem; opacity:0.7; margin-top:0.25rem;">
+                    Nodes: <span x-text="fmtNum(workflow.nodes_done)"></span> done,
+                    <span x-text="fmtNum(workflow.nodes_running)"></span> running,
+                    <span x-text="fmtNum(workflow.nodes_queued)"></span> queued,
+                    <span x-text="fmtNum(workflow.nodes_failed)"></span> failed
+                </div>
+            </div>
+
+            <!-- Round History (merged performance + DAG status) -->
+            <template x-if="roundHistory.length > 0">
+                <div class="section">
+                    <h3>Round History</h3>
+                    <div style="overflow-x:auto;">
+                    <table style="font-size:0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>Round</th>
+                                <th>Status</th>
+                                <th>WUs Total/Done/Failed</th>
+                                <th>Nodes Total/Done/Failed</th>
+                                <th>Memory (MB)</th>
+                                <th>Threads</th>
+                                <th>Avg CPU Eff</th>
+                                <th>FJR RSS (MB)</th>
+                                <th>Cgroup (MB)</th>
+                                <th>Started</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="r in roundHistory" :key="r.round">
+                                <tr>
+                                    <td>
+                                        <a href="#" @click.prevent="selectedMetricsRound = String(r.round)"
+                                           x-text="r.round" title="Click to filter detailed metrics"></a>
+                                    </td>
+                                    <td>
+                                        <span x-html="r.status ? statusBadge(r.status) : '—'"></span>
+                                        <template x-if="r.num_dags > 1">
+                                            <span style="opacity:0.5; font-size:0.75rem; margin-left:0.2rem;"
+                                                  x-text="'(' + r.num_dags + ' DAGs)'"
+                                                  title="Multiple DAGs due to rescue resubmission"></span>
+                                        </template>
+                                    </td>
+                                    <td x-text="r.work_units + '/' + r.wus_done + '/' + r.wus_failed"></td>
+                                    <td x-text="r.nodes_total + '/' + r.nodes_done + '/' + r.nodes_failed"></td>
+                                    <td x-text="fmtNum(r.memory_used)"></td>
+                                    <td x-text="r.threads_used"></td>
+                                    <td x-text="r.cpu_eff != null ? fmtPct(r.cpu_eff * 100) : '—'"></td>
+                                    <td x-text="r.peak_memory ? fmtNum(r.peak_memory) : '—'"></td>
+                                    <td x-text="r.cgroup_memory ? fmtNum(r.cgroup_memory) : '—'"></td>
+                                    <td x-text="r.created_at ? fmtDateTime(r.created_at) : '—'"></td>
+                                    <td>
+                                        <template x-if="r.dag_id">
+                                            <a :href="'/ui/dags/' + encodeURIComponent(r.dag_id)">DAG &rarr;</a>
+                                        </template>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Detailed Performance Information (per-step metrics with round selector) -->
+            <template x-if="stepMetrics.length > 0 || metricsRoundOptions.length > 0">
+                <div class="section">
+                    <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.5rem;">
+                        <h3 style="margin:0;">Detailed Performance Information</h3>
+                        <template x-if="metricsRoundOptions.length > 1">
+                            <select x-model="selectedMetricsRound"
+                                    style="font-size:0.85rem; padding:0.15rem 0.4rem; border-radius:3px; border:1px solid var(--pico-muted-border-color);">
+                                <option value="all">All Rounds</option>
+                                <template x-for="rk in metricsRoundOptions" :key="rk">
+                                    <option :value="rk" x-text="'Round ' + rk"></option>
+                                </template>
+                            </select>
+                        </template>
+                    </div>
+                    <template x-if="stepMetrics.length > 0">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Step</th>
+                                    <th>Avg CPU Eff</th>
+                                    <th>Avg Memory (MB)</th>
+                                    <th>Avg Time/Event (s)</th>
+                                    <th>Avg Throughput (ev/s)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="m in stepMetrics" :key="m.step">
+                                    <tr>
+                                        <td x-text="m.step"></td>
+                                        <td x-text="m.avg_cpu_efficiency != null ? fmtPct(m.avg_cpu_efficiency) : '—'"></td>
+                                        <td x-text="m.avg_peak_rss != null ? fmtNum(Math.round(m.avg_peak_rss)) : '—'"></td>
+                                        <td x-text="m.avg_time_per_event != null ? Number(m.avg_time_per_event).toFixed(2) : '—'"></td>
+                                        <td x-text="m.avg_throughput != null ? Number(m.avg_throughput).toFixed(1) : '—'"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                    <template x-if="stepMetrics.length === 0">
+                        <p style="opacity:0.6; font-size:0.85rem;">No metrics for this round.</p>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Splitting params -->
+            <template x-if="Object.keys(splittingDisplay).length > 0">
+                <div class="section">
+                    <h3>Splitting Parameters</h3>
+                    <dl class="detail-grid">
+                        <template x-for="[key, val] in Object.entries(splittingDisplay)" :key="key">
+                            <div>
+                                <dt x-text="key"></dt>
+                                <dd>
+                                    <template x-if="key === 'effective_events_per_job'">
+                                        <span><strong x-text="val"></strong> <span style="opacity:0.6">(nominal &times; test_fraction)</span></span>
+                                    </template>
+                                    <template x-if="key !== 'effective_events_per_job'">
+                                        <span x-text="val"></span>
+                                    </template>
+                                </dd>
+                            </div>
+                        </template>
+                    </dl>
+                </div>
+            </template>
+
+            <!-- Adaptive optimization — current result summary -->
+            <template x-if="adaptiveInfo">
+                <div class="section">
+                    <h3>Adaptive Optimization</h3>
+                    <dl class="detail-grid">
+                        <dt>Request Memory</dt>
+                        <dd><span x-text="fmtNum(adaptiveInfo.original_memory)"></span> MB</dd>
+                        <dt>Measured Memory</dt>
+                        <dd>
+                            <template x-if="adaptiveInfo.measured_memory">
+                                <span>
+                                    <span x-text="fmtNum(adaptiveInfo.measured_memory)"></span> MB
+                                    <span style="opacity:0.6; margin-left:0.25rem;"
+                                          x-text="'(' + (adaptiveInfo.memory_source || '—') + ')'"></span>
+                                </span>
+                            </template>
+                            <template x-if="!adaptiveInfo.measured_memory">
+                                <span x-text="adaptiveInfo.peak_rss ? fmtNum(adaptiveInfo.peak_rss) + ' MB (FJR RSS)' : '—'"></span>
+                            </template>
+                        </dd>
+                        <dt>Tuned Memory</dt>
+                        <dd>
+                            <strong x-text="fmtNum(adaptiveInfo.tuned_memory)"></strong> MB
+                            <template x-if="adaptiveInfo.original_memory && adaptiveInfo.tuned_memory">
+                                <span style="margin-left:0.25rem;"
+                                      :style="adaptiveInfo.tuned_memory < adaptiveInfo.original_memory ? 'color:#16a34a' : 'color:#dc2626'"
+                                      x-text="'(' + (adaptiveInfo.tuned_memory < adaptiveInfo.original_memory ? '' : '+') + (((adaptiveInfo.tuned_memory - adaptiveInfo.original_memory) / adaptiveInfo.original_memory) * 100).toFixed(0) + '%)'"></span>
+                            </template>
+                        </dd>
+                        <dt>Request Threads</dt>
+                        <dd x-text="adaptiveInfo.original_nthreads"></dd>
+                        <dt>Tuned Threads</dt>
+                        <dd>
+                            <strong x-text="adaptiveInfo.tuned_nthreads"></strong>
+                            <template x-if="adaptiveInfo.original_nthreads !== adaptiveInfo.tuned_nthreads">
+                                <span style="margin-left:0.25rem;" x-text="'(' + (adaptiveInfo.tuned_nthreads - adaptiveInfo.original_nthreads) + ')'"></span>
+                            </template>
+                        </dd>
+                        <template x-if="adaptiveInfo.cpu_eff != null">
+                            <div style="display:contents;">
+                                <dt>Weighted CPU Eff</dt>
+                                <dd x-text="fmtPct(adaptiveInfo.cpu_eff * 100)"></dd>
+                            </div>
+                        </template>
+                    </dl>
+
+                    <!-- Per-step adaptive detail -->
+                    <template x-if="adaptiveInfo.per_step">
+                        <div style="margin-top:0.75rem;">
+                            <h4 style="font-size:0.9rem; margin-bottom:0.25rem;">Per-Step Tuning</h4>
+                            <table style="font-size:0.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th>Step</th>
+                                        <th>CPU Eff</th>
+                                        <th>Eff Cores</th>
+                                        <th>Tuned Threads</th>
+                                        <th>Parallel</th>
+                                        <th>Overcommit</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template x-for="[sn, sd] in Object.entries(adaptiveInfo.per_step).sort((a,b) => Number(a[0]) - Number(b[0]))" :key="sn">
+                                        <tr>
+                                            <td x-text="stepName(sn)"></td>
+                                            <td x-text="sd.cpu_eff != null ? fmtPct(sd.cpu_eff * 100) : '—'"></td>
+                                            <td x-text="sd.effective_cores != null ? sd.effective_cores.toFixed(1) : '—'"></td>
+                                            <td x-text="sd.tuned_nthreads || '—'"></td>
+                                            <td x-text="sd.n_parallel || 1"></td>
+                                            <td x-text="sd.overcommit_applied ? 'yes' : 'no'"></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </template>
+                </div>
+            </template>
+
+            <!-- Processing Info -->
+            <div class="section">
+                <h3>Processing Info</h3>
+                <dl class="detail-grid">
+                    <dt>Request</dt>
+                    <dd>
+                        <a :href="reqmgrUrl" target="_blank" rel="noopener"
+                           x-text="workflow.request_name" style="word-break:break-all;"
+                           title="Open in ReqMgr2"></a>
+                        <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)"
+                           style="margin-left:0.5rem; font-size:0.8rem;">(Condora)</a>
+                    </dd>
+                    <dt>Type</dt>
+                    <dd x-text="configData.request_type || '—'"></dd>
+                    <template x-if="!isGen">
+                        <div style="display:contents;">
+                            <dt>Input Dataset</dt>
+                            <dd :title="workflow.input_dataset" x-text="fmtMidTruncate(workflow.input_dataset, 100)"></dd>
+                        </div>
+                    </template>
+                    <template x-for="pu in pileupDatasets" :key="pu.dataset">
+                        <div style="display:contents;">
+                            <dt x-text="pu.type"></dt>
+                            <dd :title="pu.dataset" x-text="fmtMidTruncate(pu.dataset, 100)"></dd>
+                        </div>
+                    </template>
+                    <dt>Splitting Algorithm</dt>
+                    <dd x-text="workflow.splitting_algo || '—'"></dd>
+                    <dt>Created</dt>
+                    <dd x-text="fmtDateTime(workflow.created_at)"></dd>
+                    <dt>Updated</dt>
+                    <dd x-text="fmtDateTime(workflow.updated_at)"></dd>
+                </dl>
+            </div>
+
+            <!-- Back links -->
+            <p>
+                <a :href="'/ui/requests/' + encodeURIComponent(workflow.request_name)">&larr; Back to request</a>
+            </p>
+        </div>
+    </template>
+</div>
+{% endblock %}

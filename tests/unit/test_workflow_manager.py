@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockReqMgrAdapter
-from wms2.core.workflow_manager import WorkflowManager
+from condora.adapters.mock import MockReqMgrAdapter
+from condora.core.workflow_manager import WorkflowManager
 
 
 @pytest.fixture

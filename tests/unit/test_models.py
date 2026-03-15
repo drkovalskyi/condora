@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from wms2.models.enums import CleanupPolicy, SplittingAlgo
-from wms2.models.request import ProductionStep, RequestCreate
+from condora.models.enums import CleanupPolicy, SplittingAlgo
+from condora.models.request import ProductionStep, RequestCreate
 
 
 def _valid_request(**overrides):
@@ -100,7 +100,7 @@ def test_workflow_round_tracking_defaults():
     from datetime import datetime, timezone
     from uuid import uuid4
 
-    from wms2.models.workflow import Workflow
+    from condora.models.workflow import Workflow
 
     now = datetime.now(timezone.utc)
     wf = Workflow(

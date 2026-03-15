@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
-from wms2.config import Settings
-from wms2.core.dag_planner import DAGPlanner
+from condora.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
+from condora.config import Settings
+from condora.core.dag_planner import DAGPlanner
 
 
 def _make_settings(tmp_path, **overrides):

@@ -6,7 +6,7 @@ request N cores but only use 1.
 
 Must run on a host where:
 - HTCondor is running with available slots
-- The 'wms2' user can submit jobs (root cannot submit directly)
+- The 'condora' user can submit jobs (root cannot submit directly)
 """
 
 import os
@@ -20,7 +20,7 @@ import pytest
 
 pytestmark = [pytest.mark.level2]
 
-SUBMIT_USER = "wms2"
+SUBMIT_USER = "condora"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,7 +67,7 @@ def _run_as(user, cmd, cwd=None, timeout=30):
 
 
 def _submit_dag(dag_path: Path):
-    """Submit a DAG file as wms2 user. Returns DAGMan cluster ID."""
+    """Submit a DAG file as condora user. Returns DAGMan cluster ID."""
     r = _run_as(
         SUBMIT_USER,
         f"condor_submit_dag {dag_path}",
@@ -88,7 +88,7 @@ def _submit_dag(dag_path: Path):
 
 
 def _submit_job(sub_path: Path):
-    """Submit a job file as wms2 user. Returns cluster ID."""
+    """Submit a job file as condora user. Returns cluster ID."""
     r = _run_as(
         SUBMIT_USER,
         f"condor_submit {sub_path}",
@@ -192,7 +192,7 @@ def _setup_work_dir(base_tmp: Path):
     pytest tmp_path is under /tmp/pytest-of-root/ which other users can't
     traverse. Use /tmp directly and chown to SUBMIT_USER.
     """
-    d = Path(f"/tmp/wms2_burn_{uuid.uuid4().hex[:8]}")
+    d = Path(f"/tmp/condora_burn_{uuid.uuid4().hex[:8]}")
     d.mkdir()
     import pwd
     pw = pwd.getpwnam(SUBMIT_USER)

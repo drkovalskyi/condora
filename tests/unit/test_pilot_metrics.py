@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from wms2.core.dag_planner import PilotMetrics
+from condora.core.dag_planner import PilotMetrics
 
 
 class TestPilotMetrics:
@@ -81,7 +81,7 @@ class TestPilotMetrics:
         with open(path, "w") as f:
             json.dump(data, f)
 
-        from wms2.core.dag_planner import DAGPlanner
+        from condora.core.dag_planner import DAGPlanner
 
         # Use _parse_pilot_report directly (it's a regular method)
         planner = DAGPlanner.__new__(DAGPlanner)

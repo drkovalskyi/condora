@@ -1,4 +1,4 @@
-# WMS2 dev overrides for HTCondor mini container
+# Condora dev overrides for HTCondor mini container
 # Fast negotiation for testing
 NEGOTIATOR_INTERVAL = 10
 NEGOTIATOR_CYCLE_DELAY = 5

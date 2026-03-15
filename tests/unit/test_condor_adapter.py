@@ -21,7 +21,7 @@ def mock_htcondor2():
 @pytest.fixture
 def adapter(mock_htcondor2):
     with patch.dict("sys.modules", {"htcondor2": mock_htcondor2}):
-        from wms2.adapters.condor import HTCondorAdapter
+        from condora.adapters.condor import HTCondorAdapter
 
         adapter = HTCondorAdapter("localhost:9618")
     adapter._mock = mock_htcondor2

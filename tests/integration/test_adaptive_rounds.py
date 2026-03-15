@@ -1,7 +1,7 @@
 """Multi-round adaptive execution integration test.
 
-Wires all WMS2 production components together with mock external services:
-- Real PostgreSQL (wms2test database)
+Wires all Condora production components together with mock external services:
+- Real PostgreSQL (condoratest database)
 - Real HTCondor (local pool)
 - Mock DBS/Rucio adapters (call tracking)
 - Mock ReqMgr adapter (returns configured request spec)
@@ -30,19 +30,19 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from wms2.adapters.condor import HTCondorAdapter
-from wms2.adapters.mock import MockDBSAdapter, MockReqMgrAdapter, MockRucioAdapter
-from wms2.config import Settings
-from wms2.core.dag_monitor import DAGMonitor
-from wms2.core.dag_planner import DAGPlanner
-from wms2.core.lifecycle_manager import RequestLifecycleManager
-from wms2.core.output_manager import OutputManager
-from wms2.core.sandbox import create_sandbox
-from wms2.core.workflow_manager import WorkflowManager
-from wms2.db.base import Base
-from wms2.db.engine import create_session_factory
-from wms2.db.repository import Repository
-from wms2.db.tables import (  # noqa: F401
+from condora.adapters.condor import HTCondorAdapter
+from condora.adapters.mock import MockDBSAdapter, MockReqMgrAdapter, MockRucioAdapter
+from condora.config import Settings
+from condora.core.dag_monitor import DAGMonitor
+from condora.core.dag_planner import DAGPlanner
+from condora.core.lifecycle_manager import RequestLifecycleManager
+from condora.core.output_manager import OutputManager
+from condora.core.sandbox import create_sandbox
+from condora.core.workflow_manager import WorkflowManager
+from condora.db.base import Base
+from condora.db.engine import create_session_factory
+from condora.db.repository import Repository
+from condora.db.tables import (  # noqa: F401
     DAGHistoryRow,
     DAGRow,
     ProcessingBlockRow,
@@ -53,8 +53,8 @@ from wms2.db.tables import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-TEST_DB_URL = "postgresql+asyncpg://wms2test:wms2test@localhost:5432/wms2test"
-CONDOR_HOST = os.environ.get("WMS2_CONDOR_HOST", "localhost:9618")
+TEST_DB_URL = "postgresql+asyncpg://condoratest:condoratest@localhost:5432/condoratest"
+CONDOR_HOST = os.environ.get("CONDORA_CONDOR_HOST", "localhost:9618")
 POLL_INTERVAL = 5
 MAX_TIMEOUT = 300  # 5 minutes — each round needs ~90s for DAGMan lifecycle
 
@@ -99,7 +99,7 @@ class AdaptiveRoundsTest:
     """
 
     def __init__(self, *, work_dir: Path | None = None):
-        self._work_dir = work_dir or Path("/mnt/shared/work/wms2_matrix/adaptive_rounds")
+        self._work_dir = work_dir or Path("/mnt/shared/work/condora_matrix/adaptive_rounds")
         self._engine = None
         self._session_factory = None
         self._session = None
@@ -369,7 +369,7 @@ async def main():
     )
 
     print("=" * 60)
-    print("WMS2 Multi-Round Adaptive Execution Integration Test")
+    print("Condora Multi-Round Adaptive Execution Integration Test")
     print("=" * 60)
 
     test = AdaptiveRoundsTest()

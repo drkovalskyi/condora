@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
-from wms2.config import Settings
-from wms2.core.dag_planner import DAGPlanner
+from condora.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
+from condora.config import Settings
+from condora.core.dag_planner import DAGPlanner
 
 
 def _make_workflow(workflow_id=None):
@@ -102,10 +102,10 @@ class TestDAGPlannerEndToEnd:
         pilot_dir = Path(tmp_path / str(wf.id) / "pilot")
         assert (pilot_dir / "pilot.sub").exists()
         content = (pilot_dir / "pilot.sub").read_text()
-        assert "wms2_pilot.py" in content
+        assert "condora_pilot.py" in content
         assert "pilot_metrics.json" in content
         assert "--initial-events" in content
         assert "--timeout" in content
 
         # Verify pilot script was generated
-        assert (pilot_dir / "wms2_pilot.py").exists()
+        assert (pilot_dir / "condora_pilot.py").exists()

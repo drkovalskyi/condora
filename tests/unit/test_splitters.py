@@ -2,7 +2,7 @@
 
 import pytest
 
-from wms2.core.splitters import (
+from condora.core.splitters import (
     EventBasedSplitter,
     FileBasedSplitter,
     InputFile,

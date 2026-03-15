@@ -3,12 +3,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from wms2.config import Settings
-from wms2.db.base import Base
-from wms2.db.engine import create_engine, create_session_factory
-from wms2.main import create_app
+from condora.config import Settings
+from condora.db.base import Base
+from condora.db.engine import create_engine, create_session_factory
+from condora.main import create_app
 
-TEST_DB_URL = "postgresql+asyncpg://wms2test:wms2test@localhost:5432/wms2test"
+TEST_DB_URL = "postgresql+asyncpg://condoratest:condoratest@localhost:5432/condoratest"
 
 
 @pytest.fixture
@@ -134,7 +134,7 @@ async def test_status_endpoint(api_client):
 
 async def test_stop_active_request(api_app, api_client):
     """POST stop on active request returns correct response."""
-    from wms2.db.repository import Repository
+    from condora.db.repository import Repository
 
     # Create request
     await api_client.post("/api/v1/requests", json=_valid_request_body())

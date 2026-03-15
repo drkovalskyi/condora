@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Condora — Requests{% endblock %}
+{% block head_scripts %}
+<script src="/static/js/components/request-table.js"></script>
+{% endblock %}
+{% block content %}
+<div x-data="requestTable">
+    <h1>Requests</h1>
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+
+    <!-- Filters -->
+    <div class="filter-bar">
+        <div>
+            <label for="status-filter">Status</label>
+            <select id="status-filter" x-model="filterStatus" @change="applyStatusFilter()">
+                <option value="">All</option>
+                <option value="new">new</option>
+                <option value="submitted">submitted</option>
+                <option value="queued">queued</option>
+                <option value="pilot_running">pilot_running</option>
+                <option value="planning">planning</option>
+                <option value="active">active</option>
+                <option value="stopping">stopping</option>
+                <option value="resubmitting">resubmitting</option>
+                <option value="held">held</option>
+                <option value="completed">completed</option>
+                <option value="partial">partial</option>
+                <option value="failed">failed</option>
+                <option value="aborted">aborted</option>
+            </select>
+        </div>
+        <div>
+            <label for="campaign-filter">Search</label>
+            <input id="campaign-filter" type="text" x-model="filterCampaign"
+                   placeholder="Filter by name or pool..." style="min-width:250px;">
+        </div>
+    </div>
+
+    <div x-show="loading" style="opacity:0.6">Loading...</div>
+
+    <table x-show="!loading">
+        <thead>
+            <tr>
+                <th class="sortable" @click="sort('request_name')">
+                    Name<span x-text="sortIcon('request_name')"></span>
+                </th>
+                <th class="sortable" @click="sort('status')">
+                    Status<span x-text="sortIcon('status')"></span>
+                </th>
+                <th class="sortable" @click="sort('pool')">
+                    Pool<span x-text="sortIcon('pool')"></span>
+                </th>
+                <th>Progress</th>
+                <th>Job Priority</th>
+                <th class="sortable" @click="sort('created_at')">
+                    Age<span x-text="sortIcon('created_at')"></span>
+                </th>
+                <th class="sortable" @click="sort('updated_at')">
+                    Updated<span x-text="sortIcon('updated_at')"></span>
+                </th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-for="r in filtered" :key="r.request_name">
+                <tr>
+                    <td class="truncate">
+                        <a :href="'/ui/requests/' + encodeURIComponent(r.request_name)"
+                           x-text="r.request_name"></a>
+                    </td>
+                    <td x-html="statusBadge(r.status)"></td>
+                    <td x-text="r.pool || '—'"></td>
+                    <td style="min-width:140px;">
+                        <template x-if="r._progress != null">
+                            <div>
+                                <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:2px;">
+                                    <span x-text="fmtNum(r._events_produced) + ' / ' + fmtNum(r._target_events)"></span>
+                                    <span x-text="fmtPct(r._progress)"></span>
+                                </div>
+                                <div class="progress-bar" style="height:6px;">
+                                    <div class="fill" :style="'width:' + Math.min(100, r._progress) + '%'"></div>
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="r._progress == null">
+                            <span style="opacity:0.4;">—</span>
+                        </template>
+                    </td>
+                    <td x-text="(r.request_data && r.request_data._current_job_priority != null) ? r.request_data._current_job_priority : '—'"></td>
+                    <td x-text="fmtAge(r.created_at)"></td>
+                    <td x-text="fmtAge(r.updated_at)"></td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
+
+    <p x-show="!loading && filtered.length === 0" style="opacity:0.6">No requests match filters.</p>
+    <p x-show="!loading" style="font-size:0.85rem; opacity:0.6">
+        Showing <span x-text="filtered.length"></span> requests
+    </p>
+</div>
+{% endblock %}

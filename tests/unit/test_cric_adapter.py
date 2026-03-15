@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from wms2.adapters.cric import CRICClient, _map_cric_site
+from condora.adapters.cric import CRICClient, _map_cric_site
 
 # Sample CRIC response: dict keyed by site name
 SAMPLE_CRIC_RESPONSE = {

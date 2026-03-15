@@ -17,4 +17,4 @@ COPY alembic.ini .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "wms2.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "condora.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

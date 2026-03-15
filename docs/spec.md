@@ -1,4 +1,4 @@
-# WMS2 — CMS Workload Management System v2
+# Condora — CMS Workload Management System v2
 
 **OpenSpec v1.0**
 
@@ -16,9 +16,9 @@
 
 ### 1.1 Purpose
 
-WMS2 is a modern, maintainable Workload Management system designed to replace WMCore. It leverages existing ReqMgr2 schemas and workflows while simplifying the architecture, improving observability, and enabling faster development cycles.
+Condora is a modern, maintainable Workload Management system designed to replace WMCore. It leverages existing ReqMgr2 schemas and workflows while simplifying the architecture, improving observability, and enabling faster development cycles.
 
-A key architectural decision is the delegation of all job-level execution orchestration to **HTCondor DAGMan**, eliminating the need for WMS2 to track, retry, or manage individual job lifecycles. WMS2 is a thin orchestration layer; HTCondor is the engine.
+A key architectural decision is the delegation of all job-level execution orchestration to **HTCondor DAGMan**, eliminating the need for Condora to track, retry, or manage individual job lifecycles. Condora is a thin orchestration layer; HTCondor is the engine.
 
 ### 1.2 Core Goals
 
@@ -28,18 +28,18 @@ A key architectural decision is the delegation of all job-level execution orches
 - **Maintainability**: Clean codebase with clear separation of concerns.
 - **Observability**: First-class monitoring, logging, and debugging capabilities.
 - **Delegation**: Let HTCondor DAGMan own job-level orchestration (submission, retry, dependency management).
-- **Payload Agnosticism**: WMS2 is agnostic to what runs on the worker node. Whether a job runs one CMSSW step or five (StepChain), the DAG structure is identical. The worker-node payload is an opaque unit managed by the sandbox/wrapper.
+- **Payload Agnosticism**: Condora is agnostic to what runs on the worker node. Whether a job runs one CMSSW step or five (StepChain), the DAG structure is identical. The worker-node payload is an opaque unit managed by the sandbox/wrapper.
 
 ### 1.3 Design Philosophy
 
-WMS2 delegates all job-level concerns to HTCondor. Where HTCondor lacks needed capabilities, the resolution path is collaboration with the HTCondor team, not workarounds in WMS2. This ensures that improvements benefit the entire HTCondor community rather than being confined to CMS.
+Condora delegates all job-level concerns to HTCondor. Where HTCondor lacks needed capabilities, the resolution path is collaboration with the HTCondor team, not workarounds in Condora. This ensures that improvements benefit the entire HTCondor community rather than being confined to CMS.
 
 ### 1.4 Non-Goals (MVP Phase)
 
 - Full feature parity with WMCore (incremental migration).
 - Monte Carlo generation workflows (focus on data processing first).
 - Full Rucio integration (DBS dataset creation → block management → tape archival). Intermediate Rucio support (DID registration, consolidation rules) is implemented — see §4.5.1 and §4.7.
-- Per-job tracking or state management in WMS2 (delegated to DAGMan).
+- Per-job tracking or state management in Condora (delegated to DAGMan).
 - Accounting and resource usage reporting (handled by existing external systems).
 
 ---
@@ -63,14 +63,14 @@ CouchDB    CouchDB/MySQL    MySQL/Oracle
 
 **Problems**: Complex multi-tier architecture; multiple databases with sync issues; 15+ agent components running as threads; Python 2 legacy code mixed with Python 3; difficult to debug and maintain; CouchDB scaling limitations.
 
-### 2.2 WMS2 Architecture
+### 2.2 Condora Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          WMS2 Architecture                          │
+│                          Condora Architecture                          │
 │                                                                     │
 │   ┌─────────────────────────────────────────────────────────────┐   │
-│   │                     WMS2 API (FastAPI)                       │   │
+│   │                     Condora API (FastAPI)                       │   │
 │   │  /requests  /workflows  /dags  /sites  /monitoring          │   │
 │   └──────────────────────────┬──────────────────────────────────┘   │
 │                              │                                      │
@@ -122,14 +122,14 @@ CouchDB    CouchDB/MySQL    MySQL/Oracle
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key architectural principle**: WMS2 operates at the *workflow* and *DAG* level. The **Request Lifecycle Manager** is the single owner of every request's state machine — it runs a continuous loop over all non-terminal requests, evaluates each one, and dispatches work to the appropriate component worker (Admission Controller, DAG Planner, DAG Monitor, Output Manager). This replaces distributed independent polling loops per component, eliminating the risk of requests silently stalling when any single loop hiccups. Once a DAG is submitted to HTCondor DAGMan, HTCondor owns the individual job lifecycle — submission, retry, hold/release, and dependency resolution. WMS2 monitors DAG-level progress and intervenes only at the workflow level (abort, priority changes, clean stop, catastrophic recovery).
+**Key architectural principle**: Condora operates at the *workflow* and *DAG* level. The **Request Lifecycle Manager** is the single owner of every request's state machine — it runs a continuous loop over all non-terminal requests, evaluates each one, and dispatches work to the appropriate component worker (Admission Controller, DAG Planner, DAG Monitor, Output Manager). This replaces distributed independent polling loops per component, eliminating the risk of requests silently stalling when any single loop hiccups. Once a DAG is submitted to HTCondor DAGMan, HTCondor owns the individual job lifecycle — submission, retry, hold/release, and dependency resolution. Condora monitors DAG-level progress and intervenes only at the workflow level (abort, priority changes, clean stop, catastrophic recovery).
 
 ### 2.3 Execution Model
 
-WMS2 treats the worker-node payload as opaque. Whether the job runs a single cmsRun (ReReco-style) or chains multiple steps (StepChain-style), the DAG structure is identical. The complexity of multi-step execution lives entirely within the sandbox/wrapper.
+Condora treats the worker-node payload as opaque. Whether the job runs a single cmsRun (ReReco-style) or chains multiple steps (StepChain-style), the DAG structure is identical. The complexity of multi-step execution lives entirely within the sandbox/wrapper.
 
 ```
-From WMS2's perspective, a workflow is a set of independent merge groups:
+From Condora's perspective, a workflow is a set of independent merge groups:
 
   ┌─ Merge Group 0: [Landing] → [Processing Nodes] → [Merge] → [Cleanup]
   ├─ Merge Group 1: [Landing] → [Processing Nodes] → [Merge] → [Cleanup]
@@ -146,16 +146,16 @@ What happens inside each processing node is opaque:
   Single-step:    input → cmsRun → output
   Multi-step:     input → cmsRun(DIGI) → cmsRun(RECO) → cmsRun(MINIAOD) → output
 
-WMS2 doesn't distinguish between these. The sandbox/wrapper handles
+Condora doesn't distinguish between these. The sandbox/wrapper handles
 step orchestration, resource optimization, and intermediate data flow
 on the worker node.
 ```
 
-The sandbox/wrapper is part of the WMS2 system but its development is decoupled — it can be improved independently without changes to WMS2 core or DAGMan.
+The sandbox/wrapper is part of the Condora system but its development is decoupled — it can be improved independently without changes to Condora core or DAGMan.
 
-**Work unit**: The atomic unit of progress in WMS2. A work unit is a self-contained set of processing jobs whose outputs feed a single merge job, producing one usable merged output. Each work unit is implemented as a merge group — a SUBDAG EXTERNAL containing a landing node, processing nodes, a merge node, and a cleanup node. WMS2 measures progress, calculates partial production fractions, and reports completion in terms of work units. A DAG consists of many work units running concurrently (throttled by `MAXJOBS`).
+**Work unit**: The atomic unit of progress in Condora. A work unit is a self-contained set of processing jobs whose outputs feed a single merge job, producing one usable merged output. Each work unit is implemented as a merge group — a SUBDAG EXTERNAL containing a landing node, processing nodes, a merge node, and a cleanup node. Condora measures progress, calculates partial production fractions, and reports completion in terms of work units. A DAG consists of many work units running concurrently (throttled by `MAXJOBS`).
 
-**Processing block**: A group of work units that form the unit of DBS block registration and tape archival. When a request is split into work units, those work units are grouped into processing blocks based on expected output size and tape-friendliness criteria. A processing block maps 1:1 to a DBS block and a tape archival unit. As individual work units within a block complete, their files are registered in DBS (opening the block on first completion) and protected at the source site via Rucio. When all work units in a block complete, the DBS block is closed and a tape archival rule is created for the entire block as a single unit — ensuring contiguous tape writes and efficient recall. WMS2 prioritizes completing in-progress blocks before starting new ones.
+**Processing block**: A group of work units that form the unit of DBS block registration and tape archival. When a request is split into work units, those work units are grouped into processing blocks based on expected output size and tape-friendliness criteria. A processing block maps 1:1 to a DBS block and a tape archival unit. As individual work units within a block complete, their files are registered in DBS (opening the block on first completion) and protected at the source site via Rucio. When all work units in a block complete, the DBS block is closed and a tape archival rule is created for the entire block as a single unit — ensuring contiguous tape writes and efficient recall. Condora prioritizes completing in-progress blocks before starting new ones.
 
 ### 2.4 Capacity Planning
 
@@ -171,21 +171,21 @@ Expected operating parameters:
 | Running jobs at any time | ~hundreds of thousands |
 | Schedds | horizontally scalable, as many as needed |
 
-Per-DAG throttling via `DAGMAN_MAX_JOBS_IDLE` and `DAGMAN_MAX_JOBS_SUBMITTED` provides basic pacing. Global idle throttling across all concurrent DAGs is a required HTCondor feature (see Section 12). If not available at launch, WMS2 will use conservative static per-DAG limits as an interim measure.
+Per-DAG throttling via `DAGMAN_MAX_JOBS_IDLE` and `DAGMAN_MAX_JOBS_SUBMITTED` provides basic pacing. Global idle throttling across all concurrent DAGs is a required HTCondor feature (see Section 12). If not available at launch, Condora will use conservative static per-DAG limits as an interim measure.
 
 The negotiator scales with the number of idle + running jobs (not total managed population). Schedds scale with total managed jobs but can be added horizontally. DAGMan processes are lightweight (~few MB each for 10K-node DAGs).
 
 ### 2.5 Multi-Schedd Architecture
 
-A single HTCondor schedd handles ~50–100K concurrent jobs before performance degrades. CMS production at scale requires millions of jobs. WMS2 distributes DAGs across a pool of schedds.
+A single HTCondor schedd handles ~50–100K concurrent jobs before performance degrades. CMS production at scale requires millions of jobs. Condora distributes DAGs across a pool of schedds.
 
-**Schedd pool**: WMS2 maintains a configured list of schedds with capacity and status metadata. Each schedd is independently managed — it can be drained, taken down for maintenance, or added without affecting other schedds.
+**Schedd pool**: Condora maintains a configured list of schedds with capacity and status metadata. Each schedd is independently managed — it can be drained, taken down for maintenance, or added without affecting other schedds.
 
-**Assignment granularity**: Each DAG is assigned to a schedd at submission time using capacity-weighted selection. Different rounds of the same request may use different schedds — rounds are independent DAGs with no shared state on the schedd. This allows WMS2 to route new work away from a schedd that needs maintenance, even if earlier rounds of the same request are still running there.
+**Assignment granularity**: Each DAG is assigned to a schedd at submission time using capacity-weighted selection. Different rounds of the same request may use different schedds — rounds are independent DAGs with no shared state on the schedd. This allows Condora to route new work away from a schedd that needs maintenance, even if earlier rounds of the same request are still running there.
 
 **Schedd selection policy**: When submitting a new DAG, the lifecycle manager queries the schedd pool for enabled schedds with capacity and selects by policy (e.g., least loaded, capacity-weighted random). The `dags.schedd_name` column records which schedd each DAG was submitted to. All subsequent operations (polling, condor_rm, rescue DAG) use the DAG's recorded schedd.
 
-**Spool-free operation**: WMS2 does not read job output from the schedd's spool directory. Job results (metrics, manifests, error data) are retrieved via HTCondor's `condor_transfer_data` API on demand and stored in the database. This eliminates the need for sshfs mounts, avoids spool cleanup races, and works across any number of schedds without additional infrastructure. See §4.6 for details.
+**Spool-free operation**: Condora does not read job output from the schedd's spool directory. Job results (metrics, manifests, error data) are retrieved via HTCondor's `condor_transfer_data` API on demand and stored in the database. This eliminates the need for sshfs mounts, avoids spool cleanup races, and works across any number of schedds without additional infrastructure. See §4.6 for details.
 
 ---
 
@@ -253,7 +253,7 @@ class Request(BaseModel):
     adaptive: bool = True            # Enable multi-round adaptive execution
 
     # Payload Configuration
-    payload_config: Dict[str, Any]  # Opaque to WMS2, passed to sandbox
+    payload_config: Dict[str, Any]  # Opaque to Condora, passed to sandbox
 
     # Version Linkage (for catastrophic failure recovery)
     previous_version_request: Optional[str]    # request_name of v(N-1)
@@ -270,8 +270,8 @@ class Request(BaseModel):
 
 
 class RequestStatus(str, Enum):
-    NEW = "new"                    # Requestor's workspace, WMS2 ignores
-    SUBMITTED = "submitted"        # Requestor signals ready, WMS2 validates
+    NEW = "new"                    # Requestor's workspace, Condora ignores
+    SUBMITTED = "submitted"        # Requestor signals ready, Condora validates
     QUEUED = "queued"              # In admission queue, waiting for capacity
     PLANNING = "planning"          # DAG Planner building production DAG
     ACTIVE = "active"              # DAG submitted to DAGMan
@@ -305,7 +305,7 @@ class SplittingAlgo(str, Enum):
     EVENT_AWARE_LUMI = "EventAwareLumiBased"
 ```
 
-Note: `RequestType` (ReReco, StepChain, etc.) is **not** a WMS2 concept. It is stored as metadata in `payload_config` and meaningful only to ReqMgr2 and the sandbox/wrapper. WMS2 treats all requests identically.
+Note: `RequestType` (ReReco, StepChain, etc.) is **not** a Condora concept. It is stored as metadata in `payload_config` and meaningful only to ReqMgr2 and the sandbox/wrapper. Condora treats all requests identically.
 
 #### 3.1.2 Workflow
 
@@ -385,14 +385,14 @@ class WorkflowStatus(str, Enum):
 
 #### 3.1.3 DAG (DAGMan Submission Unit)
 
-WMS2 does **not** model individual HTCondor jobs as first-class entities. Instead, it models the **DAG** — the unit submitted to `condor_submit_dag`. Individual node status is read from DAGMan's own status files and logs rather than being tracked in the WMS2 database.
+Condora does **not** model individual HTCondor jobs as first-class entities. Instead, it models the **DAG** — the unit submitted to `condor_submit_dag`. Individual node status is read from DAGMan's own status files and logs rather than being tracked in the Condora database.
 
 ```python
 class DAG(BaseModel):
     """
     A DAGMan DAG — the unit of submission to HTCondor.
     Each DAG corresponds to one workflow.
-    WMS2 submits the DAG and monitors it; DAGMan owns the node lifecycle.
+    Condora submits the DAG and monitors it; DAGMan owns the node lifecycle.
     """
     id: UUID
     workflow_id: UUID
@@ -487,7 +487,7 @@ class DAGNodeSpec(BaseModel):
     max_retries: int = 3
 
     # POST script for per-node error handling
-    post_script: str               # WMS2-provided recovery script
+    post_script: str               # Condora-provided recovery script
 
     # Dependencies
     parent_nodes: List[str] = []
@@ -762,7 +762,7 @@ CREATE INDEX idx_processing_blocks_status ON processing_blocks(status);
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      WMS2 Core Components                       │
+│                      Condora Core Components                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  1. Request Lifecycle Manager                                   │
@@ -820,13 +820,13 @@ CREATE INDEX idx_processing_blocks_status ON processing_blocks(status);
 │     - Workflow/DAG lifecycle metrics                             │
 │     - Admission queue state                                     │
 │     - Processing block progress                                 │
-│     - WMS2 service health                                       │
+│     - Condora service health                                       │
 │     - Note: per-job and pool metrics handled externally          │
 │                                                                 │
 │  NOTE: Components 2–9 are workers called by the Request         │
 │  Lifecycle Manager. They do not run independent polling loops.   │
 │  Individual job submission, retry, hold/release, and dependency  │
-│  sequencing are delegated entirely to HTCondor DAGMan. WMS2     │
+│  sequencing are delegated entirely to HTCondor DAGMan. Condora     │
 │  does NOT track individual job state in its DB.                 │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -1190,7 +1190,7 @@ class RequestLifecycleManager:
             f"Request {request.request_name} stuck in {request.status} "
             f"for {elapsed.total_seconds():.0f}s"
         )
-        self.metrics.increment("wms2_request_stuck_total",
+        self.metrics.increment("condora_request_stuck_total",
             labels={"status": request.status.value}
         )
 
@@ -1233,7 +1233,7 @@ class RequestLifecycleManager:
     async def _send_alert(self, request: Request, alert_type: str, message: str):
         """Send an operator alert via the configured notification channel."""
         logger.error(f"ALERT [{alert_type}] {request.request_name}: {message}")
-        self.metrics.increment("wms2_alerts_total",
+        self.metrics.increment("condora_alerts_total",
             labels={"type": alert_type}
         )
         # TODO: integrate with operator notification (email, Slack, PagerDuty)
@@ -1361,7 +1361,7 @@ class DAGPlanner:
             events_per_job = int(target_wall_time_hours * 3600 / measured_tpe)
         else:
             # Round 0 / non-adaptive: use the request's EventsPerJob as-is.
-            # WMS2 does not redefine splitting — it trusts the value computed
+            # Condora does not redefine splitting — it trusts the value computed
             # upstream (by cmsunified / WMAgent's calcEvtsPerJobLumi).  For
             # GenFilter workflows, EventsPerJob is in terms of *generated*
             # events (= target_job_length / TimePerEvent, where TimePerEvent
@@ -1656,7 +1656,7 @@ class MergeGroup(BaseModel):
 executable = /bin/true
 request_memory = 1
 request_disk = 1
-+WMS2_LandingNode = true
++CONDORA_LandingNode = true
 output = landing.out
 error = landing.err
 log = cluster.log
@@ -1760,12 +1760,12 @@ queue 1
 
 #### 4.5.1 Stageout Modes
 
-WMS2 supports three stageout modes, selected at import time (`stageout_mode` in the request's `config_data`). The mode determines how output files move from worker nodes to persistent storage, what LFN prefixes are used, and how outputs are registered in Rucio.
+Condora supports three stageout modes, selected at import time (`stageout_mode` in the request's `config_data`). The mode determines how output files move from worker nodes to persistent storage, what LFN prefixes are used, and how outputs are registered in Rucio.
 
 | | **local** | **test** | **production** |
 |---|---|---|---|
 | **Transport** | Filesystem copy (`shutil`) | XRootD via `storage.json` | XRootD via `storage.json` |
-| **LFN prefix** | N/A (local paths) | `/store/temp/user/<user>.wms2.*` | Auto from ReqMgr2 (`/store/mc/...`) |
+| **LFN prefix** | N/A (local paths) | `/store/temp/user/<user>.condora.*` | Auto from ReqMgr2 (`/store/mc/...`) |
 | **Rucio scope** | N/A | `user.<username>` | `cms` |
 | **RSE mapping** | N/A | site → `<site>_Temp` | site → as-is |
 | **DID naming** | N/A | `/<Primary>/<Processing>-<Tier>/USER#block_NNN` | `/<Primary>/<Processing>/<Tier>#block_NNN` |
@@ -1779,7 +1779,7 @@ WMS2 supports three stageout modes, selected at import time (`stageout_mode` in 
 
 **Production mode** uses real CMS dataset paths (`/store/mc/...`), `cms` scope, and standard RSE names. Requires a service account with the `admin` attribute for `add_replicas` at non-`_Temp` RSEs.
 
-**LFN→PFN resolution**: Each CMS site publishes a `storage.json` file (fetched from SITECONF via CVMFS) that maps logical file names to physical locations. The resolution supports three formats: prefix (simple concatenation, used by CERN), rules (regex-based rewriting, used by FNAL), and chained rules (virtual protocol resolution followed by rules, used by KIT/DESY). The `wms2_stageout.py` utility, transferred to worker nodes alongside the sandbox, implements all three formats.
+**LFN→PFN resolution**: Each CMS site publishes a `storage.json` file (fetched from SITECONF via CVMFS) that maps logical file names to physical locations. The resolution supports three formats: prefix (simple concatenation, used by CERN), rules (regex-based rewriting, used by FNAL), and chained rules (virtual protocol resolution followed by rules, used by KIT/DESY). The `condora_stageout.py` utility, transferred to worker nodes alongside the sandbox, implements all three formats.
 
 **Direct XRootD merge**: In grid mode, the merge job reads proc output files directly from site storage via `root://` URLs — cmsRun's native XRootD support streams the data without downloading to local scratch first. For each output tier, the merge script classifies files from the proc output manifest:
 
@@ -2079,7 +2079,7 @@ class DAGMonitor:
 
 The Output Manager handles the post-compute data pipeline: Rucio DID registration, consolidation rule creation, DBS file registration, source protection, DBS block closure, and tape archival. It operates at the **processing block** level — groups of work units that map 1:1 to DBS blocks and tape archival units.
 
-The design is fire-and-forget: WMS2 creates Rucio rules and moves on. It does not poll transfer status, manage source protection lifecycle, or track tape completion. Once a rule is created, Rucio owns the outcome. WMS2's only follow-up responsibility is retry with backoff if a Rucio call fails.
+The design is fire-and-forget: Condora creates Rucio rules and moves on. It does not poll transfer status, manage source protection lifecycle, or track tape completion. Once a rule is created, Rucio owns the outcome. Condora's only follow-up responsibility is retry with backoff if a Rucio call fails.
 
 **Rucio DID registration** happens incrementally as work units complete. Each merged output file is registered as a Rucio DID at the site where it was produced. The registration flow:
 
@@ -2091,7 +2091,7 @@ The design is fire-and-forget: WMS2 creates Rucio rules and moves on. It does no
 
 DID registration is non-fatal — failures are logged but do not block processing. The consolidation rule (step 6) depends on DIDs being registered, so a registration failure delays consolidation but not production.
 
-**Consolidation rule** is created when a processing block completes, if `consolidation_rse` is configured (per-request via `config_data` or globally via `WMS2_CONSOLIDATION_RSE`). This creates a Rucio replication rule that moves all block files to the target RSE. For files already at the target site, the rule is immediately satisfied.
+**Consolidation rule** is created when a processing block completes, if `consolidation_rse` is configured (per-request via `config_data` or globally via `CONDORA_CONSOLIDATION_RSE`). This creates a Rucio replication rule that moves all block files to the target RSE. For files already at the target site, the rule is immediately satisfied.
 
 DID naming and scope are determined by the stageout mode (see §4.5.1). In test mode, CMS Rucio policy requires `_Temp` RSEs for user-account replica registration and `/USER` in dataset names for non-`cms` scope.
 
@@ -2377,7 +2377,7 @@ class OutputManager:
 
 > **Detailed specification**: See [`docs/error_handling.md`](error_handling.md) for the complete error handling design including POST script data collection, classification logic, site banning, and workflow-type-specific recovery.
 
-Per-node retries are handled by DAGMan's `RETRY` directive combined with a WMS2-provided POST script that writes `{node_name}.post.json` side files. When a DAG terminates with failures, the Error Handler reads these side files, aggregates failures by work unit and by site, and applies a per-round threshold to decide the next action.
+Per-node retries are handled by DAGMan's `RETRY` directive combined with a Condora-provided POST script that writes `{node_name}.post.json` side files. When a DAG terminates with failures, the Error Handler reads these side files, aggregates failures by work unit and by site, and applies a per-round threshold to decide the next action.
 
 ```python
 class ErrorHandler:
@@ -2440,18 +2440,18 @@ class MetricsCollector:
     async def collect(self):
         for status in WorkflowStatus:
             count = await self.db.count_workflows_by_status(status)
-            self.gauge("wms2_workflows", count, labels={"status": status.value})
+            self.gauge("condora_workflows", count, labels={"status": status.value})
 
         queued = await self.db.count_requests_by_status(RequestStatus.QUEUED)
-        self.gauge("wms2_admission_queue_depth", queued)
+        self.gauge("condora_admission_queue_depth", queued)
 
         for dag in await self.db.get_active_dags():
             progress = dag.nodes_done / max(dag.total_nodes, 1)
-            self.gauge("wms2_dag_progress", progress, labels={"dag_id": str(dag.id)})
+            self.gauge("condora_dag_progress", progress, labels={"dag_id": str(dag.id)})
 
         for status in BlockStatus:
             count = await self.db.count_processing_blocks_by_status(status)
-            self.gauge("wms2_blocks", count, labels={"status": status.value})
+            self.gauge("condora_blocks", count, labels={"status": status.value})
 ```
 
 ---
@@ -2460,18 +2460,18 @@ class MetricsCollector:
 
 ### 5.1 Overview
 
-WMS2 does not run a separate pilot job. Instead, the first production round (Round 0) uses resource hints from the request (TimePerEvent, Memory, SizePerEvent) as defaults with a small number of work units. As work units complete, their Framework Job Report (FJR) data — per-step CPU efficiency, peak RSS, wall time — is collected by the sandbox. When the round completes, the Lifecycle Manager aggregates this data into `step_metrics` on the workflow and runs `compute_round_optimization()` to determine optimal parameters for the next round. The optimization composes independent dimensions: memory sizing, job splitting (reducing `request_cpus`), and internal parallelism (step 0 instance splitting).
+Condora does not run a separate pilot job. Instead, the first production round (Round 0) uses resource hints from the request (TimePerEvent, Memory, SizePerEvent) as defaults with a small number of work units. As work units complete, their Framework Job Report (FJR) data — per-step CPU efficiency, peak RSS, wall time — is collected by the sandbox. When the round completes, the Lifecycle Manager aggregates this data into `step_metrics` on the workflow and runs `compute_round_optimization()` to determine optimal parameters for the next round. The optimization composes independent dimensions: memory sizing, job splitting (reducing `request_cpus`), and internal parallelism (step 0 instance splitting).
 
 This design eliminates the latency of a dedicated pilot phase (~8 hours) while converging to optimal resource estimates asymptotically through production data. See `docs/adaptive.md` for the complete algorithm specification covering composable optimization dimensions, metric collection, memory source hierarchy, job splitting, internal parallelism, work group sizing, and multi-round convergence.
 
 ### 5.2 Memory-Per-Core Window
 
-CMS sites advertise resources as memory per core. There is a minimum that most sites offer, but no fixed maximum — requesting more memory per core narrows the pool of matching sites. WMS2 defines two operational parameters to bound the adaptive algorithm:
+CMS sites advertise resources as memory per core. There is a minimum that most sites offer, but no fixed maximum — requesting more memory per core narrows the pool of matching sites. Condora defines two operational parameters to bound the adaptive algorithm:
 
 - **`default_memory_per_core`** (MB): The baseline memory per core. Matches the widest set of sites. Round 1 production jobs use this value. Example: 2000 MB/core.
 - **`max_memory_per_core`** (MB): The upper bound the adaptive algorithm may request. Beyond this, too few sites match to be practical. Probe jobs and memory-constrained Round 2+ jobs may use up to this value. Example: 3000 MB/core.
 
-These are operational knobs — set by the WMS2 deployment, not per-request. They reflect the site landscape and can be tuned as site capabilities change.
+These are operational knobs — set by the Condora deployment, not per-request. They reflect the site landscape and can be tuned as site capabilities change.
 
 **Request validation**: A request arrives with `Multicore` (thread count) and `Memory` (total MB). The DAG Planner checks that the request's memory requirement fits within the window:
 
@@ -2707,7 +2707,7 @@ The multi-round lifecycle means every workflow benefits from measured data for t
 
 **Level 1: Immediate (owned by POST script + DAGMan RETRY)**
 - DAGMan's `RETRY` directive retries failed nodes automatically
-- WMS2-provided POST script runs after each node completion/failure
+- Condora-provided POST script runs after each node completion/failure
 - POST script classifies errors (transient / permanent / data / infrastructure)
 - POST script writes `{node_name}.post.json` side files for Level 2 consumption
 - Implements cool-off delays, parameter adjustment (e.g., memory increase), and retry/stop decisions
@@ -2715,8 +2715,8 @@ The multi-round lifecycle means every workflow benefits from measured data for t
 - `UNLESS-EXIT` code stops retries for permanent failures; `ABORT-DAG-ON` kills the entire DAG for catastrophic errors
 - Lives in the sandbox, can be iterated independently
 
-**Level 2: Delayed (owned by WMS2 Error Handler + rescue DAG)**
-- When a DAG terminates with failures, WMS2 reads POST script side files and aggregates failure data
+**Level 2: Delayed (owned by Condora Error Handler + rescue DAG)**
+- When a DAG terminates with failures, Condora reads POST script side files and aggregates failure data
 - Per-round failure ratio determines action: below 20% → rescue DAG; 20% or above → HELD for operator
 - Max rescue attempts (default 3) as separate guard against endless loops
 - HELD state requires operator decision: release, release with modifications, fail, or kill and clone
@@ -2855,7 +2855,7 @@ The POST script runs on the submit host after each job attempt. It collects data
 #!/bin/bash
 # post_script.sh — per-node error handler
 # Called by DAGMan: SCRIPT POST node_name post_script.sh $JOB $RETURN $RETRY $MAX_RETRIES
-# Writes: {submit_dir}/{node_name}.post.json (consumed by WMS2 Error Handler at Level 2)
+# Writes: {submit_dir}/{node_name}.post.json (consumed by Condora Error Handler at Level 2)
 
 NODE_NAME=$1
 EXIT_CODE=$2
@@ -2865,7 +2865,7 @@ UNLESS_EXIT=42    # Permanent failure — stop retrying
 ABORT_EXIT=43     # Catastrophic — kill entire DAG
 
 if [ "$EXIT_CODE" -eq 0 ]; then
-    # Collect success metrics into post.json for WMS2
+    # Collect success metrics into post.json for Condora
     python3 collect_post_data.py "$NODE_NAME" "$EXIT_CODE" --final
     exit 0
 fi
@@ -3190,9 +3190,9 @@ Response:
 - **API access**: OIDC/OAuth2 tokens via WLCG token infrastructure.
 - **HTCondor credentials**: OAuth2 refresh tokens stored on schedd, automatic access token provisioning to jobs.
 - **DAG lifetime**: Unlimited — refresh tokens handle credential renewal transparently.
-- **Transition**: Configuration change, not architectural change. WMS2 code is auth-mechanism-agnostic.
+- **Transition**: Configuration change, not architectural change. Condora code is auth-mechanism-agnostic.
 
-Token support is an external dependency (HTCondor + WLCG infrastructure), not a WMS2 deliverable.
+Token support is an external dependency (HTCondor + WLCG infrastructure), not a Condora deliverable.
 
 ---
 
@@ -3319,12 +3319,12 @@ ReqMgr2
    ├──► WMCore Agent (existing production)
    │       └── Handles: all current workflow types
    │
-   └──► WMS2 (new system)
+   └──► Condora (new system)
            └── Handles: selected workflows for testing
                 └── Delegates to DAGMan for job orchestration
 
 Selection Criteria (in ReqMgr2):
-  request.wms_backend = "wms2" | "wmcore"
+  request.wms_backend = "condora" | "wmcore"
   Gradual migration by campaign / workflow complexity
 ```
 
@@ -3341,16 +3341,16 @@ Selection Criteria (in ReqMgr2):
 
 ## 12. HTCondor Feature Requirements
 
-The following capabilities are required from HTCondor / DAGMan and will be developed in collaboration with the HTCondor team. WMS2 is designed to use these features when available, with interim workarounds where noted.
+The following capabilities are required from HTCondor / DAGMan and will be developed in collaboration with the HTCondor team. Condora is designed to use these features when available, with interim workarounds where noted.
 
 | Requirement | Description | Interim Workaround |
 |---|---|---|
 | **Global idle throttling** | A pool-level or multi-DAG mechanism to cap total idle jobs across all concurrent DAGMan instances (budget: ~1M idle from ~10M total) | Conservative static per-DAG `DAGMAN_MAX_JOBS_IDLE` limits |
 | **Dynamic classad updates** | Ability to update `+DESIRED_Sites` and other classads on queued/un-submitted DAG nodes when site status changes | Manual `condor_qedit` by operators; new DAGs use updated site lists |
 | **DAG-wide priority propagation** | Update priority of an entire DAG (including un-submitted nodes) via a single operation | Remove and resubmit DAG with updated priority (rescue DAG continuity) |
-| **DAG-level failure pattern detection** | DAGMan detects correlated failures (many nodes, same error, same site) and can halt/adjust automatically | POST scripts report to WMS2 API; operators monitor and intervene manually |
+| **DAG-level failure pattern detection** | DAGMan detects correlated failures (many nodes, same error, same site) and can halt/adjust automatically | POST scripts report to Condora API; operators monitor and intervene manually |
 | **Site-affine job groups** | A set of independent jobs that the negotiator matches as a unit to one site, accounting for the group's total resource commitment when deciding placement. Eliminates the need for landing nodes and staggered submission. | SUBDAG EXTERNAL per merge group with a landing node (trivial `/bin/true` job); POST script reads `MATCH_GLIDEIN_CMSSite` classad to elect site; PRE scripts pin remaining nodes via `+DESIRED_Sites`. Staggered via `MAXJOBS MergeGroup` to create backpressure between batches. |
-| **SPLICE with RETRY and POST scripts** | Allow `RETRY` and `SCRIPT POST` on SPLICE boundaries, providing atomic group retry and group-completion callbacks within a single DAGMan process. Currently only SUBDAG EXTERNAL supports RETRY and POST on group boundaries, but each SUBDAG spawns a separate `condor_dagman` process — at 500 work units this means 501 scheduler-universe jobs, causing 15+ minute parse times, orphaned sub-DAGs, and 25-50 GB schedd memory pressure. SPLICE already tracks initial/terminal nodes per splice and uses hierarchical naming (`splice+node`); extending it with RETRY (re-queue all splice nodes on failure) and POST (fire after all terminal nodes complete) would eliminate the per-group process overhead while preserving WMS2's WU-level atomic retry and site-exclusion mechanisms. See `docs/plans/dag-structure-scalability.md` for full analysis. | Cap `max_work_units_per_round` at 200 to limit DAGMan process count; proactively remove orphaned child sub-DAGMan processes when a DAG completes or fails. |
+| **SPLICE with RETRY and POST scripts** | Allow `RETRY` and `SCRIPT POST` on SPLICE boundaries, providing atomic group retry and group-completion callbacks within a single DAGMan process. Currently only SUBDAG EXTERNAL supports RETRY and POST on group boundaries, but each SUBDAG spawns a separate `condor_dagman` process — at 500 work units this means 501 scheduler-universe jobs, causing 15+ minute parse times, orphaned sub-DAGs, and 25-50 GB schedd memory pressure. SPLICE already tracks initial/terminal nodes per splice and uses hierarchical naming (`splice+node`); extending it with RETRY (re-queue all splice nodes on failure) and POST (fire after all terminal nodes complete) would eliminate the per-group process overhead while preserving Condora's WU-level atomic retry and site-exclusion mechanisms. See `docs/plans/dag-structure-scalability.md` for full analysis. | Cap `max_work_units_per_round` at 200 to limit DAGMan process count; proactively remove orphaned child sub-DAGMan processes when a DAG completes or fails. |
 
 ---
 
@@ -3361,7 +3361,7 @@ The following capabilities are required from HTCondor / DAGMan and will be devel
 | Metric | Target | Measurement |
 |---|---|---|
 | DAG Submission Rate | 50 DAGs/hour (covering 10,000+ nodes/hour) | Throughput test |
-| DAG Tracking Latency | < 60 seconds | Time from DAGMan status change to WMS2 update |
+| DAG Tracking Latency | < 60 seconds | Time from DAGMan status change to Condora update |
 | API Response Time | p99 < 500ms | API latency monitoring |
 | System Uptime | 99.5% | Availability monitoring |
 | Node Success Rate | > 95% | DAGMan metrics |
@@ -3370,7 +3370,7 @@ The following capabilities are required from HTCondor / DAGMan and will be devel
 
 ### 13.2 Comparison with WMCore
 
-| Aspect | WMCore | WMS2 Target |
+| Aspect | WMCore | Condora Target |
 |---|---|---|
 | Codebase Size | ~500K lines | < 30K lines |
 | Components | 15+ threads | 5–8 async workers |
@@ -3382,7 +3382,7 @@ The following capabilities are required from HTCondor / DAGMan and will be devel
 
 ### 13.3 Physics Validation
 
-WMS2 includes a lightweight physics validation tool (`scripts/rootdiff`) that compares NanoAOD output against a WMAgent-produced reference file. This catches any physics-level regressions introduced by the orchestration layer (e.g., seed mismanagement, incorrect step configuration, missing output modules, corrupted merges).
+Condora includes a lightweight physics validation tool (`scripts/rootdiff`) that compares NanoAOD output against a WMAgent-produced reference file. This catches any physics-level regressions introduced by the orchestration layer (e.g., seed mismanagement, incorrect step configuration, missing output modules, corrupted merges).
 
 **Method**: For each numeric branch in the NanoAOD Events tree, compute statistical summaries (mean, std, min, max, n) and compare using a difference-of-means test:
 
@@ -3390,18 +3390,18 @@ WMS2 includes a lightweight physics validation tool (`scripts/rootdiff`) that co
 
 Branches with pull > 5σ are flagged as outliers. Bookkeeping branches (event number, run, luminosityBlock, genEventSumw) are excluded since they differ by construction between independent samples. Branches with fewer than 10 entries are skipped as statistically uninformative.
 
-**Validation**: WMS2 output (DYto2Mu NanoAODv12, 10 merged files × 320 events) was compared against a WMAgent reference (336k events). Result: 17,818 of 17,820 branch comparisons pass at 5σ (99.99%). The 2 failures are ultra-rare objects (fat jets in DY→μμ) with <10 entries per file. At matched sample sizes (320 entries each), all 1782 branches pass.
+**Validation**: Condora output (DYto2Mu NanoAODv12, 10 merged files × 320 events) was compared against a WMAgent reference (336k events). Result: 17,818 of 17,820 branch comparisons pass at 5σ (99.99%). The 2 failures are ultra-rare objects (fat jets in DY→μμ) with <10 entries per file. At matched sample sizes (320 entries each), all 1782 branches pass.
 
 **Usage**:
 ```bash
 # Statistical comparison (physics validation, recommended)
-scripts/rootdiff -t 5 -n 10000 reference.root wms2_output.root
+scripts/rootdiff -t 5 -n 10000 reference.root condora_output.root
 
 # Exact comparison (identical-seed verification)
-scripts/rootdiff reference.root wms2_output.root
+scripts/rootdiff reference.root condora_output.root
 
 # Fast mode (metadata only — size, entries, compression)
-scripts/rootdiff -f reference.root wms2_output.root
+scripts/rootdiff -f reference.root condora_output.root
 ```
 
 **Why not full DQM**: CMS DQM/VALIDATION uses CMSSW analyzer modules producing DQMIO histograms, requiring DQM to be inline with RECO and a separate harvesting step. This is the right approach for release validation but heavyweight for production QA. The `rootdiff` statistical comparison operates directly on the final NanoAOD output with no additional CMSSW steps, runs in seconds, and catches the same class of physics-level regressions (wrong distributions, missing branches, corrupted values). DQM support may be added later for workflows that require it (see `docs/dqm-harvesting.md`).
@@ -3430,11 +3430,11 @@ scripts/rootdiff -f reference.root wms2_output.root
 ## 15. Open Questions
 
 1. **Sandbox/Wrapper Design**: How does the per-node manifest communicate input data to the job? What format? This is tightly coupled to sandbox architecture and needs dedicated design discussion.
-2. **Sandbox Scope**: Exact boundary between WMS2 and sandbox responsibilities — manifest generation, adaptive per-step optimization (reading `step_profile.json`, per-step splitting), POST script logic, FJR metric extraction.
+2. **Sandbox Scope**: Exact boundary between Condora and sandbox responsibilities — manifest generation, adaptive per-step optimization (reading `step_profile.json`, per-step splitting), POST script logic, FJR metric extraction.
 3. **Existing Micro-Services**: Which CMS micro-services currently handle output registration and data placement? Are they reusable with clean APIs?
 4. **DAG Size Partitioning**: If a workflow exceeds practical DAG size limits (discovered during load testing), what's the partitioning strategy? *Partially resolved by multi-round lifecycle — each round has a bounded number of WUs (default 10), so DAG size is naturally limited. See `docs/processing.md` §6.5.*
-5. **DAGMan Status Polling vs. Event-Based**: Should WMS2 poll `.status` files or use event log callbacks? Performance implications at scale. The Lifecycle Manager's main loop uses polling by default; event-based callbacks could replace the poll_dag() call if HTCondor supports efficient event delivery.
-6. **Shared Filesystem**: Is a shared filesystem between submit host and WMS2 service guaranteed, or do DAG files need to be transferred?
+5. **DAGMan Status Polling vs. Event-Based**: Should Condora poll `.status` files or use event log callbacks? Performance implications at scale. The Lifecycle Manager's main loop uses polling by default; event-based callbacks could replace the poll_dag() call if HTCondor supports efficient event delivery.
+6. **Shared Filesystem**: Is a shared filesystem between submit host and Condora service guaranteed, or do DAG files need to be transferred?
 7. **GPU Jobs**: Include `request_gpus` support in submit files for MVP?
 8. **Lifecycle Manager Cycle Interval**: What is the right cycle interval for the main loop? Too fast wastes resources polling unchanged state; too slow delays reaction to completions. Initial default is 60 seconds — needs tuning under production load.
 9. **Catastrophic Failure Detection**: How to distinguish temporary schedd unavailability (network blip, restart) from permanent loss (hardware failure, corruption)? Threshold-based: if schedd is unreachable for N minutes, escalate to operator for catastrophic recovery decision.
@@ -3442,13 +3442,13 @@ scripts/rootdiff -f reference.root wms2_output.root
 11. **Concurrent Version Limit**: Should there be a maximum number of version increments for a single request (e.g., max 3 retries) to prevent infinite retry loops from catastrophic infrastructure issues?
 12. **Merge Group Stagger Depth**: How many merge groups should run concurrently (`MAXJOBS MergeGroup`)? Too few underutilizes the pool; too many causes landing nodes to cluster on the same site before processing backpressure takes effect. Needs tuning with real pool behavior.
 13. **Landing Node Site Discovery**: Is `MATCH_GLIDEIN_CMSSite` reliably set across all CMS glidein configurations? Are there worker node environments where this classad is missing or named differently?
-14. **Work Unit Granularity**: With few work units (e.g., a workflow with only 5 merge groups), the actual fraction may differ significantly from the requested fraction. A `production_steps` entry of `{"fraction": 0.1}` cannot be honored — the closest achievable step is 20% (1 out of 5). Should WMS2 warn at submission time or silently round? *Resolved by multi-round lifecycle — fraction tracking is in events, not work units. See `docs/processing.md` §6.3, OQ-P9.*
+14. **Work Unit Granularity**: With few work units (e.g., a workflow with only 5 merge groups), the actual fraction may differ significantly from the requested fraction. A `production_steps` entry of `{"fraction": 0.1}` cannot be honored — the closest achievable step is 20% (1 out of 5). Should Condora warn at submission time or silently round? *Resolved by multi-round lifecycle — fraction tracking is in events, not work units. See `docs/processing.md` §6.3, OQ-P9.*
 15. **Partial Production on ACTIVE Requests**: Can `production_steps` be set via `PATCH /api/v1/requests/{name}` on an already-ACTIVE request? This could trigger an immediate clean stop on the next Lifecycle Manager cycle if the fraction threshold is already met. Should this be allowed, or should `production_steps` be immutable after submission?
-16. **Default Thread Count for First Round**: What default thread count should the sandbox use when no `step_profile.json` exists? Should it match the request's `Multicore` field, or should WMS2 suggest a conservative default? Per-step CPU efficiency data suggests some steps are highly inefficient at high thread counts.
+16. **Default Thread Count for First Round**: What default thread count should the sandbox use when no `step_profile.json` exists? Should it match the request's `Multicore` field, or should Condora suggest a conservative default? Per-step CPU efficiency data suggests some steps are highly inefficient at high thread counts.
 17. **Metric Aggregation Strategy**: Should `step_metrics` use median or p90 for RSS? Median is robust to outliers but may underestimate memory needs for skewed distributions. P90 is safer but wastes memory for most jobs.
 18. **Minimum Sample Size for Reliable step_metrics**: How many completed work units are needed before `step_metrics` are considered reliable? With only 2–3 work units, one outlier can skew medians significantly. Should there be a minimum sample threshold below which the DAG Planner ignores step_metrics and falls back to request hints?
 19. **Processing Block Sizing**: What criteria determine how many work units go into a processing block? Options include: target total output size (e.g., 1–2 TB per block for efficient tape writes), fixed work unit count, or input-data-driven boundaries (e.g., one block per input DBS block). Too small → tape fragmentation; too large → data sits on disk unprotected by tape for too long. The right size depends on tape capacity (18 TB), expected file sizes (2–4 GB), and production timelines. *See `docs/processing.md` §5 and OQ-P2 for current design (one block per output dataset per DAG).*
-20. **Block Completion Priority**: Should WMS2 actively prioritize completing in-progress blocks before starting new ones? This could mean biasing work unit scheduling within a DAG to finish partial blocks first, or limiting how many blocks can be open simultaneously. Tradeoff: strict block completion ordering may reduce site utilization if a block's remaining work units are waiting for specific sites. *Partially resolved — each round's DAG creates self-contained blocks. See `docs/processing.md` §5.4 (DD-P2).*
+20. **Block Completion Priority**: Should Condora actively prioritize completing in-progress blocks before starting new ones? This could mean biasing work unit scheduling within a DAG to finish partial blocks first, or limiting how many blocks can be open simultaneously. Tradeoff: strict block completion ordering may reduce site utilization if a block's remaining work units are waiting for specific sites. *Partially resolved — each round's DAG creates self-contained blocks. See `docs/processing.md` §5.4 (DD-P2).*
 21. **Rucio Retry Max Duration**: What is the right default for `RUCIO_MAX_RETRY_DURATION`? Currently 3 days (covers a weekend outage). Should this be configurable per request? A campaign deadline might require shorter timeout with faster operator escalation.
 
 ---
@@ -3463,18 +3463,18 @@ This section captures significant design decisions and the reasoning behind them
 
 **Why**: With independent loops per component (Admission Controller loop, DAG Monitor loop, Output Manager loop), a request can silently stall if any single loop hiccups — there is no single place that notices "this request hasn't made progress." A single loop over all non-terminal requests makes stuck-state detection trivial and provides one place to add timeouts and observability.
 
-**Rejected alternative**: Event-driven architecture where components emit events and subscribe to each other. Too complex for the number of components; harder to reason about ordering; WMS2's scale (hundreds of workflows, not millions) doesn't justify it.
+**Rejected alternative**: Event-driven architecture where components emit events and subscribe to each other. Too complex for the number of components; harder to reason about ordering; Condora's scale (hundreds of workflows, not millions) doesn't justify it.
 
 ### DD-2: Work units implemented as merge group SUBDAGs with landing nodes
 
-**Decision**: Each work unit (processing nodes + merge + cleanup) is a self-contained sub-DAG declared via `SUBDAG EXTERNAL`. A trivial `/bin/true` landing node per work unit lets HTCondor pick the site; POST script reads `MATCH_GLIDEIN_CMSSite` and writes it to a file; PRE scripts on remaining nodes read that file and set `+DESIRED_Sites`. The work unit is the atomic unit of progress — WMS2 measures completion, calculates partial production fractions, and reports progress in terms of work units.
+**Decision**: Each work unit (processing nodes + merge + cleanup) is a self-contained sub-DAG declared via `SUBDAG EXTERNAL`. A trivial `/bin/true` landing node per work unit lets HTCondor pick the site; POST script reads `MATCH_GLIDEIN_CMSSite` and writes it to a file; PRE scripts on remaining nodes read that file and set `+DESIRED_Sites`. The work unit is the atomic unit of progress — Condora measures completion, calculates partial production fractions, and reports progress in terms of work units.
 
-**Why**: Processing jobs feeding a merge job must run on the same site to avoid cross-site transfers before merging. But WMS2 should not do site selection — that's HTCondor's job. The landing node lets HTCondor's negotiator pick the site through normal matchmaking, and then pins the work unit. SUBDAG EXTERNAL keeps the sub-DAG internal to DAGMan; WMS2 sees only one top-level DAG.
+**Why**: Processing jobs feeding a merge job must run on the same site to avoid cross-site transfers before merging. But Condora should not do site selection — that's HTCondor's job. The landing node lets HTCondor's negotiator pick the site through normal matchmaking, and then pins the work unit. SUBDAG EXTERNAL keeps the sub-DAG internal to DAGMan; Condora sees only one top-level DAG.
 
 **Rejected alternatives**:
-- *WMS2 assigns sites at planning time*: Prevents HTCondor from load balancing. WMS2 would need to replicate the negotiator's logic.
+- *Condora assigns sites at planning time*: Prevents HTCondor from load balancing. Condora would need to replicate the negotiator's logic.
 - *Dynamic merge creation based on where processing outputs land*: Violates the principle of fixing merge group composition at planning time from resource estimates. Also much more complex.
-- *PRE script site selection with WMS2 API calls*: Creates races between groups; effectively WMS2 doing load balancing through the back door.
+- *PRE script site selection with Condora API calls*: Creates races between groups; effectively Condora doing load balancing through the back door.
 
 ### DD-3: Staggered merge group concurrency via MAXJOBS
 
@@ -3511,25 +3511,25 @@ This section captures significant design decisions and the reasoning behind them
 
 **Rejected alternative**: Attempt to reconstruct DAG state from output records. Fragile, incomplete (we don't track individual job state), and the processing outputs may themselves be corrupt if the schedd died mid-write.
 
-### DD-7: Payload agnosticism — WMS2 doesn't know what jobs run
+### DD-7: Payload agnosticism — Condora doesn't know what jobs run
 
-**Decision**: WMS2 treats the worker-node payload as opaque. Whether the job runs a single cmsRun or chains multiple steps (StepChain), the DAG structure and WMS2 logic are identical.
+**Decision**: Condora treats the worker-node payload as opaque. Whether the job runs a single cmsRun or chains multiple steps (StepChain), the DAG structure and Condora logic are identical.
 
-**Why**: WMCore's tight coupling to payload internals (knowing about DIGI, RECO, MINIAOD steps) is a major source of complexity and maintenance burden. Decoupling means WMS2 can support new workflow types without code changes. The sandbox/wrapper handles payload execution and can be iterated independently.
+**Why**: WMCore's tight coupling to payload internals (knowing about DIGI, RECO, MINIAOD steps) is a major source of complexity and maintenance burden. Decoupling means Condora can support new workflow types without code changes. The sandbox/wrapper handles payload execution and can be iterated independently.
 
 ### DD-8: No per-job tracking
 
-**Decision**: WMS2 tracks requests, workflows, and DAGs. Individual job state (running, held, idle, completed) is owned entirely by HTCondor/DAGMan. WMS2 never queries `condor_q` for individual job status.
+**Decision**: Condora tracks requests, workflows, and DAGs. Individual job state (running, held, idle, completed) is owned entirely by HTCondor/DAGMan. Condora never queries `condor_q` for individual job status.
 
-**Why**: WMCore's per-job tracking database tables are the single largest source of scale problems: millions of rows, expensive status updates, complex state machines per job. HTCondor already tracks this. Duplicating it in WMS2 creates consistency problems and O(jobs) database load. WMS2 needs only DAG-level aggregates (nodes done, nodes failed) which DAGMan provides via the `.status` file.
+**Why**: WMCore's per-job tracking database tables are the single largest source of scale problems: millions of rows, expensive status updates, complex state machines per job. HTCondor already tracks this. Duplicating it in Condora creates consistency problems and O(jobs) database load. Condora needs only DAG-level aggregates (nodes done, nodes failed) which DAGMan provides via the `.status` file.
 
 ### DD-9: Fire-and-forget Rucio interaction
 
-**Decision**: WMS2 creates Rucio rules (source protection per work unit, tape archival per block, consolidation per block) and does not track their progress. Once a rule is created, Rucio owns the outcome — transfers, source cleanup, tape writes, and subscription-driven distribution are all Rucio's responsibility. WMS2's only follow-up is retry with backoff if a rule creation call fails.
+**Decision**: Condora creates Rucio rules (source protection per work unit, tape archival per block, consolidation per block) and does not track their progress. Once a rule is created, Rucio owns the outcome — transfers, source cleanup, tape writes, and subscription-driven distribution are all Rucio's responsibility. Condora's only follow-up is retry with backoff if a rule creation call fails.
 
-**Why**: WMS2 is an orchestrator, not a data management system. Rucio already handles transfer scheduling, status tracking, subscription-driven placement, and cleanup. Duplicating any of this in WMS2 (polling transfer status, managing source protection lifecycle, determining placement destinations) would create a fragile shadow of Rucio's own state machine. The previous design had WMS2 polling Rucio transfer status every 5 minutes across hundreds of workflows, managing an 8-state output lifecycle, and querying subscriptions to determine destinations — all of which is Rucio's job. The simplified design reduces WMS2's Rucio interaction to a small number of `create_rule()` calls: source protection (per work unit), tape archival (per block), and consolidation (per block, optional).
+**Why**: Condora is an orchestrator, not a data management system. Rucio already handles transfer scheduling, status tracking, subscription-driven placement, and cleanup. Duplicating any of this in Condora (polling transfer status, managing source protection lifecycle, determining placement destinations) would create a fragile shadow of Rucio's own state machine. The previous design had Condora polling Rucio transfer status every 5 minutes across hundreds of workflows, managing an 8-state output lifecycle, and querying subscriptions to determine destinations — all of which is Rucio's job. The simplified design reduces Condora's Rucio interaction to a small number of `create_rule()` calls: source protection (per work unit), tape archival (per block), and consolidation (per block, optional).
 
-**Rejected alternative**: WMS2 tracks transfer completion, manages source protection lifecycle, queries Rucio subscriptions for placement. Over-engineered — WMS2 was doing Rucio's job.
+**Rejected alternative**: Condora tracks transfer completion, manages source protection lifecycle, queries Rucio subscriptions for placement. Over-engineered — Condora was doing Rucio's job.
 
 ### DD-10: Stuck request handling is status-aware, not one-size-fits-all
 
@@ -3559,7 +3559,7 @@ Non-adaptive workflows still use the original clean-stop mechanism.
 
 ### DD-12: Adaptive execution instead of dedicated pilot
 
-**Decision**: WMS2 uses the first processing round (Round 0) as an implicit
+**Decision**: Condora uses the first processing round (Round 0) as an implicit
 pilot. It typically processes `first_round_work_units` work units (default 1)
 using request resource defaults. The outputs are real production data
 (registered in DBS, archived to tape), not throwaway measurements. As work
@@ -3607,7 +3607,7 @@ benefits from measured data for the bulk of its processing.
 
 **Rejected alternatives**:
 - *Single "grid" mode with credential-based behavior*: Mixing permission logic into runtime made the code harder to reason about and test. The mode should be explicit and visible at import time.
-- *No Rucio registration in WMS2*: Files scattered across multiple sites with no catalog would require manual aggregation. Even an intermediate solution (DID registration + consolidation rules without full DBS integration) provides significant operational value.
+- *No Rucio registration in Condora*: Files scattered across multiple sites with no catalog would require manual aggregation. Even an intermediate solution (DID registration + consolidation rules without full DBS integration) provides significant operational value.
 
 ### DD-16: ConfigCache for PSet retrieval (short-term), McM-based generation (long-term)
 
@@ -3618,7 +3618,7 @@ benefits from measured data for the bulk of its processing.
 **Long-term direction**: Generate PSets from `cmsDriver.py` commands via McM's public API (`/mcm/public/restapi/requests/get_setup/{PrepID}`). Each step's PrepID is already in the request spec. This removes the dependency on WMCore's CouchDB-based ConfigCache infrastructure.
 
 **Rejected alternatives**:
-- *Run cmsDriver.py at sandbox creation time*: Requires a full CMSSW environment on the WMS2 host. Heavyweight and slow for a step that only needs to produce a Python config file.
+- *Run cmsDriver.py at sandbox creation time*: Requires a full CMSSW environment on the Condora host. Heavyweight and slow for a step that only needs to produce a Python config file.
 - *Embed PSets in the request spec*: PSets can be hundreds of KB. ReqMgr2 request documents are not designed for large binary payloads.
 
 ### DD-17: Pileup file cache with 7-day TTL and mandatory resolution
@@ -3627,7 +3627,7 @@ benefits from measured data for the bulk of its processing.
 
 **Why**: Pileup datasets (e.g., PREMIX with millions of files) are large and stable — replica availability changes slowly (days to weeks), but the Rucio `list_replicas` query can take 30–300+ seconds per dataset, and sometimes hits 502 errors with exponential backoff retries in the native Rucio client. A single request with 3751 work units goes through hundreds of rounds, each re-querying the same pileup dataset. The 7-day TTL eliminates this repeated cost while still picking up significant replica changes. The disk-backed cache survives service restarts, preventing cold-start re-queries.
 
-**Trade-offs**: If a major pileup redistribution happens mid-request, jobs may see a stale file list for up to 7 days. This is acceptable because CMSSW pileup mixing uses random file selection from the list — a slightly outdated list only means occasional AAA remote reads for files that moved, not job failures. The cache resets on service restart if the cache file is deleted for immediate freshness when needed. The 300-second per-attempt timeout (configurable via `WMS2_PILEUP_QUERY_TIMEOUT`) means worst-case import time for a cold pileup query is ~15 minutes (3 × 300s), but this only happens once per dataset per 7 days.
+**Trade-offs**: If a major pileup redistribution happens mid-request, jobs may see a stale file list for up to 7 days. This is acceptable because CMSSW pileup mixing uses random file selection from the list — a slightly outdated list only means occasional AAA remote reads for files that moved, not job failures. The cache resets on service restart if the cache file is deleted for immediate freshness when needed. The 300-second per-attempt timeout (configurable via `CONDORA_PILEUP_QUERY_TIMEOUT`) means worst-case import time for a cold pileup query is ~15 minutes (3 × 300s), but this only happens once per dataset per 7 days.
 
 ### DD-18: FJR RSS for memory sizing instead of cgroup peak
 
@@ -3680,23 +3680,23 @@ FJR RSS, while it only samples at event boundaries and misses intra-event peaks,
 
 **Why**: Schedds need maintenance, can crash, or become overloaded. Binding a request to one schedd means the request is stuck if that schedd goes down. Per-DAG assignment allows routing new work away from a troubled schedd while earlier rounds continue there. One DAG cannot span multiple schedds (HTCondor constraint: DAGMan manages its nodes through its local schedd), but `work_units_per_round` bounds how much work goes to one schedd at a time. Load distribution across requests happens naturally — different requests' rounds land on different schedds.
 
-**Rejected alternative**: *Per-request schedd binding* (CRABServer model). CRABServer pins a task to one schedd because its resubmission mechanism (hold/edit/release) requires the same schedd. WMS2's pipelined rounds are independent DAGs with no cross-round references on the schedd, so per-request binding is unnecessary and reduces resilience.
+**Rejected alternative**: *Per-request schedd binding* (CRABServer model). CRABServer pins a task to one schedd because its resubmission mechanism (hold/edit/release) requires the same schedd. Condora's pipelined rounds are independent DAGs with no cross-round references on the schedd, so per-request binding is unnecessary and reduces resilience.
 
 ### DD-23: Spool-free data retrieval via condor_transfer_data
 
-**Decision**: WMS2 retrieves job output files (metrics, manifests, error data) using HTCondor's `condor_transfer_data` API instead of reading from sshfs-mounted spool directories. Data is stored in the database at retrieval time.
+**Decision**: Condora retrieves job output files (metrics, manifests, error data) using HTCondor's `condor_transfer_data` API instead of reading from sshfs-mounted spool directories. Data is stored in the database at retrieval time.
 
 **Why**: Spool access is unreliable (schedd cleans spool after DAGMan exits, causing race conditions), doesn't scale to multiple schedds (N sshfs mounts), is read-only (can't update deployed files for rescue DAGs), and is a security concern on shared schedds (spool contains data from all users). `condor_transfer_data` is HTCondor's native file retrieval mechanism — it works across any schedd without persistent mounts, uses the same authentication as job submission, and retrieves files on demand.
 
 **Rejected alternatives**:
-- *POST script API callbacks*: POST scripts push data to WMS2 via HTTP. Adds a network dependency (schedd must reach WMS2 API) and requires authentication infrastructure. More complex than using HTCondor's existing file transfer.
+- *POST script API callbacks*: POST scripts push data to Condora via HTTP. Adds a network dependency (schedd must reach Condora API) and requires authentication infrastructure. More complex than using HTCondor's existing file transfer.
 - *Job classad storage*: Store results in the job's classad. Size-limited and not designed for structured data like metrics or manifests.
 
 ---
 
 ## Appendix A: WMCore Component Mapping
 
-| WMCore Component | WMS2 Equivalent | Notes |
+| WMCore Component | Condora Equivalent | Notes |
 |---|---|---|
 | — (distributed loops) | Request Lifecycle Manager | New: replaces independent polling loops with single state machine owner |
 | WorkQueue | Workflow Manager + Admission Controller | Simplified with FIFO throttling |
@@ -3705,7 +3705,7 @@ FJR RSS, while it only samples at event boundaries and misses intra-event peaks,
 | BossAir | HTCondor/DAGMan Adapter | DAGMan owns job lifecycle |
 | StatusPoller | DAG Monitor | Monitors DAGMan status, not individual jobs |
 | JobAccountant | DAG Monitor + Output Manager | Split between monitoring and DBS/Rucio registration |
-| ErrorHandler | POST script + Error Handler | Per-node in POST script, workflow-level in WMS2 |
+| ErrorHandler | POST script + Error Handler | Per-node in POST script, workflow-level in Condora |
 | RetryManager | DAGMan RETRY + POST script | Fully delegated with intelligent POST script |
 | ResourceControl | Site Manager + DAGMan MAXJOBS + Admission Controller | Multi-level throttling |
 | WMBS | PostgreSQL | No separate DB; no per-job rows |
@@ -3715,7 +3715,7 @@ FJR RSS, while it only samples at event boundaries and misses intra-event peaks,
 
 ## Appendix B: ReqMgr2 Schema Reference
 
-Key fields from ReqMgr2 that WMS2 must support:
+Key fields from ReqMgr2 that Condora must support:
 
 ```python
 REQMGR2_CORE_FIELDS = [
@@ -3735,12 +3735,12 @@ REQMGR2_CORE_FIELDS = [
     "ProcessingVersion", "Priority",
     # State
     "RequestStatus", "RequestTransition",
-    # Payload (opaque to WMS2)
+    # Payload (opaque to Condora)
     "PayloadConfig",
 ]
 ```
 
-Note: `RequestType` is stored in `PayloadConfig` as metadata. WMS2 does not act on it.
+Note: `RequestType` is stored in `PayloadConfig` as metadata. Condora does not act on it.
 
 ---
 
@@ -3764,10 +3764,10 @@ submit directory root are accessible by bare filename from all WU jobs.
 | `sandbox.tar.gz` | varies | CMSSW config + PSet files (symlink to source) |
 | `manifest.json` | ~3 KB | Step metadata extracted from sandbox, with adaptive tuning applied |
 | `pileup_files.json` | up to 80 MB | Rucio pileup replica list for PSet injection |
-| `wms2_proc.sh` | ~30 KB | Processing wrapper script |
-| `wms2_merge.py` | ~20 KB | Merge script |
-| `wms2_cleanup.py` | ~5 KB | Cleanup script |
-| `wms2_stageout.py` | ~10 KB | Stageout utility |
+| `condora_proc.sh` | ~30 KB | Processing wrapper script |
+| `condora_merge.py` | ~20 KB | Merge script |
+| `condora_cleanup.py` | ~5 KB | Cleanup script |
+| `condora_stageout.py` | ~10 KB | Stageout utility |
 | `x509_proxy` | ~10 KB | X.509 credential (symlink) |
 | Site-pinning scripts | ~3 KB each | `elect_site.sh`, `pin_site.sh`, `post_script.sh` |
 
@@ -3790,10 +3790,10 @@ WU subdirectory, so shared files are symlinked per-WU instead.
 
 ### C.1 Outer DAG (workflow.dag)
 
-WMS2 submits ONE DAG per workflow. Each merge group is a `SUBDAG EXTERNAL` — DAGMan manages the sub-DAGs internally. WMS2 monitors only the top-level DAGMan process.
+Condora submits ONE DAG per workflow. Each merge group is a `SUBDAG EXTERNAL` — DAGMan manages the sub-DAGs internally. Condora monitors only the top-level DAGMan process.
 
 ```
-# WMS2-generated DAG for workflow 550e8400-...
+# Condora-generated DAG for workflow 550e8400-...
 # Each merge group is a self-contained sub-DAG with site-affine execution.
 CONFIG /submit/550e8400/dagman.config
 

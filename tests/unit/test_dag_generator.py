@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from wms2.core.dag_planner import (
+from condora.core.dag_planner import (
     PlanningMergeGroup,
     _generate_dag_files,
     _generate_group_dag,
     _plan_merge_groups,
 )
-from wms2.core.splitters import DAGNodeSpec, InputFile
+from condora.core.splitters import DAGNodeSpec, InputFile
 
 
 def _make_node(index, events=10000, location="T1_US_FNAL",
@@ -158,7 +158,7 @@ class TestDAGFileGeneration:
         assert os.access(str(tmp_path / "pin_site.sh"), os.X_OK)
 
     def test_post_collector_created(self, tmp_path):
-        """wms2_post_collect.py generated in submit directory."""
+        """condora_post_collect.py generated in submit directory."""
         groups = _make_merge_groups(1, 1)
         _generate_dag_files(
             submit_dir=str(tmp_path),
@@ -167,12 +167,12 @@ class TestDAGFileGeneration:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        collector = tmp_path / "wms2_post_collect.py"
+        collector = tmp_path / "condora_post_collect.py"
         assert collector.exists()
         assert os.access(str(collector), os.X_OK)
         # Should be valid Python
         content = collector.read_text()
-        compile(content, "wms2_post_collect.py", "exec")
+        compile(content, "condora_post_collect.py", "exec")
 
     def test_post_script_has_classification_logic(self, tmp_path):
         """post_script.sh references the collector and UNLESS-EXIT 42."""
@@ -185,7 +185,7 @@ class TestDAGFileGeneration:
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
         content = (tmp_path / "post_script.sh").read_text()
-        assert "wms2_post_collect.py" in content
+        assert "condora_post_collect.py" in content
         assert "UNLESS_EXIT=42" in content
         assert "ABORT_EXIT=43" in content
         assert "infrastructure_memory" in content
@@ -250,7 +250,7 @@ class TestDAGFileGeneration:
         assert "queue 1" in content
 
     def test_wrapper_scripts_generated(self, tmp_path):
-        """wms2_proc.sh, wms2_merge.py, and wms2_cleanup.py are always generated."""
+        """condora_proc.sh, condora_merge.py, and condora_cleanup.py are always generated."""
         groups = _make_merge_groups(1, 1)
         _generate_dag_files(
             submit_dir=str(tmp_path),
@@ -259,12 +259,12 @@ class TestDAGFileGeneration:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        assert (tmp_path / "wms2_proc.sh").exists()
-        assert (tmp_path / "wms2_merge.py").exists()
-        assert (tmp_path / "wms2_cleanup.py").exists()
-        assert os.access(str(tmp_path / "wms2_proc.sh"), os.X_OK)
-        assert os.access(str(tmp_path / "wms2_merge.py"), os.X_OK)
-        assert os.access(str(tmp_path / "wms2_cleanup.py"), os.X_OK)
+        assert (tmp_path / "condora_proc.sh").exists()
+        assert (tmp_path / "condora_merge.py").exists()
+        assert (tmp_path / "condora_cleanup.py").exists()
+        assert os.access(str(tmp_path / "condora_proc.sh"), os.X_OK)
+        assert os.access(str(tmp_path / "condora_merge.py"), os.X_OK)
+        assert os.access(str(tmp_path / "condora_cleanup.py"), os.X_OK)
 
     def test_test_mode_uses_wrapper_scripts(self, tmp_path):
         """When executables are /bin/true, submit files use generated scripts."""
@@ -283,16 +283,16 @@ class TestDAGFileGeneration:
             executables=executables,
         )
         proc_sub = (tmp_path / "mg_000000" / "proc_000000.sub").read_text()
-        assert "wms2_proc.sh" in proc_sub
+        assert "condora_proc.sh" in proc_sub
         assert "/bin/true" not in proc_sub
 
         merge_sub = (tmp_path / "mg_000000" / "merge.sub").read_text()
-        assert "wms2_merge.py" in merge_sub
+        assert "condora_merge.py" in merge_sub
         assert "/bin/true" not in merge_sub
 
         # Cleanup now also uses generated script
         cleanup_sub = (tmp_path / "mg_000000" / "cleanup.sub").read_text()
-        assert "wms2_cleanup.py" in cleanup_sub
+        assert "condora_cleanup.py" in cleanup_sub
         assert "/bin/true" not in cleanup_sub
 
     def test_output_info_json_format(self, tmp_path):
@@ -385,7 +385,7 @@ class TestProcessingWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        return (tmp_path / "wms2_proc.sh").read_text()
+        return (tmp_path / "condora_proc.sh").read_text()
 
     def test_proc_script_has_mode_dispatch(self, tmp_path):
         """Processing wrapper supports CMSSW and synthetic modes."""
@@ -470,7 +470,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         assert "root_files" in content
         assert "mergeProcess" in content
         assert "cmsRun" in content
@@ -487,7 +487,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         assert "merge_text_files" in content
         assert "proc_*.out" in content
 
@@ -501,7 +501,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         assert "def lfn_to_pfn(" in content
         assert "local_pfn_prefix" in content
         # Must not have old lstrip("/") path construction bug
@@ -517,7 +517,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         assert "unmerged_lfn_base" in content
         assert "unmerged_root_files" in content
         assert "has_unmerged" in content
@@ -532,7 +532,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         assert "cleanup_manifest.json" in content
         assert "cleanup_dirs" in content
 
@@ -546,7 +546,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         # write_merge_pset must add file: prefix so CMSSW treats paths as local PFN
         assert 'f"file:{f}"' in content or "file:" in content
         assert 'f.startswith("file:")' in content
@@ -562,7 +562,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         # hadd must run inside full CMSSW env, not as a bare binary
         assert "scramv1 runtime -sh" in content
         assert "import shlex" in content
@@ -579,7 +579,7 @@ class TestMergeWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_merge.py").read_text()
+        content = (tmp_path / "condora_merge.py").read_text()
         # Must export CMS_PATH for older CMSSW versions
         assert "export CMS_PATH=" in content
         # Must create SITECONF/local/ layout via _prepare_siteconf
@@ -601,8 +601,8 @@ class TestCleanupWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        assert (tmp_path / "wms2_cleanup.py").exists()
-        assert os.access(str(tmp_path / "wms2_cleanup.py"), os.X_OK)
+        assert (tmp_path / "condora_cleanup.py").exists()
+        assert os.access(str(tmp_path / "condora_cleanup.py"), os.X_OK)
 
     def test_cleanup_script_reads_manifest(self, tmp_path):
         groups = _make_merge_groups(1, 1)
@@ -613,7 +613,7 @@ class TestCleanupWrapper:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        content = (tmp_path / "wms2_cleanup.py").read_text()
+        content = (tmp_path / "condora_cleanup.py").read_text()
         assert "cleanup_manifest.json" in content
         assert "shutil.rmtree" in content
         assert "unmerged_dirs" in content
@@ -821,7 +821,7 @@ class TestMetrics:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        return (tmp_path / "wms2_proc.sh").read_text()
+        return (tmp_path / "condora_proc.sh").read_text()
 
     def _get_merge_content(self, tmp_path):
         groups = _make_merge_groups(1, 1)
@@ -832,7 +832,7 @@ class TestMetrics:
             sandbox_url="https://example.com/sandbox.tar.gz",
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
-        return (tmp_path / "wms2_merge.py").read_text()
+        return (tmp_path / "condora_merge.py").read_text()
 
     def test_proc_script_has_metrics_extraction(self, tmp_path):
         """Proc wrapper parses FJR XML and writes proc_N_metrics.json."""

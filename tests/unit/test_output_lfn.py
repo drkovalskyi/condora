@@ -1,6 +1,6 @@
 """Unit tests for LFN derivation helpers."""
 
-from wms2.core.output_lfn import (
+from condora.core.output_lfn import (
     derive_merged_lfn_bases,
     lfn_to_pfn,
     local_output_path,

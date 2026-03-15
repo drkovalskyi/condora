@@ -1,4 +1,4 @@
-# WMS2 Adaptive Execution Algorithm Specification
+# Condora Adaptive Execution Algorithm Specification
 
 **OpenSpec v2.0**
 
@@ -8,7 +8,7 @@
 | **Status** | DRAFT |
 | **Date** | 2026-03-04 |
 | **Authors** | CMS Computing |
-| **Parent Spec** | docs/spec.md (WMS2 v2.7.0) |
+| **Parent Spec** | docs/spec.md (Condora v2.7.0) |
 
 ---
 
@@ -16,7 +16,7 @@
 
 ### 1.1 Purpose
 
-This document specifies the algorithms behind the WMS2 adaptive
+This document specifies the algorithms behind the Condora adaptive
 execution model described in main spec §5. The main spec defines
 *what* the adaptive system does at an architectural level —
 memory-per-core windows, execution rounds, per-step splitting, metric
@@ -28,9 +28,9 @@ reimplement the system from scratch.
 
 The main spec (§5, §DD-12, §DD-13) is authoritative for architectural decisions:
 
-- WMS2 does not run separate pilot jobs; the first production DAG provides baseline metrics
+- Condora does not run separate pilot jobs; the first production DAG provides baseline metrics
 - The adaptive algorithm operates within a `[default_memory_per_core, max_memory_per_core]` window
-- Per-step splitting is a sandbox-owned optimization; WMS2 only provides metrics
+- Per-step splitting is a sandbox-owned optimization; Condora only provides metrics
 - Memory sizing uses measured data + 20% safety margin, clamped within the window
 
 This document specifies the algorithms that implement these

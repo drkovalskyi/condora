@@ -1,4 +1,4 @@
-# WMS2 — Error Handling Specification
+# Condora — Error Handling Specification
 
 | Field | Value |
 |---|---|
@@ -11,21 +11,21 @@
 
 ## 1. Overview
 
-WMS2 uses a **two-level error handling model** that separates fast, per-node recovery from slow, workflow-level decisions:
+Condora uses a **two-level error handling model** that separates fast, per-node recovery from slow, workflow-level decisions:
 
 | Level | Owner | Scope | Speed | Mechanism |
 |---|---|---|---|---|
 | **Level 1: Immediate** | POST script + DAGMan RETRY | Per-node | Seconds–minutes | Classify error, retry or stop |
-| **Level 2: Delayed** | WMS2 Error Handler + rescue DAG | Per-round | Minutes–hours | Aggregate failures, rescue or hold |
+| **Level 2: Delayed** | Condora Error Handler + rescue DAG | Per-round | Minutes–hours | Aggregate failures, rescue or hold |
 
 **Design principles:**
 
 1. **POST script is the brain, RETRY is the loop.** DAGMan's RETRY directive is primitive — no delays, no conditionals beyond a single UNLESS-EXIT code. All classification intelligence lives in the POST script. RETRY provides fast in-DAG resubmission.
-2. **WMS2 never tracks individual jobs.** Error handling operates at the work-unit and round level. Per-node data is collected by POST scripts into side files that WMS2 reads after DAG completion.
+2. **Condora never tracks individual jobs.** Error handling operates at the work-unit and round level. Per-node data is collected by POST scripts into side files that Condora reads after DAG completion.
 3. **Fail fast, recover slowly.** Transient errors are retried immediately (Level 1). Persistent patterns are surfaced to operators (Level 2) rather than silently retried forever.
 4. **Rescue first, then next round.** When a DAG finishes with failures, rescue handles transient issues (cooloff, site flaps). A new round is planned only after rescue attempts are exhausted.
 
-**Relationship to spec Section 6:** The main spec (`docs/spec.md` Section 6) defines the recovery model at a high level — three conceptual recovery levels, clean stop flow, catastrophic failure recovery, and POST script sketch. This document expands Level 1 and Level 3 into a complete, implementable design. Level 2 (DAG-wide correlated failure detection) remains an HTCondor feature request (spec Section 12) — the practical model uses POST scripts (Level 1) and WMS2 rescue decisions (Level 2 in this document) as the two operational levels.
+**Relationship to spec Section 6:** The main spec (`docs/spec.md` Section 6) defines the recovery model at a high level — three conceptual recovery levels, clean stop flow, catastrophic failure recovery, and POST script sketch. This document expands Level 1 and Level 3 into a complete, implementable design. Level 2 (DAG-wide correlated failure detection) remains an HTCondor feature request (spec Section 12) — the practical model uses POST scripts (Level 1) and Condora rescue decisions (Level 2 in this document) as the two operational levels.
 
 ---
 
@@ -33,7 +33,7 @@ WMS2 uses a **two-level error handling model** that separates fast, per-node rec
 
 ### 2.1 DAGMan RETRY Mechanics
 
-Every node in the DAG has a `RETRY` directive that allows DAGMan to resubmit the node without WMS2 involvement:
+Every node in the DAG has a `RETRY` directive that allows DAGMan to resubmit the node without Condora involvement:
 
 ```
 # In the .dag file
@@ -82,7 +82,7 @@ The POST script writes a JSON side file per node attempt in the submit directory
 {submit_dir}/{node_name}.post.json
 ```
 
-This file is the primary data exchange between Level 1 (POST script) and Level 2 (WMS2 Error Handler). WMS2 reads these files after DAG termination to make workflow-level decisions.
+This file is the primary data exchange between Level 1 (POST script) and Level 2 (Condora Error Handler). Condora reads these files after DAG termination to make workflow-level decisions.
 
 **Contents:**
 
@@ -148,7 +148,7 @@ This file is the primary data exchange between Level 1 (POST script) and Level 2
 | `classification.*` | POST script logic | Error classification algorithm (Section 2.4) |
 | `log_tail` | Job stderr | Last 200 lines of `_condor_stderr` from sandbox |
 
-**Important**: The `final` field indicates whether this is the last attempt for this node (either succeeded, or retries exhausted, or classified as permanent). WMS2 only reads the final post.json — intermediate attempts are for POST script internal bookkeeping.
+**Important**: The `final` field indicates whether this is the last attempt for this node (either succeeded, or retries exhausted, or classified as permanent). Condora only reads the final post.json — intermediate attempts are for POST script internal bookkeeping.
 
 ### 2.4 POST Script Classification and Actions
 
@@ -227,13 +227,13 @@ PARENT merge_grp_001 CHILD cleanup_grp_001
 1. If a processing node fails permanently (exhausts retries or hits UNLESS-EXIT), DAGMan marks it FAILED.
 2. The merge node's `PARENT` dependency is never satisfied — DAGMan will not run the merge node.
 3. The entire merge group (work unit) fails. The cleanup node also does not run.
-4. The failed work unit is reflected in the DAG's final status and reported to WMS2.
+4. The failed work unit is reflected in the DAG's final status and reported to Condora.
 
 **Future option — POST absorb for partial merges**: A POST script could absorb a processing node failure (exit 0) and let the merge node run on partial input. This would allow merge groups to produce output even when some processing jobs fail. This pattern is documented here as a future option but is **not part of the initial implementation** — it requires careful handling of output completeness metadata and downstream validation.
 
 ---
 
-## 3. Level 2: Delayed Error Handling (WMS2 + Rescue DAG)
+## 3. Level 2: Delayed Error Handling (Condora + Rescue DAG)
 
 ### 3.1 When It Triggers
 
@@ -285,13 +285,13 @@ DONE cleanup_grp_001
 # proc_000003, merge_grp_002, etc. are NOT listed → will be retried
 ```
 
-**Submitting the rescue DAG**: WMS2 resubmits the *original* `.dag` file. DAGMan automatically detects the `.rescue001` file in the same directory and skips all nodes marked DONE. Failed nodes and their blocked dependents are retried.
+**Submitting the rescue DAG**: Condora resubmits the *original* `.dag` file. DAGMan automatically detects the `.rescue001` file in the same directory and skips all nodes marked DONE. Failed nodes and their blocked dependents are retried.
 
 **Properties:**
 
 - **Cumulative**: Each rescue file marks all previously completed nodes. The rescue chain is: `.rescue001` (first failure), `.rescue002` (second failure), etc. Each successive file is a superset of the previous.
 - **Schedd-portable**: Rescue DAG files are plain text on the shared filesystem. They contain no schedd-specific state (no cluster IDs, no job IDs). A rescue DAG can be submitted on a different schedd than the original — this enables schedd drain/decommission scenarios.
-- **WMS2 bookkeeping**: When submitting a rescue DAG, WMS2 creates a new DAG record with `parent_dag_id` pointing to the previous DAG. The rescue count is tracked as the number of DAG records in the chain.
+- **Condora bookkeeping**: When submitting a rescue DAG, Condora creates a new DAG record with `parent_dag_id` pointing to the previous DAG. The rescue count is tracked as the number of DAG records in the chain.
 
 ### 3.4 Adaptive Round Recovery Flow
 
@@ -318,9 +318,9 @@ Round N DAG finishes with partial failures
           └── Kill and clone (increment processing_version, start over)
 ```
 
-**Critical rule: one round at a time.** WMS2 never plans Round N+1 while Round N (or any of its rescue attempts) is still in progress. The round must fully resolve — either all work units complete, or the request is held for operator decision — before the next round begins.
+**Critical rule: one round at a time.** Condora never plans Round N+1 while Round N (or any of its rescue attempts) is still in progress. The round must fully resolve — either all work units complete, or the request is held for operator decision — before the next round begins.
 
-**Credit on release from HELD**: When an operator releases a HELD request, WMS2 credits all work units that completed successfully (across the original DAG and its rescue attempts). For workflows without primary input, the event offset advances past all planned events for the round (see Section 5.1). For workflows with primary input, completed files are marked as processed and failed files are handled per Section 5.2.
+**Credit on release from HELD**: When an operator releases a HELD request, Condora credits all work units that completed successfully (across the original DAG and its rescue attempts). For workflows without primary input, the event offset advances past all planned events for the round (see Section 5.1). For workflows with primary input, completed files are marked as processed and failed files are handled per Section 5.2.
 
 ---
 
@@ -402,7 +402,7 @@ The `cleanup_policy` on the request (spec Section 3.1.1) controls the Active →
 
 ## 5. Workflow-Type-Specific Error Recovery
 
-WMS2 handles two fundamentally different workflow types with different recovery strategies.
+Condora handles two fundamentally different workflow types with different recovery strategies.
 
 ### 5.1 Workflows Without Primary Input (MC Generation)
 
@@ -464,7 +464,7 @@ Round N completes with some work units failed
   │   3. Skip: "Processed" and "Excluded" files
 ```
 
-**Rationale for deferred retry of "Attempted" files**: If a work unit fails and the POST script identifies a specific bad file, only that file is excluded. The other files in the same work unit were not necessarily the problem — but they might have been. By processing all fresh files first, WMS2 maximizes throughput with known-good data. Attempted files are retried later, and if they fail again, the POST script has another chance to identify the actual problem.
+**Rationale for deferred retry of "Attempted" files**: If a work unit fails and the POST script identifies a specific bad file, only that file is excluded. The other files in the same work unit were not necessarily the problem — but they might have been. By processing all fresh files first, Condora maximizes throughput with known-good data. Attempted files are retried later, and if they fail again, the POST script has another chance to identify the actual problem.
 
 **Run-aware grouping**: When planning work units for input-driven workflows, the DAG Planner makes a **best-effort** attempt to group files from the same CMS run together. CMSSW's `beginRun`/`endRun` processing is expensive — processing files from many different runs in a single job causes unnecessary run transitions. Grouping by run reduces this overhead. This is best-effort, not a hard constraint: if run grouping would leave some runs with very few files (below the work unit target), files are grouped by proximity instead.
 
@@ -476,7 +476,7 @@ Round N completes with some work units failed
 
 ### 6.1 Detection
 
-After a DAG round completes (including rescue attempts), WMS2 aggregates POST script failure data by site:
+After a DAG round completes (including rescue attempts), Condora aggregates POST script failure data by site:
 
 ```python
 def analyze_site_failures(post_data_files):
@@ -508,7 +508,7 @@ Site banning operates at two levels:
 | **Per-workflow** | One workflow at one site | High failure rate for this workflow at this site | This workflow's future DAGs exclude the site |
 | **System-wide** | All workflows at one site | Multiple independent workflows ban the same site | All new DAGs exclude the site |
 
-**Promotion**: When `N` or more independent workflows have active per-workflow bans on the same site (where `N` = `site_ban_promotion_threshold`, default 3), WMS2 promotes the ban to system-wide. This indicates a site-level infrastructure problem rather than a workflow-specific issue.
+**Promotion**: When `N` or more independent workflows have active per-workflow bans on the same site (where `N` = `site_ban_promotion_threshold`, default 3), Condora promotes the ban to system-wide. This indicates a site-level infrastructure problem rather than a workflow-specific issue.
 
 ### 6.3 Properties
 
@@ -582,7 +582,7 @@ Operator calls POST /api/v1/requests/{name}/stop
   │     DAGMan writes rescue DAG (.rescue00N) before exiting
   │     All completed nodes are marked DONE in rescue file
   │
-  ├── WMS2 creates new DAG record (parent_dag_id = old DAG)
+  ├── Condora creates new DAG record (parent_dag_id = old DAG)
   │     Rescue DAG is the recovery artifact
   │
   ├── Request → STOPPING → RESUBMITTING → QUEUED
@@ -598,7 +598,7 @@ Operator calls POST /api/v1/requests/{name}/stop
 - **Failure-rescue**: DAG terminated due to node failures → counts against limit.
 - **Stop-rescue**: DAG terminated due to `condor_rm` (clean stop) → does not count.
 
-WMS2 distinguishes these by checking the DAG record: if `stop_requested_at` is set, it's a stop-rescue.
+Condora distinguishes these by checking the DAG record: if `stop_requested_at` is set, it's a stop-rescue.
 
 ### 7.3 DAGMan Rescue DAG Is Cumulative
 
@@ -668,7 +668,7 @@ These overrides would be stored in the request's `request_data` JSONB field and 
 
 ### 9.1 Problem Statement
 
-WMS2's error handling (Sections 2–3) assumes jobs **complete** — either succeeding or failing — which triggers the POST script and DAGMan RETRY loop. However, several site-level failure modes cause jobs to never complete:
+Condora's error handling (Sections 2–3) assumes jobs **complete** — either succeeding or failing — which triggers the POST script and DAGMan RETRY loop. However, several site-level failure modes cause jobs to never complete:
 
 | Failure Mode | Symptom | Duration |
 |---|---|---|
@@ -680,7 +680,7 @@ WMS2's error handling (Sections 2–3) assumes jobs **complete** — either succ
 
 These "silent" failures are invisible to the POST script / RETRY model because the job never terminates. The DAG waits forever. Real example: 3 WUs stuck at T2_US_Vanderbilt for 15+ hours — glideins died, jobs showed Running with `RemoteWallClockTime=0`, DAGMan waited indefinitely. No POST script ran.
 
-**Solution**: Submit-level HTCondor classads that enforce timeouts and resource limits directly in the submit file. This fits WMS2's design principle of "no per-job tracking" — enforcement is declarative, not polled.
+**Solution**: Submit-level HTCondor classads that enforce timeouts and resource limits directly in the submit file. This fits Condora's design principle of "no per-job tracking" — enforcement is declarative, not polled.
 
 ### 9.2 Enforcement Mechanisms
 
@@ -729,7 +729,7 @@ periodic_remove = \
 **Diagnostic reason**: Each submit file includes `+PeriodicRemoveReason` with a human-readable string identifying which clause fired. HTCondor logs this in the job event log, aiding debugging:
 
 ```
-+PeriodicRemoveReason = strcat("WMS2: ",
++PeriodicRemoveReason = strcat("Condora: ",
   ifThenElse(wall_time_clause, "wall time exceeded (N min limit)",
   ifThenElse(held_clause, "held for M min",
   ifThenElse(idle_clause, "idle for H hours",
@@ -747,7 +747,7 @@ Per-node wall time limit, computed by the DAG Planner based on node type and exp
 | Merge | `max(merge_min, proc_estimate × 2)` | 240 min (4h) | 240 min |
 | Cleanup | Fixed | 60 min | 60 min |
 
-**Safety factor**: Default 3× (`WMS2_WALL_TIME_SAFETY_FACTOR`). The goal is to catch runaways and zombies, not to kill slow-but-legitimate jobs. A 3× margin accommodates:
+**Safety factor**: Default 3× (`CONDORA_WALL_TIME_SAFETY_FACTOR`). The goal is to catch runaways and zombies, not to kill slow-but-legitimate jobs. A 3× margin accommodates:
 - Natural variance in processing time across events
 - Slow sites with degraded I/O or CPU
 - Pileup mixing variability
@@ -841,24 +841,24 @@ This is a one-time operation per DAG. The escalation flag is stored in the DAG's
 
 | Parameter | Env Var | Default | Description |
 |---|---|---|---|
-| `wall_time_safety_factor` | `WMS2_WALL_TIME_SAFETY_FACTOR` | 3.0 | Multiplier on estimated wall time |
-| `landing_wall_time_mins` | `WMS2_LANDING_WALL_TIME_MINS` | 30 | Fixed wall time for landing nodes |
-| `merge_wall_time_mins_min` | `WMS2_MERGE_WALL_TIME_MINS_MIN` | 240 | Minimum wall time for merge nodes |
-| `cleanup_wall_time_mins` | `WMS2_CLEANUP_WALL_TIME_MINS` | 60 | Fixed wall time for cleanup nodes |
-| `periodic_remove_held_timeout_sec` | `WMS2_PERIODIC_REMOVE_HELD_TIMEOUT_SEC` | 420 | Kill jobs stuck in held state (7 min) |
-| `periodic_remove_disk_limit_kb` | `WMS2_PERIODIC_REMOVE_DISK_LIMIT_KB` | 20971520 | Disk usage limit (20 GB) |
-| `idle_timeout_high_sec` | `WMS2_IDLE_TIMEOUT_HIGH_SEC` | 14400 | Idle timeout for high-priority jobs (4h) |
-| `idle_timeout_normal_sec` | `WMS2_IDLE_TIMEOUT_NORMAL_SEC` | 43200 | Idle timeout for normal-priority jobs (12h) |
-| `idle_timeout_low_sec` | `WMS2_IDLE_TIMEOUT_LOW_SEC` | 172800 | Idle timeout for low-priority jobs (48h) |
-| `merge_priority_boost` | `WMS2_MERGE_PRIORITY_BOOST` | 10 | Priority boost for merge/cleanup over proc |
-| `tail_escalation_threshold` | `WMS2_TAIL_ESCALATION_THRESHOLD` | 0.9 | Fraction of WUs done before tail escalation |
-| `tail_escalation_priority` | `WMS2_TAIL_ESCALATION_PRIORITY` | 10 | Priority value set on remaining jobs |
+| `wall_time_safety_factor` | `CONDORA_WALL_TIME_SAFETY_FACTOR` | 3.0 | Multiplier on estimated wall time |
+| `landing_wall_time_mins` | `CONDORA_LANDING_WALL_TIME_MINS` | 30 | Fixed wall time for landing nodes |
+| `merge_wall_time_mins_min` | `CONDORA_MERGE_WALL_TIME_MINS_MIN` | 240 | Minimum wall time for merge nodes |
+| `cleanup_wall_time_mins` | `CONDORA_CLEANUP_WALL_TIME_MINS` | 60 | Fixed wall time for cleanup nodes |
+| `periodic_remove_held_timeout_sec` | `CONDORA_PERIODIC_REMOVE_HELD_TIMEOUT_SEC` | 420 | Kill jobs stuck in held state (7 min) |
+| `periodic_remove_disk_limit_kb` | `CONDORA_PERIODIC_REMOVE_DISK_LIMIT_KB` | 20971520 | Disk usage limit (20 GB) |
+| `idle_timeout_high_sec` | `CONDORA_IDLE_TIMEOUT_HIGH_SEC` | 14400 | Idle timeout for high-priority jobs (4h) |
+| `idle_timeout_normal_sec` | `CONDORA_IDLE_TIMEOUT_NORMAL_SEC` | 43200 | Idle timeout for normal-priority jobs (12h) |
+| `idle_timeout_low_sec` | `CONDORA_IDLE_TIMEOUT_LOW_SEC` | 172800 | Idle timeout for low-priority jobs (48h) |
+| `merge_priority_boost` | `CONDORA_MERGE_PRIORITY_BOOST` | 10 | Priority boost for merge/cleanup over proc |
+| `tail_escalation_threshold` | `CONDORA_TAIL_ESCALATION_THRESHOLD` | 0.9 | Fraction of WUs done before tail escalation |
+| `tail_escalation_priority` | `CONDORA_TAIL_ESCALATION_PRIORITY` | 10 | Priority value set on remaining jobs |
 
 ### 9.10 Design Decisions
 
 | # | Decision | Rationale |
 |---|---|---|
-| EH-11 | Submit-level enforcement, not WMS2 polling | Fits "no per-job tracking" principle. HTCondor evaluates periodic expressions autonomously. WMS2 doesn't need to poll individual jobs. |
+| EH-11 | Submit-level enforcement, not Condora polling | Fits "no per-job tracking" principle. HTCondor evaluates periodic expressions autonomously. Condora doesn't need to poll individual jobs. |
 | EH-12 | No memory limit in periodic_remove | OOM recovery is handled by DAG Monitor's `_handle_held_oom_jobs()` which bumps `request_memory` before releasing. A periodic_remove on memory would kill the job before the intelligent recovery can act. |
 | EH-13 | 3× safety factor on wall time | Must catch runaways but not slow-but-legitimate jobs. Processing time varies significantly across events and sites. 3× accommodates this while still catching true zombies within hours instead of days. |
 | EH-14 | Landing node gets RETRY 3 | Without retries, one idle timeout kills the entire work unit. Landing is trivial (`/bin/true`), so retries are cheap. Three attempts cover transient site unavailability. |
@@ -874,7 +874,7 @@ This appendix summarizes the key design decisions in this document and their rat
 
 | # | Decision | Rationale |
 |---|---|---|
-| EH-1 | Two-level model (POST+RETRY, WMS2+rescue), not three | Level 2 (DAG-wide HTCondor feature) is aspirational. Practical model uses POST scripts and rescue DAGs. |
+| EH-1 | Two-level model (POST+RETRY, Condora+rescue), not three | Level 2 (DAG-wide HTCondor feature) is aspirational. Practical model uses POST scripts and rescue DAGs. |
 | EH-2 | POST script is the brain, RETRY is the loop | DAGMan RETRY has no delays, no conditionals beyond UNLESS-EXIT. All intelligence in POST script. |
 | EH-3 | HELD replaces "review" and "abort" | Single operator-attention state. Simpler state machine, same operational capability. |
 | EH-4 | FAILED is manual only | Automatic failure is dangerous — transient infrastructure issues could cause 100% round failure on valid requests. Human judgment required. |
@@ -884,7 +884,7 @@ This appendix summarizes the key design decisions in this document and their rat
 | EH-8 | Per-file state tracking for input workflows | Four states (not yet processed / attempted / processed / excluded). Deferred retry of attempted files maximizes throughput. |
 | EH-9 | Site banning is two-level (per-workflow + system-wide) | Per-workflow catches workflow-specific issues. Promotion to system-wide catches infrastructure problems. Time-limited with operator override. |
 | EH-10 | Stop-rescues don't count against max rescue attempts | Operator-initiated stops are not errors. Rescue DAGs from stops preserve progress, not recover from failure. |
-| EH-11 | Submit-level enforcement, not WMS2 polling | Fits "no per-job tracking" principle. HTCondor evaluates periodic expressions autonomously. |
+| EH-11 | Submit-level enforcement, not Condora polling | Fits "no per-job tracking" principle. HTCondor evaluates periodic expressions autonomously. |
 | EH-12 | No memory limit in periodic_remove | OOM recovery handled by DAG Monitor's intelligent handler. periodic_remove would kill before recovery. |
 | EH-13 | 3× safety factor on wall time | Catches runaways but not slow-but-legitimate jobs. Accommodates processing time variance across events and sites. |
 | EH-14 | Landing node gets RETRY 3 | One idle timeout shouldn't kill entire WU. Landing is `/bin/true`, retries are cheap. |

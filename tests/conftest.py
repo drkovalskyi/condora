@@ -1,8 +1,8 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from wms2.config import Settings
-from wms2.main import create_app
+from condora.config import Settings
+from condora.main import create_app
 
 # ---------------------------------------------------------------------------
 # Environment level gating
@@ -78,7 +78,7 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture
 def settings():
     return Settings(
-        database_url="postgresql+asyncpg://wms2test:wms2test@localhost:5433/wms2test",
+        database_url="postgresql+asyncpg://condoratest:condoratest@localhost:5433/condoratest",
         lifecycle_cycle_interval=1,
         max_active_dags=10,
     )

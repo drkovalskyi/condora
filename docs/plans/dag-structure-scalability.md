@@ -67,7 +67,7 @@ Total: 1 DAGMan process, ~5000 vanilla jobs
   SUBDAG node. In a flat DAG, there's no single node representing the WU.
   Workaround: merge node's POST script could take over WU-level analysis.
 - **Single rescue DAG** for the entire round instead of per-WU. Less granular
-  recovery -- but WMS2 already handles this at the round level (replan with
+  recovery -- but Condora already handles this at the round level (replan with
   site exclusions).
 - PRE/POST scripts still work per-node (site pinning, error classification).
 
@@ -76,7 +76,7 @@ The current two-level retry (inner proc RETRY + outer SUBDAG RETRY) could
 be replaced by:
 - proc nodes: RETRY 5 (same as now)
 - If a WU's procs all exhaust retries -> merge never runs -> cleanup never
-  runs -> DAGMan marks those nodes as failed -> WMS2 error handler sees
+  runs -> DAGMan marks those nodes as failed -> Condora error handler sees
   the failed WU at round completion and includes those events in the next round
 - Site exclusion: post_script.sh already records failed machines/sites.
   pin_site.sh already reads exclusion files. The mechanism works per-node.
@@ -213,7 +213,7 @@ initial/terminal nodes of each splice. Adding RETRY would re-queue all
 splice nodes on failure. POST would fire after all terminal nodes complete.
 The node naming hierarchy (`mg_000000+proc_000000`) already exists.
 
-**This is the ideal solution.** It makes Options A-D unnecessary. WMS2
+**This is the ideal solution.** It makes Options A-D unnecessary. Condora
 would change one line: `SUBDAG EXTERNAL` -> `SPLICE` in the outer DAG,
 and everything else stays the same.
 
@@ -223,7 +223,7 @@ Instead of spawning `condor_dagman` per SUBDAG EXTERNAL, manage sub-DAGs
 as internal node groups within the parent DAGMan process. Same semantics
 (RETRY, POST, rescue), single process.
 
-**What this gives us:** Identical to current behavior, zero WMS2 code changes.
+**What this gives us:** Identical to current behavior, zero Condora code changes.
 
 **HTCondor implementation complexity:** High. Requires refactoring DAGMan's
 internal node management to support nested scopes without separate processes.

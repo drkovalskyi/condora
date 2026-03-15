@@ -1,1 +1,1 @@
-"""WMS2 test matrix — declarative workflow definitions and runner."""
+"""Condora test matrix — declarative workflow definitions and runner."""

@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wms2.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
-from wms2.config import Settings
-from wms2.core.lifecycle_manager import RequestLifecycleManager
-from wms2.core.output_manager import OutputManager
-from wms2.models.enums import BlockStatus, DAGStatus, RequestStatus
+from condora.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
+from condora.config import Settings
+from condora.core.lifecycle_manager import RequestLifecycleManager
+from condora.core.output_manager import OutputManager
+from condora.models.enums import BlockStatus, DAGStatus, RequestStatus
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -440,7 +440,7 @@ class TestBlockGatedCompletion:
         )
 
         # DAG monitor says: DAG completed, no new work units
-        from wms2.core.dag_monitor import DAGPollResult
+        from condora.core.dag_monitor import DAGPollResult
         mock_dag_monitor = MagicMock()
         mock_dag_monitor.poll_dag = AsyncMock(return_value=DAGPollResult(
             dag_id=str(dag.id),

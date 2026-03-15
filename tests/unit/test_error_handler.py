@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from wms2.config import Settings
-from wms2.core.error_handler import CompletionResult, ErrorHandler
-from wms2.models.enums import DAGStatus, WorkflowStatus
+from condora.config import Settings
+from condora.core.error_handler import CompletionResult, ErrorHandler
+from condora.models.enums import DAGStatus, WorkflowStatus
 
 from .conftest import make_request_row
 
