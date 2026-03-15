@@ -572,6 +572,8 @@ def compute_per_step_nthreads(
     PER_THREAD_OVERHEAD_MB = 250
 
     per_step = {}
+    # First step index (may be 0 or 1 depending on metrics source)
+    first_si = min(metrics["steps"].keys()) if metrics["steps"] else 0
     for si in sorted(metrics["steps"]):
         step = metrics["steps"][si]
         eff_vals = step["cpu_eff"]
@@ -592,7 +594,7 @@ def compute_per_step_nthreads(
         ideal_n_par = 1
         ideal_memory = max_memory_mb
 
-        if si == 0 and split and request_cpus > 0 and eff_cores > 0:
+        if si == first_si and split and request_cpus > 0 and eff_cores > 0:
             TMPFS_PER_INSTANCE_MB = 1500
             tuned = _nearest_power_of_2(eff_cores)
             tuned = min(tuned, original_nthreads)
@@ -760,7 +762,10 @@ def compute_job_split(
     Memory follows spec Section 5.5: clamp(measured × (1 + safety_margin),
     default_per_core × tuned_cores, max_per_core × tuned_cores).
     """
-    step0 = metrics["steps"].get(0)
+    # Use the first step (GEN or first processing step) for CPU efficiency.
+    # Step keys are 1-indexed from the merge script (1, 2, 3, ...).
+    first_step_key = min(metrics["steps"].keys()) if metrics["steps"] else None
+    step0 = metrics["steps"].get(first_step_key) if first_step_key is not None else None
     if not step0:
         return {
             "tuned_nthreads": original_nthreads,
