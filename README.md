@@ -1,2 +1,2 @@
-# WMS2
-CMS Workload Management System v2
+# Condora WMS
+CMS Workload Management System based on HTCondor
