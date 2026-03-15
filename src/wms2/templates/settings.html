@@ -241,6 +241,24 @@
                             <span x-text="settings.error_max_rescue_attempts"></span>
                         </template>
                     </dd>
+                    <dt>Proc Retry Count</dt>
+                    <dd>
+                        <template x-if="editing">
+                            <input type="number" class="settings-input" x-model.number="editValues.proc_retry_count" min="0">
+                        </template>
+                        <template x-if="!editing">
+                            <span x-text="settings.proc_retry_count"></span>
+                        </template>
+                    </dd>
+                    <dt>WU Retry Count</dt>
+                    <dd>
+                        <template x-if="editing">
+                            <input type="number" class="settings-input" x-model.number="editValues.wu_retry_count" min="0">
+                        </template>
+                        <template x-if="!editing">
+                            <span x-text="settings.wu_retry_count"></span>
+                        </template>
+                    </dd>
                     <dt>Site Ban Duration</dt>
                     <dd>
                         <template x-if="editing">

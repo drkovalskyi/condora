@@ -1555,6 +1555,18 @@ class RequestLifecycleManager:
         nc["_mid_dag_excluded_sites"] = all_excluded
         await self.db.update_dag(dag.id, node_counts=nc)
 
+        # Persist ban via SiteManager (request-wide, survives DAG restarts)
+        from wms2.core.site_manager import SiteManager
+        sm = SiteManager(self.db, self.settings)
+        for site in new_sites:
+            try:
+                await sm.ban_site(
+                    site, workflow_id=workflow.id,
+                    reason=f"Mid-DAG exclusion: high failure rate in DAG {dag.dagman_cluster_id}",
+                )
+            except Exception:
+                logger.debug("Failed to persist ban for %s", site, exc_info=True)
+
         logger.info(
             "Mid-DAG site exclusion: excluded %s from %d idle landing jobs "
             "for %s (DAG %s)",

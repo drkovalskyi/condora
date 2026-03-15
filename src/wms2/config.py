@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     # WU-level recovery — outer DAG retries failed SUBDAGs at a different site
     wu_retry_count: int = 1  # RETRY count on outer SUBDAG nodes (0 = disabled)
 
+    # Inner DAG node retries
+    proc_retry_count: int = 2  # RETRY count on proc nodes within a WU
+
     # Site Banning
     site_ban_duration_days: int = 7
     site_ban_promotion_threshold: int = 3

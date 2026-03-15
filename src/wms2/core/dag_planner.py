@@ -1235,6 +1235,7 @@ def _generate_dag_files(
     _write_merge_script(str(submit_path / "wms2_merge.py"))
     _write_cleanup_script(str(submit_path / "wms2_cleanup.py"))
     _write_stageout_utility(str(submit_path / "wms2_stageout.py"))
+    _write_landing_validate_script(str(submit_path / "landing_validate.sh"))
 
     # Symlink X509 proxy into submit_dir so .sub files can reference it
     # with a relative path (../x509_proxy from group_dir). The proxy's
@@ -1340,7 +1341,7 @@ def _generate_dag_files(
             # Local mode: symlink shared scripts into mg_dir so inner DAG
             # can reference them as ./script.sh (DIR sets IWD to mg_dir).
             for script in ("elect_site.sh", "pin_site.sh", "post_script.sh",
-                            "wms2_post_collect.py"):
+                            "wms2_post_collect.py", "landing_validate.sh"):
                 link = mg_dir / script
                 if not link.exists():
                     os.symlink(f"../{script}", str(link))
@@ -1689,37 +1690,73 @@ def _generate_group_dag(
     merge_priority = job_priority + (settings.merge_priority_boost if settings else 10)
 
     if not skip_site_pinning:
-        # Landing node: /bin/true job with free site selection.
-        # Its POST script (elect_site.sh) extracts MATCH_GLIDEIN_CMSSite
+        # Landing node: site selection via free negotiation.
+        # In grid mode: runs landing_validate.sh to verify stageout access.
+        # In local mode: runs /bin/true (trivial).
+        # POST script (elect_site.sh) extracts MATCH_GLIDEIN_CMSSite
         # so remaining nodes can be pinned to the same site.
         # Request the same resources as proc jobs so that the landing only
         # matches at sites that can actually run the heavy processing.
         landing_priority = max(job_priority, 5) + 10
         landing_classads = dict(extra_classads or {})
         landing_classads["WMS2_QuickJob"] = "True"
-        _write_submit_file(
-            str(group_dir / "landing.sub"),
-            executable="/bin/true",
-            arguments="",
-            description="landing node",
-            desired_sites=all_desired,
-            banned_sites=banned_sites,
-            allowed_sites=allowed_sites,
-            memory_mb=memory_mb,
-            ncpus=ncpus,
-            disk_kb=disk_kb,
-            priority=landing_priority,
-            extra_classads=landing_classads,
-            output_dir=out_dir,
-            transfer_executable=False,
-            transfer_output_files=[],
-            max_wall_time_mins_run=landing_wall,
-            idle_timeout_sec=landing_idle_timeout,
-            held_timeout_sec=held_timeout,
-            disk_limit_kb=disk_limit,
-            node_type="landing",
-            settings=settings,
-        )
+
+        if stageout_mode == "grid" and output_info_path:
+            # Validate stageout write access at the elected site
+            if spool_mode:
+                landing_exe = "landing_validate.sh"
+                landing_transfer = [f"{fp}output_info.json", "wms2_stageout.py"]
+            else:
+                landing_exe = "../landing_validate.sh"
+                landing_transfer = ["output_info.json", "../wms2_stageout.py"]
+            _write_submit_file(
+                str(group_dir / "landing.sub"),
+                executable=landing_exe,
+                arguments="",
+                description="landing + stageout validation",
+                desired_sites=all_desired,
+                banned_sites=banned_sites,
+                allowed_sites=allowed_sites,
+                memory_mb=memory_mb,
+                ncpus=ncpus,
+                disk_kb=disk_kb,
+                priority=landing_priority,
+                extra_classads=landing_classads,
+                output_dir=out_dir,
+                transfer_executable=True,
+                transfer_input_files=landing_transfer,
+                transfer_output_files=[],
+                max_wall_time_mins_run=landing_wall,
+                idle_timeout_sec=landing_idle_timeout,
+                held_timeout_sec=held_timeout,
+                disk_limit_kb=disk_limit,
+                node_type="landing",
+                settings=settings,
+            )
+        else:
+            _write_submit_file(
+                str(group_dir / "landing.sub"),
+                executable="/bin/true",
+                arguments="",
+                description="landing node",
+                desired_sites=all_desired,
+                banned_sites=banned_sites,
+                allowed_sites=allowed_sites,
+                memory_mb=memory_mb,
+                ncpus=ncpus,
+                disk_kb=disk_kb,
+                priority=landing_priority,
+                extra_classads=landing_classads,
+                output_dir=out_dir,
+                transfer_executable=False,
+                transfer_output_files=[],
+                max_wall_time_mins_run=landing_wall,
+                idle_timeout_sec=landing_idle_timeout,
+                held_timeout_sec=held_timeout,
+                disk_limit_kb=disk_limit,
+                node_type="landing",
+                settings=settings,
+            )
         lines.append(f"JOB landing {fp}landing.sub")
         landing_log = f"{fp}landing.log"
         lines.append(
@@ -1908,9 +1945,10 @@ def _generate_group_dag(
     lines.append("")
 
     # Retries
+    proc_retries = settings.proc_retry_count if settings else 2
     for node in proc_nodes:
         node_name = f"proc_{node.node_index:06d}"
-        lines.append(f"RETRY {node_name} 5 UNLESS-EXIT 42")
+        lines.append(f"RETRY {node_name} {proc_retries} UNLESS-EXIT 42")
     lines.append("RETRY merge 2 UNLESS-EXIT 42")
     lines.append("RETRY cleanup 1")
     lines.append("")
@@ -2381,6 +2419,20 @@ print(f'{ec} {final}')
 done
 if [ "$match_count" -ge "$IDENTICAL_THRESHOLD" ]; then
     echo "ABORT: $match_count nodes exhausted retries with exit code $CURRENT_EXIT — systemic failure" >&2
+    exit $ABORT_EXIT
+fi
+
+# --- Intra-WU failure watchdog ---
+# Count distinct procs with any failure. If >50% failed, site is broken.
+# wu_post.sh will handle site exclusion and WU retry at a different site.
+any_fail_count=0
+for pj in "${GROUP_DIR}"/proc_*.post.json; do
+    [ -f "$pj" ] || continue
+    any_fail_count=$((any_fail_count + 1))
+done
+half=$((PROC_COUNT / 2))
+if [ "$any_fail_count" -gt "$half" ] && [ "$any_fail_count" -ge 3 ]; then
+    echo "WATCHDOG: $any_fail_count of $PROC_COUNT procs failed — site likely broken, aborting WU" >&2
     exit $ABORT_EXIT
 fi
 
@@ -6059,14 +6111,65 @@ def mkdir_p(pfn, command):
 
 
 if __name__ == "__main__":
-    # Simple test: resolve a write PFN
-    if len(sys.argv) >= 3:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--validate":
+        # Stageout validation: write a test file and remove it
+        lfn, siteconf = sys.argv[2], sys.argv[3]
+        pfn, cmd = resolve_write_pfn(lfn, siteconf)
+        pfn_dir = os.path.dirname(pfn)
+        mkdir_p(pfn_dir, cmd)
+        test_local = "/tmp/.wms2_validate_test"
+        with open(test_local, "w") as f:
+            f.write("ok")
+        try:
+            upload_file(test_local, pfn, cmd)
+            remove_path(pfn, cmd)
+        finally:
+            os.unlink(test_local)
+        print("OK")
+    elif len(sys.argv) >= 3:
+        # Simple test: resolve a write PFN
         lfn = sys.argv[1]
         siteconf = sys.argv[2]
         pfn, cmd = resolve_write_pfn(lfn, siteconf)
         print(f"LFN:     {lfn}")
         print(f"PFN:     {pfn}")
         print(f"Command: {cmd}")
+''')
+    os.chmod(path, 0o755)
+
+
+def _write_landing_validate_script(path: str) -> None:
+    """Generate landing_validate.sh — validates stageout write access at the elected site."""
+    _write_file(path, r'''#!/bin/bash
+# landing_validate.sh — validates stageout write access at the elected site
+# If stageout_mode is not "grid" or siteconf is unavailable, exits 0 (skip).
+# On validation failure, exits 1 so DAGMan retries landing at a different site.
+[ -f output_info.json ] || exit 0
+
+eval $(python3 -c "
+import json
+info = json.load(open('output_info.json'))
+mode = info.get('stageout_mode', 'local')
+print('STAGEOUT_MODE=%s' % mode)
+ds = info.get('output_datasets', [])
+if ds:
+    print('UNMERGED_LFN_BASE=%s' % ds[0].get('unmerged_lfn_base', ''))
+else:
+    print('UNMERGED_LFN_BASE=')
+" 2>/dev/null) || exit 0
+
+[ "$STAGEOUT_MODE" = "grid" ] || exit 0
+[ -n "$UNMERGED_LFN_BASE" ] || exit 0
+
+SITECONFIG="${SITECONFIG_PATH:-/cvmfs/cms.cern.ch/SITECONF/local}"
+[ -d "$SITECONFIG" ] || exit 0
+
+TEST_LFN="${UNMERGED_LFN_BASE}/.wms2_stageout_test_$$"
+RESULT=$(python3 wms2_stageout.py --validate "$TEST_LFN" "$SITECONFIG" 2>&1) || {
+    echo "STAGEOUT VALIDATION FAILED at $(hostname): $RESULT" >&2
+    exit 1
+}
+exit 0
 ''')
     os.chmod(path, 0o755)
 
