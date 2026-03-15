@@ -48,12 +48,14 @@ document.addEventListener('alpine:init', () => {
                 this.workflow = wf;
 
                 if (wf) {
-                    const [dag, dags, ods] = await Promise.all([
-                        wf.dag_id ? WMS2_API.getDAG(wf.dag_id).catch(() => null) : null,
+                    const [dags, ods] = await Promise.all([
                         WMS2_API.getWorkflowDags(wf.id).catch(() => []),
                         WMS2_API.getWorkflowOutputDatasets(wf.id).catch(() => []),
                     ]);
-                    this.dag = dag;
+                    // Pick the most relevant DAG to display: prefer running/submitted,
+                    // then fall back to the most recently created DAG.
+                    const activeDag = dags.find(d => d.status === 'running' || d.status === 'submitted');
+                    this.dag = activeDag || (dags.length > 0 ? dags[0] : null);
                     this.allDags = dags;
                     this.outputDatasets = ods;
                 } else {
