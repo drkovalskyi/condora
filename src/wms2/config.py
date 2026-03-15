@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     first_round_work_units: int = 1  # work units for round 0 (pilot)
     work_units_per_round: int = 10  # work units per production round (adaptive, round 1+)
     max_jobs_per_work_unit: int = 100  # upper cap for output-size-based WU sizing
+    max_work_units_per_round: int = 200  # hard cap on WUs per round (schedd scalability)
 
     # Job executables (override to /bin/true for local testing)
     processing_executable: str = "run_payload.sh"

@@ -33,6 +33,17 @@ class CondorAdapter(ABC):
     async def remove_job(self, schedd_name: str, cluster_id: str) -> None:
         """Remove (condor_rm) a job."""
 
+    async def remove_dag_children(self, schedd_name: str, cluster_id: str) -> int:
+        """Remove child scheduler-universe jobs (sub-DAGMan processes) of a DAG.
+
+        When a top-level DAGMan is removed, its child SUBDAGs may be left
+        orphaned on the schedd. This removes them via:
+            condor_rm -constraint 'DAGManJobId == {cluster_id}'
+
+        Returns the number of jobs removed (0 if none found).
+        """
+        return 0
+
     @abstractmethod
     async def ping_schedd(self, schedd_name: str) -> bool:
         """Check if a schedd is reachable."""

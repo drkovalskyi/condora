@@ -465,6 +465,16 @@ class DAGPlanner:
             jobs_per_group=jobs_per_wu or self.settings.jobs_per_work_unit,
         )
 
+        # Cap work units per round to limit schedd DAGMan process count
+        max_wus = self.settings.max_work_units_per_round
+        if max_wus > 0 and len(merge_groups) > max_wus:
+            logger.warning(
+                "Capping work units from %d to %d (max_work_units_per_round); "
+                "remaining events will be covered by subsequent rounds",
+                len(merge_groups), max_wus,
+            )
+            merge_groups = merge_groups[:max_wus]
+
         # Query banned sites for this workflow
         banned_sites: list[str] = []
         if self.site_manager:

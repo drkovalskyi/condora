@@ -1127,6 +1127,16 @@ class RequestLifecycleManager:
         if not all_stopped:
             return
 
+        # Clean up any orphaned child sub-DAGMan processes
+        for dag in active_dags:
+            try:
+                await self.condor.remove_dag_children(
+                    schedd_name=dag.schedd_name,
+                    cluster_id=dag.dagman_cluster_id,
+                )
+            except Exception:
+                pass
+
         # All DAGs stopped
         if fail_requested or (head_dag and (head_dag.stop_reason or "").startswith("FAIL:")):
             for d in await self.db.list_dags(workflow_id=workflow.id):
@@ -1210,9 +1220,16 @@ class RequestLifecycleManager:
 
         workflow = await self.db.get_workflow_by_request(request_name)
         if workflow:
-            # 1. condor_rm on ALL active DAGs (swallow errors)
+            # 1. condor_rm on ALL active DAGs + their child sub-DAGs
             active_dags = await self.db.get_active_dags_for_workflow(workflow.id)
             for dag in active_dags:
+                try:
+                    await self.condor.remove_dag_children(
+                        schedd_name=dag.schedd_name,
+                        cluster_id=dag.dagman_cluster_id,
+                    )
+                except Exception:
+                    pass
                 try:
                     await self.condor.remove_job(
                         schedd_name=dag.schedd_name,
@@ -1697,14 +1714,35 @@ class RequestLifecycleManager:
     # ── Condor Cleanup ─────────────────────────────────────────
 
     async def _cleanup_condor_dag(self, dag):
-        """Remove a finished DAGMan job from the schedd queue (best-effort).
+        """Remove a finished DAGMan job and its child sub-DAGs from the schedd.
 
         Completed DAGMan jobs (status=4) linger on the schedd until
         MAX_HISTORY_ROTATIONS removes them.  On a shared remote schedd
         this can take days, so we proactively clean up.
+
+        Also removes orphaned child scheduler-universe jobs (sub-DAGMan
+        processes from SUBDAG EXTERNAL) which can block new submissions
+        if left behind.
         """
         if not dag or not dag.dagman_cluster_id:
             return
+        # Remove child sub-DAGMan processes first (orphan prevention)
+        try:
+            removed = await self.condor.remove_dag_children(
+                schedd_name=dag.schedd_name,
+                cluster_id=dag.dagman_cluster_id,
+            )
+            if removed > 0:
+                logger.info(
+                    "Removed %d child DAGMan processes for DAG %s (cluster %s)",
+                    removed, dag.id, dag.dagman_cluster_id,
+                )
+        except Exception:
+            logger.debug(
+                "Could not remove child DAGMans for cluster %s",
+                dag.dagman_cluster_id,
+            )
+        # Remove the top-level DAGMan job
         try:
             await self.condor.remove_job(
                 schedd_name=dag.schedd_name,

@@ -4,9 +4,9 @@
 
 | Field | Value |
 |---|---|
-| **Spec Version** | 2.14.0 |
+| **Spec Version** | 2.15.0 |
 | **Status** | DRAFT |
-| **Date** | 2026-03-14 |
+| **Date** | 2026-03-15 |
 | **Authors** | CMS Computing |
 | **Supersedes** | WMCore / WMAgent |
 
@@ -3350,6 +3350,7 @@ The following capabilities are required from HTCondor / DAGMan and will be devel
 | **DAG-wide priority propagation** | Update priority of an entire DAG (including un-submitted nodes) via a single operation | Remove and resubmit DAG with updated priority (rescue DAG continuity) |
 | **DAG-level failure pattern detection** | DAGMan detects correlated failures (many nodes, same error, same site) and can halt/adjust automatically | POST scripts report to WMS2 API; operators monitor and intervene manually |
 | **Site-affine job groups** | A set of independent jobs that the negotiator matches as a unit to one site, accounting for the group's total resource commitment when deciding placement. Eliminates the need for landing nodes and staggered submission. | SUBDAG EXTERNAL per merge group with a landing node (trivial `/bin/true` job); POST script reads `MATCH_GLIDEIN_CMSSite` classad to elect site; PRE scripts pin remaining nodes via `+DESIRED_Sites`. Staggered via `MAXJOBS MergeGroup` to create backpressure between batches. |
+| **SPLICE with RETRY and POST scripts** | Allow `RETRY` and `SCRIPT POST` on SPLICE boundaries, providing atomic group retry and group-completion callbacks within a single DAGMan process. Currently only SUBDAG EXTERNAL supports RETRY and POST on group boundaries, but each SUBDAG spawns a separate `condor_dagman` process — at 500 work units this means 501 scheduler-universe jobs, causing 15+ minute parse times, orphaned sub-DAGs, and 25-50 GB schedd memory pressure. SPLICE already tracks initial/terminal nodes per splice and uses hierarchical naming (`splice+node`); extending it with RETRY (re-queue all splice nodes on failure) and POST (fire after all terminal nodes complete) would eliminate the per-group process overhead while preserving WMS2's WU-level atomic retry and site-exclusion mechanisms. See `docs/plans/dag-structure-scalability.md` for full analysis. | Cap `max_work_units_per_round` at 200 to limit DAGMan process count; proactively remove orphaned child sub-DAGMan processes when a DAG completes or fails. |
 
 ---
 

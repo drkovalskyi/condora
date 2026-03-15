@@ -105,6 +105,13 @@ instances before enabling.
 
 ## Future improvements (not fixing now)
 
+- **DAG structure scalability** — SUBDAG EXTERNAL creates one DAGMan process
+  per WU, causing schedd pressure at scale (500 WUs = 501 DAGMan processes,
+  15 min parse, orphan zombies). Immediate fix: `max_work_units_per_round`
+  caps WU count (default 200), orphan cleanup removes child sub-DAGMans on
+  DAG completion/failure. Long-term: HTCondor feature request for SPLICE with
+  RETRY + POST support (single DAGMan process with group-level retry semantics).
+  See `docs/plans/dag-structure-scalability.md` for full analysis.
 - **Pileup (secondary input) site selection** — configure CMSSW to prefer
   local/nearby replicas or provide a site-filtered pileup file list
 - **Intra-DAG replan nodes** — replan between WU0 and WU1 within a single DAG

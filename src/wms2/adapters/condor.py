@@ -269,6 +269,23 @@ class HTCondorAdapter(CondorAdapter):
     async def remove_job(self, schedd_name: str, cluster_id: str) -> None:
         await asyncio.to_thread(self._remove_job_sync, cluster_id, schedd_name)
 
+    def _remove_dag_children_sync(self, cluster_id: str,
+                                  schedd_name: str | None = None) -> int:
+        """Remove child scheduler-universe jobs (sub-DAGMan processes) of a DAG."""
+        schedd = self._get_schedd(schedd_name)
+        constraint = f"DAGManJobId == {cluster_id} && JobUniverse == 7"
+        # Count first
+        ads = schedd.query(constraint=constraint, projection=["ClusterId"])
+        count = len(ads)
+        if count > 0:
+            schedd.act(htcondor2.JobAction.Remove, constraint)
+        return count
+
+    async def remove_dag_children(self, schedd_name: str, cluster_id: str) -> int:
+        return await asyncio.to_thread(
+            self._remove_dag_children_sync, cluster_id, schedd_name
+        )
+
     def _ping_schedd_sync(self, schedd_name: str | None = None) -> bool:
         try:
             schedd = self._get_schedd(schedd_name)

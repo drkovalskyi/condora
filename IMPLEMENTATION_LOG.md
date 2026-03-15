@@ -2,6 +2,41 @@
 
 <!-- Entries are in reverse chronological order (newest first). -->
 
+## DAG Structure Scalability — Orphan Cleanup + WU Cap (2026-03-15)
+
+**What**: Operational fixes for SUBDAG EXTERNAL scalability at high WU counts.
+A 500-WU round creates 501 DAGMan processes on the remote schedd, causing
+15+ min startup, orphaned sub-DAGs, and memory pressure.
+
+**Changes**:
+- `condor.py` — Added `remove_dag_children()` method: removes child
+  scheduler-universe jobs (`DAGManJobId == cluster_id && JobUniverse == 7`)
+  to prevent orphaned sub-DAGMan processes after parent DAG removal.
+- `base.py` — Added `remove_dag_children()` to abstract base (default no-op).
+- `lifecycle_manager.py` — `_cleanup_condor_dag()` now removes child sub-DAGs
+  before removing the parent DAGMan. Also added orphan cleanup to
+  `fail_request()` and `_handle_stopping()`.
+- `config.py` — Added `max_work_units_per_round: int = 200` setting.
+- `dag_planner.py` — After `_plan_merge_groups()`, clamps merge group count
+  to `max_work_units_per_round`. Excess events covered by subsequent rounds.
+- `docs/spec.md` — Added HTCondor feature request: SPLICE with RETRY + POST
+  support (Section 12). Bumped spec to v2.15.0.
+- `docs/plans/dag-structure-scalability.md` — Full design analysis document
+  covering 5 options (Flat, SPLICE, Batched, Status Quo, HTCondor feature
+  request) with comparison matrix and recommendation.
+- `PLANNING.md` — Added scalability concern to future improvements.
+
+**Design decisions**:
+- Keep SUBDAG EXTERNAL architecture (atomic WU retry is proven valuable).
+- Cap WUs per round rather than change DAG structure — lifecycle manager
+  plans additional rounds automatically for remaining events.
+- Primary long-term solution: HTCondor SPLICE with RETRY + POST support.
+- Fallback: batch WUs into larger SUBDAGs (10-20 WUs/batch) if HTCondor
+  can't deliver SPLICE retry in a useful timeframe.
+
+**Verification**: Matrix smoke tests pass. Import + planning verified with
+new WU cap setting.
+
 ## Chirp-Based Job Progress Reporting (2026-03-14)
 
 **What**: Added `condor_chirp set_job_attr` calls to the proc script so that
