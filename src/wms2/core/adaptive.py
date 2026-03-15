@@ -777,8 +777,9 @@ def compute_job_split(
             "per_step": {},
         }
 
-    eff_vals = step0["cpu_eff"]
-    mean_eff = sum(eff_vals) / len(eff_vals) if eff_vals else 0.5
+    # Use wall-time-weighted CPU efficiency across all steps (not just the
+    # first step) so that inefficient later steps pull the core count down.
+    mean_eff = metrics.get("weighted_cpu_eff", 0.5)
     eff_cores = mean_eff * original_nthreads
 
     tuned = _nearest_power_of_2(eff_cores)
