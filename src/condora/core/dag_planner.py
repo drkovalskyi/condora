@@ -2072,11 +2072,12 @@ def _write_submit_file(
     # highprio, production, analysis. Use "production" to match Tier-0 jobs.
     lines.append("accounting_group = production")
     acct_user = settings.accounting_group_user if settings else ""
-    if not acct_user:
+    if not acct_user and settings:
         raise ValueError(
             "CONDORA_ACCOUNTING_GROUP_USER must be set for global pool submission"
         )
-    lines.append(f"accounting_group_user = {acct_user}")
+    if acct_user:
+        lines.append(f"accounting_group_user = {acct_user}")
     # Job lease: if the startd (glidein) loses contact, the schedd evicts
     # the job after this many seconds. Without this, zombie jobs can stay
     # "Running" indefinitely when glideins die without clean shutdown.

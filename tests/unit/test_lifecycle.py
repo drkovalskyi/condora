@@ -22,6 +22,13 @@ def _make_workflow(dag_id=None, pilot_cluster_id=None, pilot_schedd=None, **kwar
     wf.target_events = 0
     wf.files_processed = 0
     wf.total_input_files = 0
+    wf.current_round = 0
+    wf.step_metrics = None
+    wf.config_data = {}
+    wf.splitting_params = {}
+    wf.next_first_event = 1
+    wf.file_offset = 0
+    wf.adaptive = False
     for k, v in kwargs.items():
         setattr(wf, k, v)
     return wf
@@ -393,7 +400,11 @@ async def test_active_partial_with_rescue(mock_repository, mock_condor, settings
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
     mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
-    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
+    # After transition to RESUBMITTING, get_request must return non-active
+    # so the guard at line 880 triggers early return.
+    mock_repository.get_request = AsyncMock(side_effect=[
+        make_request_row(status="resubmitting"),
+    ])
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -425,7 +436,9 @@ async def test_active_partial_without_error_handler(mock_repository, mock_condor
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
     mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
-    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
+    mock_repository.get_request = AsyncMock(side_effect=[
+        make_request_row(status="held"),
+    ])
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -463,7 +476,9 @@ async def test_active_failed_with_error_handler(mock_repository, mock_condor, se
     mock_repository.get_workflow_by_request = AsyncMock(return_value=workflow)
     mock_repository.get_dag = AsyncMock(return_value=dag)
     mock_repository.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
-    mock_repository.get_request = AsyncMock(return_value=make_request_row(status="active"))
+    mock_repository.get_request = AsyncMock(side_effect=[
+        make_request_row(status="held"),
+    ])
 
     mock_dag_monitor = AsyncMock()
     mock_dag_monitor.poll_dag.return_value = DAGPollResult(
@@ -1125,8 +1140,9 @@ async def test_restart_preserves_fields(mock_repository, mock_condor, settings):
 
 async def test_get_error_summary(mock_repository, mock_condor, settings):
     """get_error_summary aggregates POST data: categories, sites, bad files."""
-    mock_error_handler = MagicMock()
-    mock_error_handler.read_post_data.return_value = [
+    from unittest.mock import patch
+
+    post_data = [
         {
             "classification": {"category": "infrastructure", "bad_input_file": "/store/bad.root"},
             "job": {"site": "T2_US_MIT"},
@@ -1143,7 +1159,6 @@ async def test_get_error_summary(mock_repository, mock_condor, settings):
 
     lm = RequestLifecycleManager(
         mock_repository, mock_condor, settings,
-        error_handler=mock_error_handler,
     )
 
     request = make_request_row(status="held")
@@ -1154,7 +1169,8 @@ async def test_get_error_summary(mock_repository, mock_condor, settings):
     mock_repository.get_workflow_by_request.return_value = workflow
     mock_repository.get_dag.return_value = dag
 
-    result = await lm.get_error_summary("test-request-001")
+    with patch("condora.core.error_handler.ErrorHandler.read_post_data", return_value=post_data):
+        result = await lm.get_error_summary("test-request-001")
 
     assert result["request_name"] == "test-request-001"
     assert result["status"] == "held"

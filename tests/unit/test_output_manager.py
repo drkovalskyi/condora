@@ -25,6 +25,8 @@ def _make_block_row(
     last_rucio_attempt=None,
     rucio_attempt_count=0,
     rucio_last_error=None,
+    consolidation_rule_id=None,
+    output_files=None,
     status="open",
     **kwargs,
 ):
@@ -43,6 +45,8 @@ def _make_block_row(
     row.last_rucio_attempt = last_rucio_attempt
     row.rucio_attempt_count = rucio_attempt_count
     row.rucio_last_error = rucio_last_error
+    row.consolidation_rule_id = consolidation_rule_id
+    row.output_files = output_files or []
     row.status = status
     row.created_at = datetime.now(timezone.utc)
     row.updated_at = datetime.now(timezone.utc)
@@ -134,7 +138,7 @@ class TestHandleWorkUnitCompletion:
     async def test_creates_source_protection_rule(
         self, output_manager, mock_repo, mock_rucio
     ):
-        """Should create a Rucio source protection rule."""
+        """Should create a Rucio source protection rule (production mode)."""
         block = _make_block_row(
             total_work_units=3,
             dbs_block_open=True,
@@ -149,7 +153,8 @@ class TestHandleWorkUnitCompletion:
         }
 
         await output_manager.handle_work_unit_completion(
-            block.workflow_id, block.id, merge_info
+            block.workflow_id, block.id, merge_info,
+            config_data={"stageout_mode": "production"},
         )
 
         # Rucio create_rule called for source protection
@@ -175,14 +180,19 @@ class TestHandleWorkUnitCompletion:
         }
 
         await output_manager.handle_work_unit_completion(
-            block.workflow_id, block.id, merge_info
+            block.workflow_id, block.id, merge_info,
+            config_data={"stageout_mode": "production"},
         )
 
         # Check the update call for completed_work_units
         update_calls = mock_repo.update_processing_block.call_args_list
-        wu_update = update_calls[-1]
+        wu_update = [c for c in update_calls if "completed_work_units" in c[1]][0]
         assert "mg_000001" in wu_update[1]["completed_work_units"]
-        assert "mg_000001" in wu_update[1]["source_rule_ids"]
+        assert "mg_000000" in wu_update[1]["source_rule_ids"]  # pre-existing
+        # In production mode, source protection rule added for mg_000001
+        src_update = [c for c in update_calls if "source_rule_ids" in c[1]
+                      and "mg_000001" in c[1].get("source_rule_ids", {})]
+        assert len(src_update) >= 1
 
     async def test_completes_block_when_all_wus_done(
         self, output_manager, mock_repo, mock_dbs, mock_rucio
@@ -204,7 +214,8 @@ class TestHandleWorkUnitCompletion:
         }
 
         await output_manager.handle_work_unit_completion(
-            block.workflow_id, block.id, merge_info
+            block.workflow_id, block.id, merge_info,
+            config_data={"stageout_mode": "production"},
         )
 
         # DBS close_block called
@@ -250,7 +261,7 @@ class TestCompleteBlock:
             dbs_block_closed=False,
         )
 
-        await output_manager._complete_block(block)
+        await output_manager._complete_block(block, config_data={"stageout_mode": "production"})
 
         # DBS close_block called
         assert any(c[0] == "close_block" for c in mock_dbs.calls)
@@ -281,7 +292,9 @@ class TestProcessBlocksForWorkflow:
         )
         mock_repo.get_processing_blocks.return_value = [block]
 
-        await output_manager.process_blocks_for_workflow(block.workflow_id)
+        await output_manager.process_blocks_for_workflow(
+            block.workflow_id, config_data={"stageout_mode": "production"},
+        )
 
         # Rucio tape rule creation attempted
         create_calls = [c for c in mock_rucio.calls if c[0] == "create_rule"]
@@ -303,7 +316,9 @@ class TestProcessBlocksForWorkflow:
         )
         mock_repo.get_processing_blocks.return_value = [block]
 
-        await output_manager.process_blocks_for_workflow(block.workflow_id)
+        await output_manager.process_blocks_for_workflow(
+            block.workflow_id, config_data={"stageout_mode": "production"},
+        )
 
         # Source protection retry attempted
         create_calls = [c for c in mock_rucio.calls if c[0] == "create_rule"]

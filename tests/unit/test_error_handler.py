@@ -89,7 +89,9 @@ def handler(repo, condor, settings):
 
 async def test_low_failure_ratio_triggers_rescue(handler, repo):
     """1/10 work units failed (10%) → 'rescue', rescue DAG created."""
-    dag = _make_dag(nodes_done=99, nodes_failed=1, total_nodes=100, total_work_units=10)
+    dag = _make_dag(nodes_done=99, nodes_failed=1, total_nodes=100,
+                    total_work_units=10,
+                    completed_work_units=["mg_%06d" % i for i in range(9)])
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
@@ -111,7 +113,9 @@ async def test_low_failure_ratio_triggers_rescue(handler, repo):
 
 async def test_below_threshold_triggers_rescue(handler, repo):
     """3/20 work units failed (15%) — below 20% threshold → 'rescue'."""
-    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20, total_work_units=20)
+    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20,
+                    total_work_units=20,
+                    completed_work_units=["mg_%06d" % i for i in range(17)])
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
@@ -245,7 +249,9 @@ async def test_custom_threshold(repo, condor):
     handler = ErrorHandler(repo, condor, settings)
 
     # 3/20 = 15% < 30% custom threshold → rescue
-    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20, total_work_units=20)
+    dag = _make_dag(nodes_done=17, nodes_failed=3, total_nodes=20,
+                    total_work_units=20,
+                    completed_work_units=["mg_%06d" % i for i in range(17)])
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 
@@ -501,7 +507,9 @@ async def test_completion_result_includes_problem_sites(repo, condor):
     handler = ErrorHandler(repo, condor, settings)
 
     # 1/10 work units failed → rescue
-    dag = _make_dag(nodes_done=9, nodes_failed=1, total_nodes=100, total_work_units=10)
+    dag = _make_dag(nodes_done=9, nodes_failed=1, total_nodes=100,
+                    total_work_units=10,
+                    completed_work_units=["mg_%06d" % i for i in range(9)])
     request = make_request_row(status="active")
     workflow = _make_workflow(dag_id=dag.id)
 

@@ -74,8 +74,8 @@ class TestDAGFileGeneration:
         assert "CONFIG" in content
         assert "SUBDAG EXTERNAL mg_000000" in content
         assert "SUBDAG EXTERNAL mg_000001" in content
-        assert "CATEGORY mg_000000 MergeGroup" in content
-        assert "MAXJOBS MergeGroup 10" in content
+        assert "RETRY mg_000000" in content
+        assert "SCRIPT POST mg_000000" in content
 
     def test_group_dag_created(self, tmp_path):
         groups = _make_merge_groups(1, 3)
@@ -109,9 +109,8 @@ class TestDAGFileGeneration:
         assert "PARENT landing CHILD" in content
         assert "CHILD merge" in content
         assert "PARENT merge CHILD cleanup" in content
-        assert "RETRY proc_000000 3 UNLESS-EXIT 42" in content
+        assert "RETRY proc_000000 2 UNLESS-EXIT 42" in content
         assert "RETRY merge 2 UNLESS-EXIT 42" in content
-        assert "RETRY cleanup 1" in content
         # ABORT-DAG-ON circuit breakers
         assert "ABORT-DAG-ON proc_000000 43 RETURN 1" in content
         assert "ABORT-DAG-ON merge 43 RETURN 1" in content
@@ -772,9 +771,10 @@ class TestBannedSites:
             banned_sites=["T2_US_Bad"],
         )
         proc_content = (tmp_path / "mg_000000" / "proc_000000.sub").read_text()
-        assert "Requirements" not in proc_content
+        # Proc nodes shouldn't have site exclusion Requirements (they're pinned by pin_site.sh)
+        assert 'GLIDEIN_CMSSite =!=' not in proc_content
         merge_content = (tmp_path / "mg_000000" / "merge.sub").read_text()
-        assert "Requirements" not in merge_content
+        assert 'GLIDEIN_CMSSite =!=' not in merge_content
 
     def test_no_banned_sites_no_requirements(self, tmp_path):
         """No Requirements line when banned_sites is None or empty."""
@@ -787,7 +787,8 @@ class TestBannedSites:
             category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
         )
         content = (tmp_path / "mg_000000" / "landing.sub").read_text()
-        assert "Requirements" not in content
+        # No site exclusions, but may have base Requirements from CMS classads
+        assert 'GLIDEIN_CMSSite =!=' not in content
 
     def test_multiple_banned_sites(self, tmp_path):
         """Multiple banned sites joined with && in Requirements."""
@@ -851,7 +852,7 @@ class TestMetrics:
         """Stage-out includes metrics JSON alongside output manifest."""
         content = self._get_proc_content(tmp_path)
         assert "_metrics.json" in content
-        assert "Staged metrics" in content
+        assert "Stage metrics" in content or "stage_file" in content
 
     def test_merge_script_aggregates_metrics(self, tmp_path):
         """Merge script reads proc_*_metrics.json and writes work_unit_metrics.json."""

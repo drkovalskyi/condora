@@ -11,7 +11,7 @@ from condora.models.enums import (
 
 
 def test_request_status_values():
-    assert len(RequestStatus) == 13
+    assert len(RequestStatus) == 14
     assert RequestStatus.NEW == "new"
     assert RequestStatus.SUBMITTED == "submitted"
     assert RequestStatus.QUEUED == "queued"
@@ -20,6 +20,7 @@ def test_request_status_values():
     assert RequestStatus.ACTIVE == "active"
     assert RequestStatus.STOPPING == "stopping"
     assert RequestStatus.RESUBMITTING == "resubmitting"
+    assert RequestStatus.PAUSED == "paused"
     assert RequestStatus.HELD == "held"
     assert RequestStatus.COMPLETED == "completed"
     assert RequestStatus.PARTIAL == "partial"

@@ -209,7 +209,8 @@ class MockRucioAdapter(RucioAdapter):
         self.calls.append(("attach_dids", (scope, name, dids), {}))
 
     async def get_available_pileup_files(self, dataset: str,
-                                         preferred_rses: list[str] | None = None) -> list[str]:
+                                         preferred_rses: list[str] | None = None,
+                                         timeout: int | None = None) -> list[str]:
         self.calls.append(("get_available_pileup_files", (dataset,), {"preferred_rses": preferred_rses}))
         return getattr(self, "_pileup_files", [])
 

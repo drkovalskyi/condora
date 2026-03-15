@@ -1382,8 +1382,21 @@ class RequestLifecycleManager:
         """
         from condora.core.error_handler import ErrorHandler
 
-        async with self.session_factory() as session:
-            repo = Repository(session)
+        # Use existing repo in test/legacy mode, own session in service mode
+        if self.session_factory:
+            ctx = self.session_factory()
+        else:
+            # repo mode — wrap self.db in a no-op async context manager
+            from contextlib import asynccontextmanager
+
+            @asynccontextmanager
+            async def _noop_ctx():
+                yield None
+
+            ctx = _noop_ctx()
+
+        async with ctx as session:
+            repo = Repository(session) if session else self.db
 
             request = await repo.get_request(request_name)
             if not request:

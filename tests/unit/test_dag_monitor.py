@@ -98,6 +98,11 @@ def _make_dag_row(
     dag.total_work_units = total_work_units
     dag.completed_work_units = completed_work_units or []
     dag.total_nodes = 10
+    dag.node_counts = {"processing": 8, "merge": 1, "cleanup": 1}
+    dag.nodes_done = 0
+    dag.nodes_failed = 0
+    dag.nodes_running = 0
+    dag.nodes_idle = 0
     return dag
 
 
@@ -287,9 +292,11 @@ class TestPollDag:
         assert len(result.newly_completed_work_units) == 1
         assert result.newly_completed_work_units[0]["group_name"] == "mg_000000"
 
-        # Verify update_dag was called with completed_work_units
+        # Verify update_dag was called with completed_work_units (enriched dict format)
         call_kwargs = mock_repo.update_dag.call_args[1]
-        assert "mg_000000" in call_kwargs["completed_work_units"]
+        wu_names = [wu["name"] if isinstance(wu, dict) else wu
+                    for wu in call_kwargs["completed_work_units"]]
+        assert "mg_000000" in wu_names
 
 
 class TestHandleDagCompletion:
@@ -332,10 +339,12 @@ class TestHandleDagCompletion:
         names = {wu["group_name"] for wu in result.newly_completed_work_units}
         assert names == {"mg_000000", "mg_000001"}
 
-        # Verify update_dag received the completed_work_units
+        # Verify update_dag received the completed_work_units (enriched dict format)
         call_kwargs = mock_repo.update_dag.call_args[1]
-        assert "mg_000000" in call_kwargs["completed_work_units"]
-        assert "mg_000001" in call_kwargs["completed_work_units"]
+        wu_names = [wu["name"] if isinstance(wu, dict) else wu
+                    for wu in call_kwargs["completed_work_units"]]
+        assert "mg_000000" in wu_names
+        assert "mg_000001" in wu_names
 
     async def test_dag_gone_with_status_file_detects_wus(
         self, monitor, mock_condor, mock_repo, tmp_path
@@ -390,6 +399,9 @@ class TestLifecycleIntegration:
 
         mock_repo.get_workflow_by_request = AsyncMock(return_value=workflow)
         mock_repo.get_dag = AsyncMock(return_value=dag)
+        mock_repo.get_active_dags_for_workflow = AsyncMock(return_value=[dag])
+        mock_repo.get_request = AsyncMock(return_value=None)
+        mock_repo.update_workflow = AsyncMock()
 
         dm = DAGMonitor(mock_repo, condor)
         lm = RequestLifecycleManager(

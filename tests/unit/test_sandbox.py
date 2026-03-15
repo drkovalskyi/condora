@@ -2,7 +2,9 @@
 
 import json
 import os
+import ssl
 import tarfile
+from unittest.mock import patch
 
 import pytest
 
@@ -129,11 +131,15 @@ class TestCreateSandbox:
             "GlobalTag": "140X_mcRun3_2024_realistic_v26",
             "RequestType": "StepChain",
             "StepChain": 2,
-            "Step1": {"StepName": "DIGI"},
-            "Step2": {"StepName": "RECO", "InputStep": "DIGI"},
+            "Step1": {"StepName": "DIGI", "ConfigCacheID": "fake-cc-1"},
+            "Step2": {"StepName": "RECO", "InputStep": "DIGI", "ConfigCacheID": "fake-cc-2"},
         }
         output = str(tmp_path / "sandbox.tar.gz")
-        create_sandbox(output, reqdata, mode="cmssw")
+        ctx = ssl.create_default_context()
+        with patch("condora.core.sandbox._fetch_configcache_pset",
+                    return_value="# mock pset\nimport FWCore.ParameterSet.Config as cms\nprocess = cms.Process('TEST')\n"):
+            create_sandbox(output, reqdata, mode="cmssw",
+                           ssl_context=ctx, configcache_url="https://mock.cern.ch/couchdb/reqmgr_config_cache")
 
         with tarfile.open(output, "r:gz") as tar:
             names = tar.getnames()
@@ -149,9 +155,18 @@ class TestCreateSandbox:
             assert manifest["steps"][0]["cmssw_version"] == "CMSSW_14_0_0"
 
     def test_explicit_cmssw_mode(self, tmp_path):
-        reqdata = {"CMSSWVersion": "CMSSW_14_0_0", "RequestType": "MonteCarlo"}
+        reqdata = {
+            "CMSSWVersion": "CMSSW_14_0_0",
+            "RequestType": "StepChain",
+            "StepChain": 1,
+            "Step1": {"StepName": "GEN", "ConfigCacheID": "fake-cc-gen"},
+        }
         output = str(tmp_path / "sandbox.tar.gz")
-        create_sandbox(output, reqdata, mode="cmssw")
+        ctx = ssl.create_default_context()
+        with patch("condora.core.sandbox._fetch_configcache_pset",
+                    return_value="# mock pset\nimport FWCore.ParameterSet.Config as cms\nprocess = cms.Process('TEST')\n"):
+            create_sandbox(output, reqdata, mode="cmssw",
+                           ssl_context=ctx, configcache_url="https://mock.cern.ch/couchdb/reqmgr_config_cache")
 
         with tarfile.open(output, "r:gz") as tar:
             f = tar.extractfile("manifest.json")
