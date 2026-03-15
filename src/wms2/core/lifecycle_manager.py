@@ -883,7 +883,17 @@ class RequestLifecycleManager:
         if not workflow:
             return
         remaining_active = await self.db.get_active_dags_for_workflow(workflow.id)
-        if not remaining_active and self._target_reached(workflow):
+        if self._target_reached(workflow):
+            if remaining_active:
+                # Target reached but DAGs still running (pipelined overshoot).
+                # Remove redundant DAGs — their output is not needed.
+                for dag in remaining_active:
+                    await self._cleanup_condor_dag(dag)
+                    await self.db.update_dag(dag.id, status=DAGStatus.COMPLETED.value)
+                logger.info(
+                    "Request %s: target reached, stopped %d redundant DAG(s)",
+                    request.request_name, len(remaining_active),
+                )
             await self.transition(request, RequestStatus.COMPLETED)
             return
 
