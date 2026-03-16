@@ -2696,21 +2696,47 @@ WATCHDOG_STALL_THRESHOLD=__WATCHDOG_STALL_THRESHOLD__
 WATCHDOG_STALL_WINDOW=__WATCHDOG_STALL_WINDOW__
 WATCHDOG_GRACE_PERIOD=__WATCHDOG_GRACE_PERIOD__
 
-# Locate cgroup v2 cpu.stat for this job
+# Locate cgroup CPU accounting for this job (v2 or v1)
 _watchdog_cpu_stat=""
+_watchdog_cpu_version=""
 _wd_cg_path=$(cat /proc/self/cgroup 2>/dev/null | sed 's/^0:://')
 if [[ -n "$_wd_cg_path" ]]; then
+    # cgroup v2: cpu.stat with usage_usec
     _wd_candidate="/sys/fs/cgroup${_wd_cg_path}/cpu.stat"
-    [[ -r "$_wd_candidate" ]] && _watchdog_cpu_stat="$_wd_candidate"
+    if [[ -r "$_wd_candidate" ]] && grep -q usage_usec "$_wd_candidate" 2>/dev/null; then
+        _watchdog_cpu_stat="$_wd_candidate"
+        _watchdog_cpu_version="v2"
+    fi
 fi
-if [[ -z "$_watchdog_cpu_stat" && -r /sys/fs/cgroup/cpu.stat ]]; then
+if [[ -z "$_watchdog_cpu_stat" && -r /sys/fs/cgroup/cpu.stat ]] && grep -q usage_usec /sys/fs/cgroup/cpu.stat 2>/dev/null; then
     _watchdog_cpu_stat="/sys/fs/cgroup/cpu.stat"
+    _watchdog_cpu_version="v2"
+fi
+# cgroup v1 fallback: cpuacct.usage (nanoseconds)
+if [[ -z "$_watchdog_cpu_stat" ]]; then
+    for _wd_v1 in \
+        "/sys/fs/cgroup/cpuacct${_wd_cg_path}/cpuacct.usage" \
+        "/sys/fs/cgroup/cpuacct/cpuacct.usage" \
+        "/sys/fs/cgroup/cpu,cpuacct${_wd_cg_path}/cpuacct.usage" \
+        "/sys/fs/cgroup/cpu,cpuacct/cpuacct.usage"; do
+        if [[ -r "$_wd_v1" ]]; then
+            _watchdog_cpu_stat="$_wd_v1"
+            _watchdog_cpu_version="v1"
+            break
+        fi
+    done
 fi
 
 _watchdog_read_cpu() {
-    # Read cumulative CPU in seconds from cgroup v2 cpu.stat (usage_usec)
+    # Read cumulative CPU in seconds from cgroup accounting
     if [[ -n "$_watchdog_cpu_stat" && -r "$_watchdog_cpu_stat" ]]; then
-        awk '/^usage_usec/ {printf "%d", $2/1000000}' "$_watchdog_cpu_stat" 2>/dev/null
+        if [[ "$_watchdog_cpu_version" == "v2" ]]; then
+            # v2: cpu.stat has "usage_usec <microseconds>"
+            awk '/^usage_usec/ {printf "%d", $2/1000000}' "$_watchdog_cpu_stat" 2>/dev/null
+        else
+            # v1: cpuacct.usage is a single number in nanoseconds
+            awk '{printf "%d", $1/1000000000}' "$_watchdog_cpu_stat" 2>/dev/null
+        fi
         return
     fi
     # Fallback: recursive ps — sum CPU of all descendant processes
@@ -3670,7 +3696,7 @@ run_cmssw_mode() {
     _watchdog &
     WATCHDOG_PID=$!
     trap "kill $WATCHDOG_PID 2>/dev/null || true; kill $MEMMON_PID 2>/dev/null || true" EXIT
-    echo "CPU watchdog started (pid $WATCHDOG_PID, grace=${WATCHDOG_GRACE_PERIOD}s, window=${WATCHDOG_STALL_WINDOW}s, cpu_stat=${_watchdog_cpu_stat:-ps-fallback})"
+    echo "CPU watchdog started (pid $WATCHDOG_PID, grace=${WATCHDOG_GRACE_PERIOD}s, window=${WATCHDOG_STALL_WINDOW}s, cpu=${_watchdog_cpu_version:-ps-fallback} ${_watchdog_cpu_stat:-})"
 
     GRIDPACK_DISK_MB=0
     for step_idx in $(seq 0 $((NUM_STEPS - 1))); do
