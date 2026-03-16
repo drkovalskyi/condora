@@ -17,6 +17,10 @@
                     <span x-text="request.request_name"></span>
                     <span x-html="statusBadge(request.status)" style="margin-left:0.5rem;"></span>
                 </h1>
+                <template x-if="canRelease">
+                    <button class="outline" style="--pico-color: #22c55e; --pico-border-color: #22c55e; font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;"
+                            @click="showReleaseDialog = true" :disabled="actionLoading">Release</button>
+                </template>
                 <template x-if="canStop">
                     <button class="outline" @click="showStopDialog = true" :disabled="actionLoading"
                             style="font-size:0.8rem; padding:0.2rem 0.6rem; margin:0;">Stop</button>
@@ -76,6 +80,20 @@
                             @click="doDelete()" :disabled="actionLoading">
                         <span x-show="!actionLoading">Confirm Delete</span>
                         <span x-show="actionLoading">Deleting...</span>
+                    </button>
+                </div>
+            </dialog>
+
+            <!-- Release dialog -->
+            <dialog x-ref="releaseDialog" :open="showReleaseDialog || undefined">
+                <h3>Release Request</h3>
+                <p>Release this request back to the admission queue. The lifecycle manager will re-plan and submit a fresh DAG.</p>
+                <div class="dialog-actions">
+                    <button class="outline" @click="showReleaseDialog = false" :disabled="actionLoading">Cancel</button>
+                    <button style="--pico-background-color: #22c55e; --pico-border-color: #22c55e;"
+                            @click="doRelease()" :disabled="actionLoading">
+                        <span x-show="!actionLoading">Confirm Release</span>
+                        <span x-show="actionLoading">Releasing...</span>
                     </button>
                 </div>
             </dialog>

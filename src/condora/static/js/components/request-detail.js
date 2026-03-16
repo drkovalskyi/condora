@@ -17,6 +17,7 @@ document.addEventListener('alpine:init', () => {
 
         // Action state
         actionLoading: false,
+        showReleaseDialog: false,
         showStopDialog: false,
         showFailDialog: false,
         showCloneDialog: false,
@@ -119,6 +120,10 @@ document.addEventListener('alpine:init', () => {
         },
 
         // Action visibility helpers
+        // RELEASE: held or paused → re-queue for processing
+        get canRelease() {
+            return this.request && ['held', 'paused'].includes(this.request.status);
+        },
         // STOP: only when there's a running DAG to stop
         get canStop() {
             return this.request && ['active', 'pilot_running'].includes(this.request.status);
@@ -136,7 +141,7 @@ document.addEventListener('alpine:init', () => {
             return this.request && ['failed', 'aborted'].includes(this.request.status);
         },
         get hasActions() {
-            return this.canStop || this.canFail || this.canClone || this.canDelete;
+            return this.canRelease || this.canStop || this.canFail || this.canClone || this.canDelete;
         },
 
         get testFraction() {
@@ -228,6 +233,20 @@ document.addEventListener('alpine:init', () => {
         },
 
         // Actions
+        async doRelease() {
+            this.actionLoading = true;
+            try {
+                const result = await CONDORA_API.releaseRequest(this.name);
+                this.toast('success', result.message);
+                this.showReleaseDialog = false;
+                await this.fetchAll();
+            } catch (e) {
+                this.toast('error', 'Release failed: ' + e.message);
+            } finally {
+                this.actionLoading = false;
+            }
+        },
+
         async doStop() {
             this.actionLoading = true;
             try {

@@ -231,10 +231,18 @@ def classify_error(
         "memory_exceeded": False,
     }
 
-    # Upgrade transient → infrastructure when log_tail reveals stageout failure.
-    # Shell exit code 1 from stageout RuntimeError doesn't match any CMSSW code
-    # set, but stageout failures are site-specific infrastructure issues.
     if log_tail:
+        # In-job CPU watchdog kill — job was stuck (no CPU progress).
+        # Classified as infrastructure/transient: retryable, may be
+        # machine-specific (dead glidein, CVMFS stall).
+        if "WATCHDOG: CPU stalled" in log_tail:
+            result["category"] = "infrastructure"
+            result["action"] = "retry_with_cooloff"
+            return result
+
+        # Upgrade transient → infrastructure when log_tail reveals stageout failure.
+        # Shell exit code 1 from stageout RuntimeError doesn't match any CMSSW code
+        # set, but stageout failures are site-specific infrastructure issues.
         for pat in _STAGEOUT_PATTERNS:
             if re.search(pat, log_tail, re.IGNORECASE):
                 result["category"] = "infrastructure"
@@ -615,6 +623,14 @@ def main():
     classification = classify_error(
         cmssw_exit_code, job_exit_code, error_message, periodic_remove_reason
     )
+
+    # In-job CPU watchdog kill — classify as infrastructure (retryable,
+    # may be machine-specific).  Checked before stageout patterns since
+    # watchdog kills the process group (exit code is generic non-zero).
+    if classification["category"] == "transient" and log_tail:
+        if "WATCHDOG: CPU stalled" in log_tail:
+            classification["category"] = "infrastructure"
+            classification["action"] = "retry_with_cooloff"
 
     # Upgrade transient -> infrastructure when log_tail reveals stageout failure.
     # Shell exit code 1 from stageout RuntimeError doesn't match any CMSSW code

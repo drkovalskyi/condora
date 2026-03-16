@@ -85,13 +85,19 @@ instances before enabling.
 - Add configuration control to enable tmpfs for gridpacks in UI.
 - We hardcoded some site restrictions. This needs to be revised and handled properly
 - **~~Add `periodic_remove` to submit files~~ (DONE)** — Zombie detection +
-  hard 48h cap replaces estimate-based `MaxWallTimeMinsRun` for proc/merge nodes.
-  Proc/merge: kill if running >30 min with <60s CPU (zombie) or running >48h
-  (hard cap). Landing/cleanup: keep fixed MaxWallTimeMinsRun (30/60 min).
+  hard 48h cap in periodic_remove for proc/merge nodes.
+  `MaxWallTimeMinsRun` removed from proc/merge — replaced by in-job CPU
+  watchdog (background process in condora_proc.sh that samples child CPU
+  every 5 min, kills if <60s CPU in 30 min window after 30 min grace).
+  Landing/cleanup: keep fixed MaxWallTimeMinsRun (30/60 min).
   POST classifier recognizes periodic_remove kills (zombie → infrastructure,
-  hard cap → permanent; both non-retryable via UNLESS_EXIT 42).
+  hard cap → permanent; both non-retryable via UNLESS_EXIT 42) and
+  watchdog kills ("WATCHDOG: CPU stalled" in stderr → infrastructure,
+  retryable with cooloff).
   Configurable via `zombie_detect_running_sec`, `zombie_detect_cpu_threshold_sec`,
-  `hard_wall_time_limit_sec` in Settings.
+  `hard_wall_time_limit_sec`, `watchdog_check_interval_sec`,
+  `watchdog_stall_threshold_sec`, `watchdog_stall_window_sec`,
+  `watchdog_grace_period_sec` in Settings.
 
 ## Security (future)
 

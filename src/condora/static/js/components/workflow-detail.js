@@ -221,8 +221,8 @@ document.addEventListener('alpine:init', () => {
                     }
                     // Fall back to top-level adaptive_params (latest optimization
                     // result, applies to the next round after the last completed).
-                    if (!ap && sm.adaptive_params) {
-                        ap = sm.adaptive_params;
+                    if (!ap && sm?.adaptive_params) {
+                        ap = sm?.adaptive_params;
                     }
                     if (ap) {
                         memUsed = ap.tuned_memory_mb || origMem;
@@ -258,8 +258,8 @@ document.addEventListener('alpine:init', () => {
                 // Try per-round adaptive_params first, then top-level for the
                 // most recently completed round
                 let roundAp = rd?.adaptive_params;
-                if (!roundAp && sm.adaptive_params && roundNum === (sm.rounds_completed || 0) - 1) {
-                    roundAp = sm.adaptive_params;
+                if (!roundAp && sm?.adaptive_params && roundNum === (sm.rounds_completed || 0) - 1) {
+                    roundAp = sm?.adaptive_params;
                 }
                 const mSummary = roundAp?.metrics_summary;
 
@@ -303,8 +303,8 @@ document.addEventListener('alpine:init', () => {
         /** Latest adaptive optimization result summary. */
         get adaptiveInfo() {
             const sm = this.workflow?.step_metrics;
-            if (!sm || !sm.adaptive_params) return null;
-            const ap = sm.adaptive_params;
+            if (!sm || !sm?.adaptive_params) return null;
+            const ap = sm?.adaptive_params;
             const cd = this.workflow.config_data || {};
             const summary = ap.metrics_summary || {};
             return {

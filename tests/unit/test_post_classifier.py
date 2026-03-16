@@ -384,3 +384,31 @@ class TestCollectorWritesPostJson:
         data = json.loads((tmp_path / "proc_000001.post.json").read_text())
         assert data["classification"]["category"] == "permanent"
         assert data["classification"]["retryable"] is False
+
+
+# ── Watchdog Classification Tests ────────────────────────────
+
+
+class TestClassifyWatchdog:
+    def test_watchdog_stall_classified_as_infrastructure(self):
+        """CPU watchdog kill should be classified as infrastructure."""
+        result = classify_error(
+            0, 1,
+            log_tail="WATCHDOG: CPU stalled — 0s CPU in last 30 min (threshold: 60s)",
+        )
+        assert result["category"] == "infrastructure"
+        assert result["retryable"] is True
+        assert result["action"] == "retry_with_cooloff"
+
+    def test_watchdog_takes_precedence_over_stageout(self):
+        """Watchdog detection should override stageout pattern matching."""
+        result = classify_error(
+            0, 1,
+            log_tail="WATCHDOG: CPU stalled — 0s CPU in last 30 min\nxrdcp failed",
+        )
+        assert result["category"] == "infrastructure"
+
+    def test_no_watchdog_without_marker(self):
+        """Without WATCHDOG marker, classification is default transient."""
+        result = classify_error(0, 1, log_tail="some random error")
+        assert result["category"] == "transient"

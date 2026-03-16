@@ -138,7 +138,7 @@ class Settings(BaseSettings):
 
     # Pilot (round 0) — controls round 0 behavior
     # pilot_fraction: fraction of events_per_job for round 0 (0 = skip pilot, round 0 is normal)
-    pilot_fraction: float = 0.01
+    pilot_fraction: float = 0.1
     # pilot_throwaway: discard round 0 output after metrics extraction (events not counted)
     pilot_throwaway: bool = False
     # Legacy pilot runner settings (used by submit_pilot / _compute_pilot_config)
@@ -192,6 +192,12 @@ class Settings(BaseSettings):
     idle_timeout_high_sec: int = 14400       # 4h for high-priority jobs
     idle_timeout_normal_sec: int = 43200     # 12h for normal-priority jobs
     idle_timeout_low_sec: int = 172800       # 48h for low-priority jobs
+
+    # In-job CPU watchdog (proc nodes only — kills stuck jobs)
+    watchdog_check_interval_sec: int = 300    # CPU sampling interval (5 min)
+    watchdog_stall_threshold_sec: int = 60    # min CPU increase required per window
+    watchdog_stall_window_sec: int = 1800     # sliding window for CPU check (30 min)
+    watchdog_grace_period_sec: int = 1800     # initial grace before checking (30 min)
 
     # Adaptive execution
     default_memory_per_core: int = 2000    # MB, floor for request_memory

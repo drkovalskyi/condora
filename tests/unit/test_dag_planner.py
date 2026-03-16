@@ -9,7 +9,7 @@ import pytest
 
 from condora.adapters.mock import MockCondorAdapter, MockDBSAdapter, MockRucioAdapter
 from condora.config import Settings
-from condora.core.dag_planner import DAGPlanner
+from condora.core.dag_planner import DAGPlanner, _compute_max_wall_time_mins
 
 
 def _make_settings(tmp_path, **overrides):
@@ -535,3 +535,50 @@ class TestFirstRoundWorkUnits:
         node_counts = create_dag_call.kwargs.get("node_counts", {})
         # Default first_round_work_units=1 × jobs_per_work_unit=8 = 8 jobs
         assert node_counts["processing"] == 8
+
+
+# ── _compute_max_wall_time_mins tests ────────────────────────────
+
+
+class TestComputeMaxWallTimeMins:
+    """Verify proc/merge always return 0, landing/cleanup return fixed values."""
+
+    def test_proc_returns_zero(self):
+        settings = Settings(
+            database_url="postgresql+asyncpg://x:x@localhost/x",
+        )
+        assert _compute_max_wall_time_mins("proc", {}, settings) == 0
+
+    def test_merge_returns_zero(self):
+        settings = Settings(
+            database_url="postgresql+asyncpg://x:x@localhost/x",
+        )
+        assert _compute_max_wall_time_mins("merge", {}, settings) == 0
+
+    def test_proc_returns_zero_even_with_measured_data(self):
+        """Measured wall data should NOT produce a non-zero wall time for proc."""
+        settings = Settings(
+            database_url="postgresql+asyncpg://x:x@localhost/x",
+        )
+        rp = {"measured_wall_per_event_sec": 10.0, "events_per_job": 6000}
+        assert _compute_max_wall_time_mins("proc", rp, settings) == 0
+
+    def test_landing_returns_setting(self):
+        settings = Settings(
+            database_url="postgresql+asyncpg://x:x@localhost/x",
+            landing_wall_time_mins=45,
+        )
+        assert _compute_max_wall_time_mins("landing", {}, settings) == 45
+
+    def test_cleanup_returns_setting(self):
+        settings = Settings(
+            database_url="postgresql+asyncpg://x:x@localhost/x",
+            cleanup_wall_time_mins=90,
+        )
+        assert _compute_max_wall_time_mins("cleanup", {}, settings) == 90
+
+    def test_no_settings_defaults(self):
+        assert _compute_max_wall_time_mins("landing") == 30
+        assert _compute_max_wall_time_mins("cleanup") == 60
+        assert _compute_max_wall_time_mins("proc") == 0
+        assert _compute_max_wall_time_mins("merge") == 0

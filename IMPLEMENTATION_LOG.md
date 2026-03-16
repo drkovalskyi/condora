@@ -2,6 +2,43 @@
 
 <!-- Entries are in reverse chronological order (newest first). -->
 
+## Replace MaxWallTimeMinsRun with In-Job CPU Watchdog (2026-03-16)
+
+**What**: Removed estimate-based `MaxWallTimeMinsRun` from proc/merge nodes.
+Replaced with an in-job CPU watchdog that detects stuck jobs by monitoring
+actual CPU consumption. Root cause: request 00060 had all 200 proc jobs killed
+by `MaxWallTimeMinsRun` after 120 min because `events_per_job` in resource_params
+wasn't updated after adaptive tuning (3000 → 6000).
+
+**Changes**:
+- `config.py` — Added `watchdog_check_interval_sec` (300), `watchdog_stall_threshold_sec`
+  (60), `watchdog_stall_window_sec` (1800), `watchdog_grace_period_sec` (1800).
+- `dag_planner.py` — `_compute_max_wall_time_mins()`: proc/merge always return 0
+  (removed measured-data path). `_write_submit_file()`: proc/merge no longer emit
+  `+MaxWallTimeMinsRun` or the associated periodic_remove clause. Zombie detection
+  + 48h hard cap remain. `_write_proc_script()`: embedded `_watchdog` bash function
+  with configurable constants; started in `run_cmssw_mode()` after the memory monitor.
+  Removed `measured_wall_per_event_sec` plumbing from adaptive params.
+- `post_classifier.py` — Both module-level `classify_error()` and embedded collector
+  script detect `WATCHDOG: CPU stalled` in job stderr → classified as `infrastructure`
+  (retryable with cooloff).
+- `docs/spec.md` — Section 6.1: added CPU watchdog to Level 1 recovery. Section 6.4:
+  added watchdog classification note. Submit file example: replaced MaxWallTimeMins
+  with comment about watchdog + periodic_remove.
+- `PLANNING.md` — Updated periodic_remove DONE entry.
+
+**Design decisions**:
+- Watchdog uses `ps -o cputimes= --ppid $$` to sample cumulative CPU of all child
+  processes. Threshold is 60s CPU per 30-min window — 50× lower than the slowest
+  observed step (NanoAOD at 25% CPU efficiency on 4 cores = 60s/min).
+- Grace period covers sandbox extraction, CMSSW setup, gridpack extraction.
+- `kill 0` kills the entire process group. Exit code is non-zero, retryable by
+  DAGMan RETRY. POST classifier treats as infrastructure (machine-specific).
+- Landing/cleanup keep fixed MaxWallTimeMinsRun (30/60 min) — no CMSSW CPU to monitor.
+
+**Verification**: 481 unit tests pass (including 10 new tests for watchdog, wall time,
+and post classification).
+
 ## DAG Structure Scalability — Orphan Cleanup + WU Cap (2026-03-15)
 
 **What**: Operational fixes for SUBDAG EXTERNAL scalability at high WU counts.

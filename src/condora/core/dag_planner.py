@@ -410,6 +410,7 @@ class DAGPlanner:
                 if tuned_epj and tuned_epj > 0:
                     params = workflow.splitting_params or {}
                     params["events_per_job"] = tuned_epj
+                    resource_params["events_per_job"] = int(tuned_epj)
                 multiplier = adaptive_params.get("job_multiplier", 1)
                 if multiplier > 1:
                     resource_params["_jobs_per_wu_override"] = (
@@ -420,13 +421,6 @@ class DAGPlanner:
                 per_step = adaptive_params.get("per_step")
                 if isinstance(per_step, dict):
                     resource_params["_per_step_tuning"] = per_step
-
-                # Throughput optimization — pass measured wall data for MaxWallTimeMinsRun
-                tp_opt = adaptive_params.get("throughput_optimization")
-                if isinstance(tp_opt, dict):
-                    mwpe = tp_opt.get("measured_wall_per_event_sec")
-                    if mwpe and mwpe > 0:
-                        resource_params["measured_wall_per_event_sec"] = float(mwpe)
 
         # Plan merge groups (after resource_params is fully built)
         jobs_per_wu = resource_params.pop("_jobs_per_wu_override", None)
@@ -613,6 +607,9 @@ class DAGPlanner:
 
         # Resolve container image from settings + SCRAM_ARCH
         resolved_extra = dict(config.get("extra_classads") or {})
+        # Monitoring classads — queryable via condor_q for external dashboards
+        resolved_extra["CONDORA_RequestName"] = f'"{workflow.request_name}"'
+        resolved_extra["CONDORA_Round"] = str(current_round)
         sing_image = _resolve_singularity_image(
             self.settings.singularity_image, manifest_steps,
         )
@@ -1231,7 +1228,7 @@ def _generate_dag_files(
     _write_post_script(str(submit_path / "post_script.sh"))
     _write_wu_post_script(str(submit_path / "wu_post.sh"))
     _write_post_collector(str(submit_path / "condora_post_collect.py"))
-    _write_proc_script(str(submit_path / "condora_proc.sh"))
+    _write_proc_script(str(submit_path / "condora_proc.sh"), settings=settings)
     _write_merge_script(str(submit_path / "condora_merge.py"))
     _write_cleanup_script(str(submit_path / "condora_cleanup.py"))
     _write_stageout_utility(str(submit_path / "condora_stageout.py"))
@@ -1418,8 +1415,9 @@ def _compute_max_wall_time_mins(
 ) -> int:
     """Compute MaxWallTimeMinsRun for a given node type.
 
-    Proc and merge nodes return 0 (no estimate-based wall time limit).
-    Zombie detection and a hard 48h cap in periodic_remove handle these.
+    Proc and merge nodes always return 0 — stuck job detection is handled by
+    the in-job CPU watchdog (proc) and periodic_remove zombie detection +
+    hard 48h cap (proc/merge).
     Landing: fixed (default 30 min).
     Cleanup: fixed (default 60 min).
     """
@@ -1429,17 +1427,9 @@ def _compute_max_wall_time_mins(
     if node_type == "cleanup":
         return settings.cleanup_wall_time_mins if settings else 60
 
-    # Proc and merge: use measured throughput data if available (1.5× safety),
-    # otherwise return 0 (zombie detection + hard cap handle enforcement).
-    if resource_params and node_type in ("proc", "merge"):
-        measured_wpe = resource_params.get("measured_wall_per_event_sec", 0)
-        epj = resource_params.get("events_per_job", 0)
-        if measured_wpe > 0 and epj > 0:
-            startup_overhead = 600  # 10 min startup
-            wall_sec = measured_wpe * epj + startup_overhead
-            # 1.5× safety factor (vs 3× for spec estimates) — measured data
-            # is accurate, margin covers site-to-site variation
-            return max(120, int(wall_sec * 1.5 / 60) + 1)
+    # Proc and merge: no estimate-based wall time limit.
+    # In-job CPU watchdog detects stuck procs; zombie detection + hard 48h
+    # cap in periodic_remove handle the rest.
     return 0
 
 
@@ -1479,6 +1469,9 @@ def _generate_group_dag(
     #   - per-group files are referenced directly (landing.sub)
     #   - shared scripts/executables use ../ prefix
     mg_name = group_dir.name  # e.g. "mg_000000"
+    # Add CONDORA_WU classad for external monitoring (per-WU identity)
+    extra_classads = dict(extra_classads or {})
+    extra_classads["CONDORA_WU"] = f'"{mg_name}"'
     if spool_mode:
         # File prefix for per-group files in the DAG
         fp = f"{mg_name}/"
@@ -2105,25 +2098,11 @@ def _write_submit_file(
     # For landing/cleanup nodes: fixed MaxWallTimeMinsRun (no CMSSW, no CPU to
     # detect zombies — landing is /bin/true, cleanup is lightweight I/O).
     if node_type in ("proc", "merge"):
-        # When measured throughput data is available, set MaxWallTimeMinsRun
-        # with 1.5× safety factor for tighter enforcement than the hard cap.
-        if max_wall_time_mins_run > 0:
-            lines.append(f"+MaxWallTimeMinsRun = {max_wall_time_mins_run}")
-            wall_check = (
-                "(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) "
-                "&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus) || "
-            )
-            wall_reason = (
-                'ifThenElse(JobStatus == 2 && !isUndefined(MaxWallTimeMinsRun) '
-                '&& MaxWallTimeMinsRun*60 < time() - EnteredCurrentStatus, '
-                'strcat("measured wall time exceeded (", MaxWallTimeMinsRun, " min limit)"), '
-            )
-        else:
-            wall_check = ""
-            wall_reason = ""
+        # Proc/merge: no MaxWallTimeMinsRun — stuck detection is handled by
+        # in-job CPU watchdog (proc) and periodic_remove zombie detection +
+        # hard 48h cap.
         lines.append(
             "periodic_remove = "
-            f"{wall_check}"
             f"(JobStatus == 2 && time() - EnteredCurrentStatus > {zombie_running_sec} "
             f"&& RemoteUserCpu + RemoteSysCpu < {zombie_cpu_sec}) || "
             f"(JobStatus == 2 && time() - EnteredCurrentStatus > {hard_wall_limit_sec}) || "
@@ -2134,7 +2113,6 @@ def _write_submit_file(
         hard_wall_hours = hard_wall_limit_sec // 3600
         lines.append(
             '+PeriodicRemoveReason = strcat("Condora: ", '
-            f'{wall_reason}'
             f'ifThenElse(JobStatus == 2 && time() - EnteredCurrentStatus > {zombie_running_sec} '
             f'&& RemoteUserCpu + RemoteSysCpu < {zombie_cpu_sec}, '
             'strcat("zombie detected (running ", '
@@ -2147,7 +2125,6 @@ def _write_submit_file(
             f'ifThenElse(JobStatus == 1, '
             f'strcat("idle for ", int((time() - EnteredCurrentStatus)/3600), " hours"), '
             f'"disk usage exceeded ({disk_limit_kb} KB limit)")))))'
-            f'{")" if max_wall_time_mins_run > 0 else ""}'
         )
     else:
         # Landing/cleanup: fixed wall time via MaxWallTimeMinsRun
@@ -2598,17 +2575,24 @@ def _write_post_collector(path: str) -> None:
     os.chmod(path, 0o755)
 
 
-def _write_proc_script(path: str) -> None:
+def _write_proc_script(path: str, settings: Settings | None = None) -> None:
     """Generate a processing wrapper that supports CMSSW, synthetic, and pilot modes.
 
     Extracts sandbox, reads manifest.json, and dispatches to the appropriate mode.
     CMSSW mode handles per-step CMSSW/ScramArch with apptainer container support
     for cross-OS execution (e.g. el8 CMSSW on el9 host).
+
+    Includes an in-job CPU watchdog that kills stuck jobs (no CPU progress).
     """
     # Embed the venv Python path for simulator mode (needs numpy/uproot).
     # At planning time sys.executable is the venv Python; at execution time
     # the HTCondor job may only have system Python (no numpy/uproot).
     _venv_python = sys.executable
+    # Watchdog settings — embedded as constants in the script
+    wd_check = settings.watchdog_check_interval_sec if settings else 300
+    wd_stall = settings.watchdog_stall_threshold_sec if settings else 60
+    wd_window = settings.watchdog_stall_window_sec if settings else 1800
+    wd_grace = settings.watchdog_grace_period_sec if settings else 1800
     _script = r'''#!/bin/bash
 # condora_proc.sh — Condora processing job wrapper
 # Supports CMSSW mode (per-step cmsRun with apptainer), synthetic mode
@@ -2695,6 +2679,53 @@ if [[ -f manifest.json ]]; then
 else
     echo "No manifest.json found — defaulting to synthetic mode"
 fi
+
+# ── CPU watchdog — kill job if CPU stalls ─────────────────────
+# Background process that periodically samples cumulative CPU time of all
+# child processes.  If CPU does not increase by at least STALL_THRESHOLD
+# seconds over a STALL_WINDOW window, the job is stuck (dead glidein,
+# CVMFS stall, I/O deadlock, cmsRun hang).  Kills entire process group
+# so DAGMan RETRY can resend to a different machine.
+WATCHDOG_CHECK_INTERVAL=__WATCHDOG_CHECK_INTERVAL__
+WATCHDOG_STALL_THRESHOLD=__WATCHDOG_STALL_THRESHOLD__
+WATCHDOG_STALL_WINDOW=__WATCHDOG_STALL_WINDOW__
+WATCHDOG_GRACE_PERIOD=__WATCHDOG_GRACE_PERIOD__
+
+_watchdog() {
+    sleep "$WATCHDOG_GRACE_PERIOD"
+    local -a cpu_history=()
+    local -a time_history=()
+    while true; do
+        # Sample cumulative CPU (user+sys) for all child processes
+        local cpu_now
+        cpu_now=$(ps -o cputimes= --ppid $$ 2>/dev/null | awk '{s+=$1}END{print int(s)}')
+        cpu_now=${cpu_now:-0}
+        local time_now
+        time_now=$(date +%s)
+        cpu_history+=("$cpu_now")
+        time_history+=("$time_now")
+        # Find oldest sample within the window
+        local oldest_idx=0
+        while (( oldest_idx < ${#time_history[@]} - 1 )) && \
+              (( time_now - time_history[oldest_idx] > WATCHDOG_STALL_WINDOW )); do
+            ((oldest_idx++))
+        done
+        # Check if we have enough history (approximately one window)
+        if (( time_now - time_history[oldest_idx] >= WATCHDOG_STALL_WINDOW - WATCHDOG_CHECK_INTERVAL )); then
+            local cpu_delta=$(( cpu_now - cpu_history[oldest_idx] ))
+            if (( cpu_delta < WATCHDOG_STALL_THRESHOLD )); then
+                local window_min=$(( (time_now - time_history[oldest_idx]) / 60 ))
+                echo "WATCHDOG: CPU stalled — ${cpu_delta}s CPU in last ${window_min} min (threshold: ${WATCHDOG_STALL_THRESHOLD}s)" >&2
+                kill 0
+                exit 1
+            fi
+        fi
+        # Trim old history
+        cpu_history=("${cpu_history[@]:$oldest_idx}")
+        time_history=("${time_history[@]:$oldest_idx}")
+        sleep "$WATCHDOG_CHECK_INTERVAL"
+    done
+}
 
 # ── Helper: convert LFN to xrootd URL ────────────────────────
 lfn_to_xrootd() {
@@ -3587,6 +3618,12 @@ run_cmssw_mode() {
     MEMMON_PID=$!
     echo "Memory monitor started (pid $MEMMON_PID, log: memory_monitor.log)"
 
+    # Start CPU watchdog — kills job if CPU stalls (dead glidein, CVMFS hang, etc.)
+    _watchdog &
+    WATCHDOG_PID=$!
+    trap "kill $WATCHDOG_PID 2>/dev/null; kill $MEMMON_PID 2>/dev/null; true" EXIT
+    echo "CPU watchdog started (pid $WATCHDOG_PID, grace=${WATCHDOG_GRACE_PERIOD}s, window=${WATCHDOG_STALL_WINDOW}s)"
+
     GRIDPACK_DISK_MB=0
     for step_idx in $(seq 0 $((NUM_STEPS - 1))); do
         step_num=$((step_idx + 1))
@@ -3923,6 +3960,12 @@ print(total)
     done
 
     fi  # end of sequential (non-pipeline) mode
+
+    # Stop CPU watchdog
+    if [[ -n "${WATCHDOG_PID:-}" ]]; then
+        kill "$WATCHDOG_PID" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+    fi
 
     # Stop memory monitor
     if [[ -n "${MEMMON_PID:-}" ]]; then
@@ -4459,7 +4502,12 @@ else
     exit 1
 fi
 '''
-    _write_file(path, _script.replace("__VENV_PYTHON__", _venv_python))
+    _script = _script.replace("__VENV_PYTHON__", _venv_python)
+    _script = _script.replace("__WATCHDOG_CHECK_INTERVAL__", str(wd_check))
+    _script = _script.replace("__WATCHDOG_STALL_THRESHOLD__", str(wd_stall))
+    _script = _script.replace("__WATCHDOG_STALL_WINDOW__", str(wd_window))
+    _script = _script.replace("__WATCHDOG_GRACE_PERIOD__", str(wd_grace))
+    _write_file(path, _script)
     os.chmod(path, 0o755)
 
 

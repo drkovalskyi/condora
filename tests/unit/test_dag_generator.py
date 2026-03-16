@@ -456,6 +456,41 @@ class TestProcessingWrapper:
         assert 'OUTPUT_INFO=""' in content
         assert "--output-info)" in content
 
+    def test_proc_script_has_watchdog(self, tmp_path):
+        """Processing wrapper has CPU watchdog function."""
+        content = self._get_proc_content(tmp_path)
+        assert "_watchdog()" in content
+        assert "WATCHDOG_PID" in content
+        assert "WATCHDOG: CPU stalled" in content
+        assert "WATCHDOG_CHECK_INTERVAL=" in content
+        assert "WATCHDOG_GRACE_PERIOD=" in content
+
+    def test_no_max_wall_time_on_proc_submit(self, tmp_path):
+        """Proc submit files should not have MaxWallTimeMinsRun."""
+        groups = _make_merge_groups(1, 1)
+        _generate_dag_files(
+            submit_dir=str(tmp_path),
+            workflow_id="test-wf-001",
+            merge_groups=groups,
+            sandbox_url="https://example.com/sandbox.tar.gz",
+            category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
+        )
+        proc_sub = (tmp_path / "mg_000000" / "proc_000000.sub").read_text()
+        assert "MaxWallTimeMinsRun" not in proc_sub
+
+    def test_no_max_wall_time_on_merge_submit(self, tmp_path):
+        """Merge submit files should not have MaxWallTimeMinsRun."""
+        groups = _make_merge_groups(1, 1)
+        _generate_dag_files(
+            submit_dir=str(tmp_path),
+            workflow_id="test-wf-001",
+            merge_groups=groups,
+            sandbox_url="https://example.com/sandbox.tar.gz",
+            category_throttles={"Processing": 5000, "Merge": 100, "Cleanup": 50},
+        )
+        merge_sub = (tmp_path / "mg_000000" / "merge.sub").read_text()
+        assert "MaxWallTimeMinsRun" not in merge_sub
+
 
 class TestMergeWrapper:
     """Tests for the merge wrapper script content."""
