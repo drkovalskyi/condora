@@ -87,8 +87,10 @@ instances before enabling.
 - **~~Add `periodic_remove` to submit files~~ (DONE)** — Zombie detection +
   hard 48h cap in periodic_remove for proc/merge nodes.
   `MaxWallTimeMinsRun` removed from proc/merge — replaced by in-job CPU
-  watchdog (background process in condora_proc.sh that samples child CPU
-  every 5 min, kills if <60s CPU in 30 min window after 30 min grace).
+  watchdog (background process in condora_proc.sh that samples cgroup v2
+  cpu.stat every 5 min, kills if <60s CPU in 30 min window after 30 min
+  grace). Uses cgroup CPU accounting to cover all descendants including
+  cmsRun inside apptainer containers; falls back to recursive ps.
   Landing/cleanup: keep fixed MaxWallTimeMinsRun (30/60 min).
   POST classifier recognizes periodic_remove kills (zombie → infrastructure,
   hard cap → permanent; both non-retryable via UNLESS_EXIT 42) and

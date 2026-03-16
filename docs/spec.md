@@ -1715,6 +1715,7 @@ request_memory = {node.estimated_memory_mb}
 request_disk = {node.estimated_disk_kb}
 request_cpus = {node.cores}
 # No MaxWallTimeMinsRun for proc/merge — stuck detection via in-job CPU watchdog
+# (cgroup cpu.stat for full descendant tree including containers)
 # + periodic_remove zombie detection (30 min / 60s CPU) + hard 48h cap
 
 +DESIRED_Sites = "{','.join(node.possible_sites)}"
@@ -2712,7 +2713,7 @@ The multi-round lifecycle means every workflow benefits from measured data for t
 - POST script classifies errors (transient / permanent / data / infrastructure)
 - POST script writes `{node_name}.post.json` side files for Level 2 consumption
 - Implements cool-off delays, parameter adjustment (e.g., memory increase), and retry/stop decisions
-- In-job CPU watchdog: background process in the proc wrapper monitors cumulative CPU of all child processes every 5 min; if CPU does not advance by at least 60 seconds in a 30-min sliding window (after an initial 30-min grace period), the job is killed. Covers dead glideins, CVMFS stalls, I/O deadlocks, and cmsRun hangs without relying on wall-time estimates. Classified as infrastructure (retryable — DAGMan RETRY may land on a different machine).
+- In-job CPU watchdog: background process in the proc wrapper monitors cumulative CPU every 5 min; if CPU does not advance by at least 60 seconds in a 30-min sliding window (after an initial 30-min grace period), the job is killed. Uses cgroup v2 `cpu.stat` (`usage_usec`) for CPU measurement — this covers all descendant processes including cmsRun running inside apptainer/cmssw-env containers. Falls back to recursive process-tree `ps` if cgroup accounting is unavailable. Covers dead glideins, CVMFS stalls, I/O deadlocks, and cmsRun hangs without relying on wall-time estimates. Classified as infrastructure (retryable — DAGMan RETRY may land on a different machine).
 - Machine avoidance: on transient failures, POST script records the failed machine hostname; the PRE script (`pin_site.sh`) adds `Machine != "hostname"` exclusions to Requirements on retry
 - `UNLESS-EXIT` code stops retries for permanent failures; `ABORT-DAG-ON` kills the entire DAG for catastrophic errors
 - Lives in the sandbox, can be iterated independently

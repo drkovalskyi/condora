@@ -2,6 +2,22 @@
 
 <!-- Entries are in reverse chronological order (newest first). -->
 
+## Fix Watchdog CPU Sampling — Use Cgroup Instead of Direct Children (2026-03-16)
+
+**What**: Watchdog killed 197/200 healthy proc jobs (false positives) because
+`ps -o cputimes= --ppid $$` only sees direct child CPU. cmsRun runs inside
+apptainer (cmssw-env container), making it a grandchild+ invisible to `--ppid`.
+
+**Fix**: Read cgroup v2 `cpu.stat` (`usage_usec`) which covers all processes in
+the cgroup — including cmsRun inside containers. Fallback: recursive process-tree
+walk via `ps` (discovers all descendants, not just direct children).
+
+Also fixed: EXIT trap `; true` to prevent `kill` of already-dead watchdog/memmon
+PIDs from setting script exit code to 1 under `set -e`.
+
+**Files**: `src/condora/core/dag_planner.py` (watchdog function in proc script),
+`docs/spec.md`, `PLANNING.md`.
+
 ## Replace MaxWallTimeMinsRun with In-Job CPU Watchdog (2026-03-16)
 
 **What**: Removed estimate-based `MaxWallTimeMinsRun` from proc/merge nodes.

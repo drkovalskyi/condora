@@ -2681,24 +2681,72 @@ else
 fi
 
 # ── CPU watchdog — kill job if CPU stalls ─────────────────────
-# Background process that periodically samples cumulative CPU time of all
-# child processes.  If CPU does not increase by at least STALL_THRESHOLD
-# seconds over a STALL_WINDOW window, the job is stuck (dead glidein,
-# CVMFS stall, I/O deadlock, cmsRun hang).  Kills entire process group
-# so DAGMan RETRY can resend to a different machine.
+# Background process that periodically samples cumulative CPU time for the
+# entire cgroup (all descendants including container processes).  If CPU
+# does not increase by at least STALL_THRESHOLD seconds over a STALL_WINDOW
+# window, the job is stuck (dead glidein, CVMFS stall, I/O deadlock,
+# cmsRun hang).  Kills entire process group so DAGMan RETRY can resend to
+# a different machine.
+#
+# Uses cgroup v2 cpu.stat (usage_usec) which covers all processes in the
+# cgroup — including cmsRun running inside apptainer/cmssw-env containers.
+# Falls back to recursive ps if cgroup CPU accounting is unavailable.
 WATCHDOG_CHECK_INTERVAL=__WATCHDOG_CHECK_INTERVAL__
 WATCHDOG_STALL_THRESHOLD=__WATCHDOG_STALL_THRESHOLD__
 WATCHDOG_STALL_WINDOW=__WATCHDOG_STALL_WINDOW__
 WATCHDOG_GRACE_PERIOD=__WATCHDOG_GRACE_PERIOD__
+
+# Locate cgroup v2 cpu.stat for this job
+_watchdog_cpu_stat=""
+_wd_cg_path=$(cat /proc/self/cgroup 2>/dev/null | sed 's/^0:://')
+if [[ -n "$_wd_cg_path" ]]; then
+    _wd_candidate="/sys/fs/cgroup${_wd_cg_path}/cpu.stat"
+    [[ -r "$_wd_candidate" ]] && _watchdog_cpu_stat="$_wd_candidate"
+fi
+if [[ -z "$_watchdog_cpu_stat" && -r /sys/fs/cgroup/cpu.stat ]]; then
+    _watchdog_cpu_stat="/sys/fs/cgroup/cpu.stat"
+fi
+
+_watchdog_read_cpu() {
+    # Read cumulative CPU in seconds from cgroup v2 cpu.stat (usage_usec)
+    if [[ -n "$_watchdog_cpu_stat" && -r "$_watchdog_cpu_stat" ]]; then
+        awk '/^usage_usec/ {printf "%d", $2/1000000}' "$_watchdog_cpu_stat" 2>/dev/null
+        return
+    fi
+    # Fallback: recursive ps — sum CPU of all descendant processes
+    # (handles apptainer/container nesting)
+    local pids
+    pids=$(ps -e -o pid=,ppid= 2>/dev/null | awk -v root=$$ '
+        BEGIN { children[root]=1 }
+        { parent[$1]=$2 }
+        END {
+            changed=1
+            while (changed) {
+                changed=0
+                for (p in parent) {
+                    if (!(p in children) && parent[p] in children) {
+                        children[p]=1; changed=1
+                    }
+                }
+            }
+            sep=""
+            for (p in children) { if (p != root) { printf "%s%s", sep, p; sep="," } }
+        }
+    ')
+    if [[ -n "$pids" ]]; then
+        ps -o cputimes= -p "$pids" 2>/dev/null | awk '{s+=$1}END{printf "%d", s}'
+    else
+        echo 0
+    fi
+}
 
 _watchdog() {
     sleep "$WATCHDOG_GRACE_PERIOD"
     local -a cpu_history=()
     local -a time_history=()
     while true; do
-        # Sample cumulative CPU (user+sys) for all child processes
         local cpu_now
-        cpu_now=$(ps -o cputimes= --ppid $$ 2>/dev/null | awk '{s+=$1}END{print int(s)}')
+        cpu_now=$(_watchdog_read_cpu)
         cpu_now=${cpu_now:-0}
         local time_now
         time_now=$(date +%s)
@@ -3622,7 +3670,7 @@ run_cmssw_mode() {
     _watchdog &
     WATCHDOG_PID=$!
     trap "kill $WATCHDOG_PID 2>/dev/null; kill $MEMMON_PID 2>/dev/null; true" EXIT
-    echo "CPU watchdog started (pid $WATCHDOG_PID, grace=${WATCHDOG_GRACE_PERIOD}s, window=${WATCHDOG_STALL_WINDOW}s)"
+    echo "CPU watchdog started (pid $WATCHDOG_PID, grace=${WATCHDOG_GRACE_PERIOD}s, window=${WATCHDOG_STALL_WINDOW}s, cpu_stat=${_watchdog_cpu_stat:-ps-fallback})"
 
     GRIDPACK_DISK_MB=0
     for step_idx in $(seq 0 $((NUM_STEPS - 1))); do
