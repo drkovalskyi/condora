@@ -3669,7 +3669,7 @@ run_cmssw_mode() {
     # Start CPU watchdog — kills job if CPU stalls (dead glidein, CVMFS hang, etc.)
     _watchdog &
     WATCHDOG_PID=$!
-    trap "kill $WATCHDOG_PID 2>/dev/null; kill $MEMMON_PID 2>/dev/null; true" EXIT
+    trap "kill $WATCHDOG_PID 2>/dev/null || true; kill $MEMMON_PID 2>/dev/null || true" EXIT
     echo "CPU watchdog started (pid $WATCHDOG_PID, grace=${WATCHDOG_GRACE_PERIOD}s, window=${WATCHDOG_STALL_WINDOW}s, cpu_stat=${_watchdog_cpu_stat:-ps-fallback})"
 
     GRIDPACK_DISK_MB=0
