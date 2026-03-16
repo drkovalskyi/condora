@@ -47,6 +47,37 @@ def _aggregate_round_metrics(existing_metrics, dag, round_number,
     return result
 
 
+def _update_round_wu_metrics(existing_metrics, dag, round_number):
+    """Incrementally update WU metrics for a round from dag.completed_work_units.
+
+    Called each time new WUs complete — keeps step_metrics.rounds[N].wu_metrics
+    current so the UI can show live efficiency/memory data without waiting for
+    round completion.  Does not touch cumulative counters (those are set by
+    _aggregate_round_metrics at round end).
+    """
+    wu_metrics_list = []
+    for item in (dag.completed_work_units or []):
+        if isinstance(item, dict) and item.get("metrics"):
+            wu_metrics_list.append(item["metrics"])
+    if not wu_metrics_list:
+        return existing_metrics
+
+    prior = existing_metrics or {}
+    result = {**prior}
+    rounds = dict(prior.get("rounds") or {})
+    rk = str(round_number)
+    existing_round = rounds.get(rk, {})
+    rounds[rk] = {
+        **existing_round,
+        "wu_metrics": wu_metrics_list,
+        "nodes_done": dag.nodes_done or 0,
+        "nodes_failed": dag.nodes_failed or 0,
+        "work_units": dag.total_work_units or 0,
+    }
+    result["rounds"] = rounds
+    return result
+
+
 def _count_events_from_disk(submit_dir, completed_wus):
     """Read output events from work_unit_metrics.json on disk.
 
@@ -1005,6 +1036,28 @@ class RequestLifecycleManager:
                     wf.id,
                     events_produced=(wf.events_produced or 0) + total_new_events,
                 )
+
+        # Incrementally update step_metrics.rounds[N].wu_metrics so the UI
+        # shows live efficiency/memory data as WUs complete (not just at
+        # round end).  Also ensures data is preserved for DAGs stopped early
+        # when the production target is reached during pipelined rounds.
+        if wf and dag_round is not None:
+            dag_obj_for_metrics = None
+            try:
+                dag_id = result.dag_id
+                if dag_id:
+                    from uuid import UUID
+                    dag_obj_for_metrics = await self.db.get_dag(
+                        UUID(dag_id) if isinstance(dag_id, str) else dag_id
+                    )
+            except Exception:
+                pass
+            if dag_obj_for_metrics:
+                updated_sm = _update_round_wu_metrics(
+                    wf.step_metrics, dag_obj_for_metrics, dag_round,
+                )
+                if updated_sm is not wf.step_metrics:
+                    await self.db.update_workflow(wf.id, step_metrics=updated_sm)
 
     async def _handle_single_dag_failure(self, request, workflow, dag):
         """Handle a single DAG that completed with failures."""
